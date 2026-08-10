@@ -77,6 +77,14 @@ backupkit prune --dry-run    # print the plan (keeps with reasons, then the prun
 
 `--dry-run` shows exactly which snapshots each rule claims and which would be deleted, so you can confirm a policy before it removes anything. Pruning runs under the snapshot store lock, and deletion is two-phase, so a prune interrupted midway never leaves a half-deleted snapshot in the archive.
 
+## The content-collapse tripwire
+
+Retention selects on names and counts, never on content - which means a source that suddenly presents a near-empty tree would promote near-empty snapshots, and retention would dutifully age out the snapshots holding the real data. That is how an archive gets destroyed from the source side without a single delete command.
+
+So when a promoted snapshot's file count collapses against the previous snapshot, **the automatic prune after that run is skipped**. The snapshot itself is still stored - the data has already crossed the wire, and discarding it would be the more destructive choice - but the archive only grows until a human looks. The run is logged at error level and the collapse is recorded on the run report, so it surfaces in `backupkit status` rather than sitting silent.
+
+`backupkit prune` never consults the tripwire. Once you have confirmed the shrink is real (you did delete half the source, the application moved its data directory), run it by hand and retention applies normally.
+
 ## Related
 
 - [Configuration Reference](/docs/configuration) - the `retention` field and its per-target override

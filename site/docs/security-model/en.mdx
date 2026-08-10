@@ -19,7 +19,15 @@ Backupkit moves data over ssh and writes it to an archive, so its security model
 
 ## Prefer pull so a compromised source cannot reach the archive
 
-The strongest control is architectural. In a **pull** target the backup server reaches out to the source and the source holds no credential to the archive, so a compromised source host cannot read, delete, or tamper with any snapshot. Pull is the default for this reason. **Push** exists for hosts that must initiate the connection themselves; because the source then holds a credential that reaches the archive, backupkit jails that credential (below). See [Push vs Pull Architecture](/docs/push-vs-pull) for the full comparison.
+The strongest control is architectural. In a **pull** target the backup server reaches out to the source and the source holds no credential to the archive, so a compromised source host cannot read, delete, or tamper with a stored snapshot. Pull is the default for this reason. **Push** exists for hosts that must initiate the connection themselves; because the source then holds a credential that reaches the archive, backupkit jails that credential (below). See [Push vs Pull Architecture](/docs/push-vs-pull) for the full comparison.
+
+### What the trust direction does not cover
+
+A compromised source still controls the one thing no jail can constrain: **the contents it presents**. It can hand over an empty or selectively-emptied tree, and because retention selects on names and counts rather than content, the empty snapshots would eventually push every snapshot holding real data out of the retention window. Deletion by attrition, without a single delete command.
+
+Backupkit trips a content-collapse guard for this. When a promoted snapshot's file count collapses against the previous snapshot, the snapshot is still stored (the data has already been transferred, and refusing it would lose it), but **retention is skipped for that run** and the event is logged at error level and recorded on the run report. The archive then only grows until a human decides. `backupkit prune` never consults the tripwire, so it is the operator's override once you have confirmed the shrink is real.
+
+This fails safe in one direction only, deliberately: a false trip costs disk, a missed trip is permanent.
 
 ## The no-hang, no-downgrade ssh baseline
 
@@ -27,11 +35,14 @@ Every ssh invocation carries a fixed option baseline that backupkit injects on t
 
 - `BatchMode=yes` - no ssh code path can ever block on an interactive prompt;
 - `ConnectTimeout=15`, `ServerAliveInterval=15`, `ServerAliveCountMax=4` - a dead link fails fast instead of hanging a run;
-- `StrictHostKeyChecking` - `yes` for any unattended run, `accept-new` only during an interactive `check` on a TTY. The value `no` is unrepresentable; a key mismatch is always fatal and is never retried at any layer.
+- `StrictHostKeyChecking` - `yes` for any unattended run, `accept-new` only during an interactive `check` on a TTY. The value `no` is unrepresentable; a key mismatch is always fatal and is never retried at any layer;
+- `ForwardAgent=no`, `ForwardX11=no`, `ForwardX11Trusted=no` - pinned because backupkit runs ssh with an agent socket in the environment, and that agent holds the archive key. A single `Host *` / `ForwardAgent yes` line in the operator's `ssh_config` - one of the most common entries there is - would otherwise forward that agent into whatever host backupkit dials, including a compromised pull source, where root can sign with the archive key. Pinning it on the command line beats the config file.
 
 This baseline is injected for both remote kinds, so even an alias remote whose `ssh_config` is lax still gets the strict, no-hang guarantees. For an explicit remote backupkit additionally pins the identity: `IdentitiesOnly=yes`, `PreferredAuthentications=publickey`, a dedicated `UserKnownHostsFile`, and the exact `-i <identityFile>` and `-p <port>` from your config. An alias remote gets only the baseline plus `LogLevel=ERROR`; its host, user, key, port, and known_hosts all come from `ssh_config`, which backupkit deliberately does not second-guess.
 
 ## The push jail: a forced command that validates the resolved path
+
+> **Upgrading an existing archive server:** `backupkit-remote` is a copy deployed out-of-band on each archive host, so it does not update when the npm package does. Re-copy it whenever you upgrade backupkit. The current script narrows `rm -rf` (below) and accepts the `--link-dest` form real rsync sends; an older copy on the server will reject every incremental push snapshot with a bare `backupkit-remote: rejected`. `backupkit check` verifies the connection, not the script version - compare the file itself.
 
 A push key is never a plain shell key. It is wired into `authorized_keys` behind the `backupkit-remote` forced command, and `backupkit check` generates the exact line from your loaded config and real key:
 
@@ -43,6 +54,12 @@ restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA
 
 - `rsync --server` transfers whose single path operand resolves under the jail root, with the symlink-following and command-executing rsync flags (`--copy-links`, `--keep-dirlinks`, `--rsync-path`, `--rsh`, batch replay, out-of-jail path options) rejected outright; and
 - the exact directory operations the snapshot store issues (`mkdir`, `find`, `mv`, `rm -rf`, `df`, and `rsync --version`), each with every path operand under the jail root and every leaf component matching a snapshot name, its `.partial`/`.deleting` form, `.backupkit.lock`, or a target-name-charset component.
+
+### `rm -rf` is narrower than every other verb
+
+`mkdir`, `mv`, `find` and `df` legitimately name a bare target directory or a completed snapshot, so their component policy has to permit both. **Deletion does not.** The snapshot store's own delete is two-phase - rename to `<snapshot>.deleting`, then remove that - so the only leaves a legitimate client ever removes are `<snapshot>.partial`, `<snapshot>.deleting`, and `.backupkit.lock`.
+
+The jail enforces exactly that: the final component of an `rm -rf` operand must be one of those three shapes. Without the distinction, `rm -rf -- /srv/backups/web` and `rm -rf` of the newest completed snapshot are both legal jail commands, and a compromised push client can erase a target's entire history in one line. The client-side "never delete the newest complete snapshot" guard does not help here, because an attacker holding the key does not go through the client.
 
 Everything else exits with a rejection. There is no `eval` anywhere in the script - validated operands are `exec`'d directly, so no shell ever re-parses attacker-controlled text.
 
@@ -73,7 +90,9 @@ Passphrases never appear in a config value, environment variable, argv, or log. 
 
 ## Harden the archive filesystem
 
-A backup archive holds files that came from another machine, so treat it as untrusted at rest. Backupkit already strips setuid/setgid bits from received trees and refuses device and special files unless a target opts in with `preserveDevices`. Reinforce that at the mount layer: mount the filesystem holding your destination roots with `nosuid` and `nodev` (and `nosymfollow` where your platform supports it), so even a future bug cannot leave an executable setuid file or a device node sitting in the archive.
+A backup archive holds files that came from another machine, so treat it as untrusted at rest. Backupkit strips setuid/setgid bits and refuses device and special files unless a target opts in with `preserveDevices` - **on both directions of the crossing, ingest and `restore`**. Restore matters as much as ingest and is easy to overlook: on a push target the client's `--chmod=ug-s` never reaches the server's argv, so the stripping is performed by the very machine the push model distrusts, and `restore` is where the archive's contents re-enter a trusted host. Restore also deliberately writes outside every archive root, which is exactly where the mount hardening below cannot reach it - so the flags have to be on the restore argv itself.
+
+Reinforce that at the mount layer anyway: mount the filesystem holding your destination roots with `nosuid` and `nodev` (and `nosymfollow` where your platform supports it), so even a future bug cannot leave an executable setuid file or a device node sitting in the archive. Restore to a path on a filesystem mounted the same way when you can.
 
 ## Related
 

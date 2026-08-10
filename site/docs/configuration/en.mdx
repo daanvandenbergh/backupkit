@@ -53,7 +53,7 @@ Backupkit owns the identity, key loading, and known_hosts.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `host` | string | required | Hostname or IP (IPv6 literals allowed) |
+| `host` | string | required | Hostname or IPv4 matching `/^[a-z0-9_][a-z0-9._-]*$/i`, or an **unbracketed** IPv6 literal (`::1`, `fe80::1%eth0`); max 253 |
 | `user` | string | required | SSH username, `/^[a-z_][a-z0-9._-]{0,31}$/i` |
 | `identityFile` | string | required | Absolute path to the private key (no whitespace or quotes) |
 | `port` | integer | `22` | SSH port, 1-65535 |
@@ -70,7 +70,9 @@ Backupkit owns the identity, key loading, and known_hosts.
 }
 ```
 
-The `passphrase` value is validated to be `"file:/..."` or exactly `"prompt"`; a raw passphrase or an `env:` form is rejected. See the [Security Model](/docs/security-model) for how each form is loaded.
+The `passphrase` value is validated to be `"file:/..."` or exactly `"prompt"`; a raw passphrase or an `env:` form is rejected. The path after `file:` gets the same treatment as every other path field - absolute, normalized, no `.`/`..` component, no whitespace or quote characters. See the [Security Model](/docs/security-model) for how each form is loaded.
+
+`host` carries a positive charset rather than a blocklist, for the same reason the alias charset does: a value containing `/` would make rsync read `user@host/x:/path` as a *local* path and silently write the archive to a relative directory, and a leading `-` or a control character would reach ssh's option parser or the operator's terminal. A pre-bracketed `[::1]` is rejected because the endpoint formatter adds the brackets itself.
 
 ### Alias remote
 
@@ -114,6 +116,8 @@ Each target is keyed by name; the key becomes the snapshot subdirectory and the 
 | `enabled` | boolean | `true` | `false` = configured but never scheduled |
 
 All path fields are absolute (`~` is rejected), contain no NUL or newline, and must not start with `-`. They must also carry no `.` or `..` component - write the resolved path. Every path is normalized on load (duplicate slashes collapsed, a trailing slash stripped), so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination. This matters for push targets: the destination is baked verbatim into the archive host's forced command as the jail root, and the jail compares it against each incoming path as a literal prefix, so a non-normal form would be rejected on every operation. `minFree` is `"N%"` (0-50) or an absolute binary size like `"10G"` / `"500M"`.
+
+A **push** `destination` additionally may not contain whitespace or quote characters. rsync backslash-escapes a space when it re-serializes its own `--server` argv, and the jail word-splits that argv, so a destination like `/Volumes/My Backups` validates, prints a plausible jail line, lets every lifecycle command through - and then has the actual data transfer rejected on every run. A pull destination is purely local and is unaffected.
 
 ### Schedules
 
