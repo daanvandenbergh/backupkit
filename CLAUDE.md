@@ -8,17 +8,41 @@ compromised source host cannot touch the backup archive).
 ## Directory Architecture
 
 ```
+assets/
+  logo/                             # The mark: bare SVG + dark and light app tiles
+claude/
+  scribekit-hero/readme/            # The README hero: brand settings, params, rendered hero.png
 src/
   index.ts                          # Package root entry (".")
 ```
 Each top-level `src/` folder is one module. Modules that are part of the public API are
 re-exported from `index.ts`; internal ones are deliberately not exported.
 
+## Commands
+`npm run typecheck` (`tsc --noEmit`) · `npm test` (vitest) · `npm run build` (emits `dist/`) ·
+`npm run test:watch`. **No linter, no formatter, no CI: typecheck and test are the only gates** -
+so a change is not done until both are green. Vitest collects `src/**/tests/**/*.test.ts` only.
+
+## Conventions
+- **Tests go in a `tests/` subdir next to the code**, NEVER alongside the source -
+  `src/<module>/tests/<thing>.test.ts`. (The imported `ts_modular_coding` rule shows a test at the
+  module root; this project overrides that, and `vitest.config.ts` only collects the subdir - a test
+  written beside its source silently never runs.)
+- **An architectural promise is kept by a red test, not by this document.** When a rule matters
+  (a module that must not reach the filesystem, a flag that must never be passed), write the test
+  that fails when it breaks, and name it here.
+- **Anything that shells out is a trust boundary.** A path, a host, or a remote spec that reaches an
+  `rsync`/`ssh` argument list is validated before it gets there, and arguments are passed as an
+  array - never interpolated into a shell string.
+- **Never run a real destructive operation to "test" it.** `rsync --delete` against a live tree, a
+  prune of real snapshots: those are exercised against a temp fixture dir, never a user's data.
+
 @node_modules/@daanvandenbergh/claudekit/rules/ts_coding_standards.md
 @node_modules/@daanvandenbergh/claudekit/rules/core_principles.md
 @node_modules/@daanvandenbergh/claudekit/rules/workflow.md
 @node_modules/@daanvandenbergh/claudekit/rules/todo.md
 @node_modules/@daanvandenbergh/claudekit/rules/ts_modular_coding.md
+@node_modules/@daanvandenbergh/claudekit/rules/active_sessions.md
 @node_modules/@daanvandenbergh/claudekit/skills/ts/audit-tests/claude-rules.md
 
 ## Git
@@ -32,5 +56,11 @@ re-exported from `index.ts`; internal ones are deliberately not exported.
   - **The message names the area and what shipped**, ending with the Co-Authored-By trailer.
   - **NEVER push** - the user pushes.
 
-## Maintained README.md
-When making changes to the library, ensure the README.md instructions for how to use the library are still up to date.
+## Releasing
+Bump `version` in `package.json` and `npm publish` (public scope; `prepublishOnly` builds). The
+user publishes and pushes - never do either unasked.
+
+## The public contract stays in lockstep
+`README.md` is this package's contract with its users. Any change to the API, the config shape, or
+the on-disk snapshot layout updates the README in the SAME change - a doc that lags the code is
+part of the definition of NOT done.
