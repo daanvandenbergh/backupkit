@@ -8,7 +8,7 @@
 
 import { exec } from "../../exec/exec.js";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -308,6 +308,27 @@ describe("Backupkit", () => {
         const report = await fixture.kit.prune();
         expect(report.targets[0].plan.prune).toEqual([]);
         expect(report.targets[0].executed).toBe(false);
+    });
+
+    // Invariant 8 says the permission gate runs before ANY network I/O, but it
+    // lived on run/start/restore/check only - listSnapshots and prune, the two
+    // verbs an operator reaches for to confirm the archive is healthy, opened ssh
+    // (and in prune's case issued `rm -rf`) with whatever key mode was on disk.
+    // A sibling-path gap, so this is a table over EVERY engine verb that does
+    // remote I/O: add a verb, add a row.
+    it.each([
+        ["listSnapshots", (kit: Backupkit) => kit.listSnapshots()],
+        ["prune", (kit: Backupkit) => kit.prune()],
+        ["prune --dry-run", (kit: Backupkit) => kit.prune({ dryRun: true })],
+        ["run", (kit: Backupkit) => kit.run({ force: true })],
+        ["restore", (kit: Backupkit) => kit.restore({ target: "web", snapshot: "latest", output: "/nonexistent/out" })],
+    ])("%s fails closed on a group-writable config, before any store access", async (_name, call) => {
+        const fixture = track(await makeKit());
+        await chmod(join(fixture.root, "config.jsonc"), 0o666);
+        await expect(call(fixture.kit)).rejects.toThrowError(/config file .* is group\/other-writable/);
+        // Nothing was spawned: the gate is genuinely upstream of the store, not a
+        // check that happens to run after the first ssh.
+        expect(fixture.execCalls).toEqual([]);
     });
 
     it("preflight: an all-alias config starts no agent and is idempotent", async () => {
@@ -842,6 +863,52 @@ describe("Backupkit", () => {
             expect(notice).toHaveLength(1);
             expect(notice[0]).toContain("is not writable");
             expect(notice[0]).toContain("file logging disabled for this process");
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
+    });
+
+    // The log sink appends as the daemon's uid - root, under the shipped unit.
+    // A local user who can plant a symlink at the log path would otherwise turn
+    // every log line into a root-privileged append to a file of their choosing,
+    // and the default 0666 & ~umask would leave config- and remote-derived text
+    // world-readable. O_NOFOLLOW makes the open fail (ELOOP) instead.
+    it("logging.file never follows a symlink and creates at 0600", async () => {
+        const root = await mkdtemp(join(tmpdir(), "backupkit-logsymlink-"));
+        try {
+            const configPath = join(root, "config.jsonc");
+            await writeFile(configPath, "{}\n", { mode: 0o600 });
+            const victim = join(root, "victim");
+            await writeFile(victim, "untouched\n", { mode: 0o600 });
+            const logPath = join(root, "backupkit.log");
+            await symlink(victim, logPath);
+
+            const config = makeConfig({ configPath, stateDir: join(root, "state"), targets: [makeTarget()] });
+            config.logging = { level: "info", file: logPath };
+            config.warnings = ["a config warning, logged from the constructor"];
+
+            const written: string[] = [];
+            const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+                written.push(String(chunk));
+                return true;
+            });
+            try {
+                new Backupkit(config, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
+            } finally {
+                spy.mockRestore();
+            }
+
+            // The symlink target is byte-identical: nothing was written through it.
+            expect(await readFile(victim, "utf8")).toBe("untouched\n");
+            expect(written.filter((line) => line.includes("logging.file"))).toHaveLength(1);
+
+            // And a real (non-symlink) log file is created 0600, not 0644.
+            const fresh = join(root, "fresh.log");
+            const freshConfig = makeConfig({ configPath, stateDir: join(root, "state"), targets: [makeTarget()] });
+            freshConfig.logging = { level: "info", file: fresh };
+            freshConfig.warnings = ["a config warning, logged from the constructor"];
+            new Backupkit(freshConfig, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
+            expect((await stat(fresh)).mode & 0o777).toBe(0o600);
         } finally {
             await rm(root, { recursive: true, force: true });
         }

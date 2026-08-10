@@ -7,7 +7,7 @@
  * methods.
  */
 
-import { appendFileSync } from "node:fs";
+import { closeSync, constants as fsConstants, openSync, writeSync } from "node:fs";
 import { lstat, readFile, realpath, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
@@ -87,15 +87,29 @@ export interface BackupkitDeps {
  * call site happened to log - including out of the scheduler's own error
  * handler, ending the daemon. On the first failure the sink reports once on
  * stderr (which journald/launchd still capture) and disables itself.
+ *
+ * The open is `O_NOFOLLOW` and creates at 0600. Without it the append follows a
+ * symlink at `path`, so a local user who can plant one in the log directory
+ * turns every log line into a root-privileged append to a file of their
+ * choosing (`/etc/sudoers.d/...`, an `authorized_keys`), and the default
+ * `0666 & ~umask` would leave config- and remote-derived text world-readable.
+ * `checkFilePermissions` refuses a group/other-writable log directory, which
+ * closes the intermediate-component half; this closes the final component,
+ * where ELOOP lands in the catch below and disables file logging loudly rather
+ * than writing through the link.
  */
 function fileSinkFor(path: string): (line: string) => void {
+    const appendNoFollow =
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_APPEND | fsConstants.O_NOFOLLOW;
     let live = true;
     return (line): void => {
         if (!live) {
             return;
         }
+        let fd: number | null = null;
         try {
-            appendFileSync(path, line + "\n");
+            fd = openSync(path, appendNoFollow, 0o600);
+            writeSync(fd, line + "\n");
         } catch (error) {
             live = false;
             // Written straight to stderr, not through the logger: routing this
@@ -105,6 +119,16 @@ function fileSinkFor(path: string): (line: string) => void {
                     error instanceof Error ? error.message : String(error),
                 )}) - file logging disabled for this process; stdout/stderr logging continues\n`,
             );
+        } finally {
+            // Every line opens and closes its own descriptor; without this a
+            // long-running daemon leaks one per log line until EMFILE.
+            if (fd !== null) {
+                try {
+                    closeSync(fd);
+                } catch {
+                    // A descriptor we cannot close is not worth failing a log write over.
+                }
+            }
         }
     };
 }
@@ -822,8 +846,18 @@ export class Backupkit {
         return rows;
     }
 
-    /** List complete snapshots, oldest first, per target in config order. */
+    /**
+     * List complete snapshots, oldest first, per target in config order.
+     *
+     * Preflights first: for a push target `listComplete()` is an ssh round-trip,
+     * and invariant 8 puts the permission gate before ANY network I/O. Without
+     * it this verb and `prune` were the two siblings that would happily open ssh
+     * with a world-readable private key and report success, so the operator's
+     * evidence that the archive is healthy came from precisely the paths that
+     * skipped the check.
+     */
     async listSnapshots(options: { targets?: string[] } = {}): Promise<SnapshotInfo[]> {
+        await this.preflight();
         const infos: SnapshotInfo[] = [];
         for (const target of this.selectTargets(options.targets)) {
             for (const name of await this.storeFor(target, "unattended").listComplete()) {
@@ -965,6 +999,10 @@ export class Backupkit {
      * the backlog once a human has confirmed the shrink is real.
      */
     async prune(options: { targets?: string[]; dryRun?: boolean } = {}): Promise<PruneReport> {
+        // Before any ssh: this verb DELETES, so invariant 8's "fail closed on
+        // permissive modes before any network I/O" matters here more than
+        // anywhere. See listSnapshots for the sibling-path history.
+        await this.preflight();
         const reports: TargetPruneReport[] = [];
         for (const target of this.selectTargets(options.targets)) {
             const store = this.storeFor(target, "unattended");
