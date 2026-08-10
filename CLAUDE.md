@@ -1,6 +1,9 @@
 # Project: Backupkit
 
-Backupkit is an npm typescript package for backing up projects and data.
+Backupkit is an npm typescript package for creating backups with `rsync`. It handles automated,
+versioned backups over SSH, in both directions: **push** (the source host sends its data to the
+backup server) and **pull** (the backup server reaches out and fetches from the source, so a
+compromised source host cannot touch the backup archive).
 
 ## Directory Architecture
 
