@@ -44,6 +44,7 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
 @node_modules/@daanvandenbergh/claudekit/rules/todo.md
 @node_modules/@daanvandenbergh/claudekit/rules/ts_modular_coding.md
 @node_modules/@daanvandenbergh/claudekit/rules/active_sessions.md
+@node_modules/@daanvandenbergh/claudekit/rules/audit_security_rules.md
 @node_modules/@daanvandenbergh/claudekit/skills/ts/audit-tests/claude-rules.md
 
 ## Git

@@ -25,7 +25,10 @@
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
         "prepublishOnly": "npm run build",
-        "push-and-publish": "git add -A && git commit -m 'Updates' && npm version patch && npm publish && git push -u origin main"
+        "push-and-publish": "npm run build && npm publish"
+    },
+    "engines": {
+        "node": ">=20"
     },
     "devDependencies": {
         "@daanvandenbergh/claudekit": "^1.0.6",
