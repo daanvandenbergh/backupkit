@@ -96,13 +96,14 @@ describe("ssh agent lifecycle (fake binaries)", () => {
             { kind: "alias", name: "b", alias: "b" },
         ];
         const result = await loadKeys(aliases, deps({}));
-        expect(result).toBeNull();
+        expect(result.sock).toBeNull();
+        expect(result.failures.size).toBe(0);
         expect(await fake.calls()).toEqual([]);
     });
 
     it("primes an unencrypted key: probe, fingerprint, ssh-add argv order; passphrase never in argv", async () => {
         await writeFile(pubPath, "ssh-ed25519 AAAA c\n", { mode: 0o644 });
-        const sock = await loadKeys([explicitRemote(keyPath, null)], deps({
+        const { sock, failures } = await loadKeys([explicitRemote(keyPath, null)], deps({
             "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
             "ssh-keygen": [
                 { exit: 0, stdout: "256 SHA256:AAAA c (ED25519)\n" },
@@ -110,6 +111,7 @@ describe("ssh agent lifecycle (fake binaries)", () => {
             ],
         }));
         expect(sock).toBe(agentSocketPath(runtimeDir));
+        expect(failures.size).toBe(0);
         const calls = await fake.calls();
         expect(calls.map((c) => [c.bin, ...c.argv])).toEqual([
             ["ssh-add", "-l"],
@@ -160,14 +162,53 @@ describe("ssh agent lifecycle (fake binaries)", () => {
 
     it("prompt keys without a TTY fail fast with the actionable message and never spawn an add", async () => {
         await writeFile(pubPath, "ssh-ed25519 CCCC c\n", { mode: 0o644 });
-        await expect(
-            loadKeys([explicitRemote(keyPath, { kind: "prompt", value: "" })], deps({
-                "ssh-add": [{ exit: 0 }, { exit: 1 }],
-                "ssh-keygen": [{ exit: 0, stdout: "256 SHA256:CCCC c (ED25519)\n" }],
-            })),
-        ).rejects.toThrowError(/is encrypted and not loaded; run "backupkit check" in a terminal, then restart the service/);
+        const { failures } = await loadKeys([explicitRemote(keyPath, { kind: "prompt", value: "" })], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }],
+            "ssh-keygen": [{ exit: 0, stdout: "256 SHA256:CCCC c (ED25519)\n" }],
+        }));
+        expect(failures.get("example")).toMatch(
+            /is encrypted and not loaded; run "backupkit check" in a terminal, then restart the service/,
+        );
         const addCalls = (await fake.calls()).filter((c) => c.bin === "ssh-add");
         expect(addCalls.map((c) => c.argv)).toEqual([["-l"], ["-l"]]);
+    });
+
+    it("per-remote fault isolation: an un-primeable prompt key fails only its remote, the other key still primes", async () => {
+        // Remote "example" uses an encrypted prompt key with no TTY; remote
+        // "other" uses a distinct unencrypted key. loadKeys must resolve with a
+        // failure for "example" only and still add "other"'s key - the seam that
+        // keeps a daemon restart from crash-looping on one bad key (spec 4/5).
+        await writeFile(pubPath, "ssh-ed25519 FFFF c\n", { mode: 0o644 });
+        const otherKey = join(fake.dir, "id_other");
+        await writeFile(otherKey, "FAKE OTHER KEY\n", { mode: 0o600 });
+        await writeFile(`${otherKey}.pub`, "ssh-ed25519 GGGG c\n", { mode: 0o644 });
+        const prompt = explicitRemote(keyPath, { kind: "prompt", value: "" });
+        const other = { ...explicitRemote(otherKey, null), name: "other" } as ResolvedRemote;
+        const { sock, failures } = await loadKeys([prompt, other], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
+            "ssh-keygen": [
+                { exit: 0, stdout: "256 SHA256:FFFF c (ED25519)\n" },
+                { exit: 0, stdout: "256 SHA256:GGGG c (ED25519)\n" },
+                { exit: 0, stdout: "ssh-ed25519 GGGG c\n" },
+            ],
+        }));
+        expect(sock).toBe(agentSocketPath(runtimeDir));
+        expect([...failures.keys()]).toEqual(["example"]);
+        expect(failures.get("example")).toMatch(/run "backupkit check" in a terminal/);
+        // The other remote's key was still added despite the earlier failure.
+        const addCalls = (await fake.calls()).filter((c) => c.bin === "ssh-add" && c.argv[0] !== "-l");
+        expect(addCalls.map((c) => c.argv)).toEqual([[otherKey]]);
+    });
+
+    it("both remotes sharing one un-primeable key are marked failed", async () => {
+        const first = explicitRemote(keyPath, { kind: "prompt", value: "" });
+        const second = { ...first, name: "other" } as ResolvedRemote;
+        await writeFile(pubPath, "ssh-ed25519 HHHH c\n", { mode: 0o644 });
+        const { failures } = await loadKeys([first, second], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }],
+            "ssh-keygen": [{ exit: 0, stdout: "256 SHA256:HHHH c (ED25519)\n" }],
+        }));
+        expect([...failures.keys()].sort()).toEqual(["example", "other"]);
     });
 
     it("generates a missing .pub for an unencrypted key (0644) and reuses the probe for the add", async () => {
@@ -189,21 +230,19 @@ describe("ssh agent lifecycle (fake binaries)", () => {
     });
 
     it("encrypted key with a missing .pub fails unattended, pointing at backupkit check", async () => {
-        await expect(
-            loadKeys([explicitRemote(keyPath, { kind: "file", value: join(fake.dir, "p") })], deps({
-                "ssh-add": [{ exit: 0 }, { exit: 1 }],
-            })),
-        ).rejects.toThrowError(/backupkit check/);
+        const { failures } = await loadKeys([explicitRemote(keyPath, { kind: "file", value: join(fake.dir, "p") })], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }],
+        }));
+        expect(failures.get("example")).toMatch(/backupkit check/);
         expect((await fake.calls()).filter((c) => c.bin === "ssh-keygen")).toEqual([]);
     });
 
-    it("a key that needs a passphrase but configures none is an actionable error", async () => {
-        await expect(
-            loadKeys([explicitRemote(keyPath, null)], deps({
-                "ssh-add": [{ exit: 0 }, { exit: 1 }],
-                "ssh-keygen": [{ exit: 1, stderr: "incorrect passphrase supplied" }],
-            })),
-        ).rejects.toThrowError(/configure "passphrase"/);
+    it("a key that needs a passphrase but configures none is an actionable per-remote failure", async () => {
+        const { failures } = await loadKeys([explicitRemote(keyPath, null)], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }],
+            "ssh-keygen": [{ exit: 1, stderr: "incorrect passphrase supplied" }],
+        }));
+        expect(failures.get("example")).toMatch(/configure "passphrase"/);
     });
 
     it("dedupes remotes sharing one identityFile: the key is primed once", async () => {

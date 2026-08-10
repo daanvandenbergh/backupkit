@@ -7,13 +7,23 @@
  */
 
 import { existsSync } from "node:fs";
-import { mkdir, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Backupkit } from "../backupkit.js";
 import { ConfigError, TransferError } from "../../shared/errors.js";
-import { captureLogger, makeConfig, makeExecResult, makeKit, makeStats, makeTarget, type KitFixture } from "./fakes.js";
+import type { ResolvedRemote } from "../../shared/types.js";
+import {
+    captureLogger,
+    makeConfig,
+    makeExecResult,
+    makeKit,
+    makeStats,
+    makeTarget,
+    makeTransferResult,
+    type KitFixture,
+} from "./fakes.js";
 
 describe("Backupkit", () => {
     const fixtures: KitFixture[] = [];
@@ -281,7 +291,7 @@ describe("Backupkit", () => {
                 logger: captureLogger("error").log,
                 execFn: async () => makeExecResult(),
                 probeRsync: async () => ({ bin: "/fake/rsync", version: "3.2.7" }),
-                loadKeysFn: async () => null,
+                loadKeysFn: async () => ({ sock: null, failures: new Map<string, string>() }),
             },
         );
         const report = await cold.check();
@@ -329,5 +339,270 @@ describe("Backupkit", () => {
         expect(persisted.status).toBe("aborted");
         // The partial stays for resume.
         expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z.partial"))).toBe(false); // fake transfer never created it
+    });
+
+    it("stop() aborts an in-flight one-shot run(): the report lands as aborted", async () => {
+        // Regression: run() had no abort path, so a signalled `backupkit run`
+        // silently kept the transfer going and orphaned the rsync child.
+        const fixture = track(
+            await makeKit({
+                deps: {
+                    transfer: async (params) =>
+                        new Promise((_resolve, reject) => {
+                            params.signal?.addEventListener("abort", () =>
+                                reject(new TransferError("transfer aborted", { exitCode: null, retriable: false, stderrTail: "" })),
+                            );
+                        }),
+                },
+            }),
+        );
+        const running = fixture.kit.run({ force: true });
+        // Wait until the transfer is in flight.
+        await new Promise((resolve) => setTimeout(resolve, 100));
+        await fixture.kit.stop();
+        const report = await running;
+        expect(report.targets).toHaveLength(1);
+        expect(report.targets[0].status).toBe("aborted");
+        const files = await readdir(join(fixture.stateDir, "runs", "web"));
+        const persisted = JSON.parse(await readFile(join(fixture.stateDir, "runs", "web", files[0]), "utf8"));
+        expect(persisted.status).toBe("aborted");
+    });
+
+    it("check: accept-new (TOFU pinning) only on a real TTY - a non-TTY check pins strictly", async () => {
+        // Regression for invariant 5: check() hardcoded the interactive ssh
+        // context, so an unattended `backupkit check` (cron, CI, `< /dev/null`)
+        // silently TOFU-pinned whatever host key was presented.
+        const fixture = track(await makeKit());
+        const sshLog = join(fixture.root, "ssh-args.jsonl");
+        const fakeSsh = join(fixture.root, "fake-ssh");
+        await writeFile(
+            fakeSsh,
+            "#!/usr/bin/env node\n" +
+                `require("node:fs").appendFileSync(${JSON.stringify(sshLog)}, JSON.stringify(process.argv.slice(2)) + "\\n");\n` +
+                'process.stdout.write("rsync  version 3.2.7  protocol version 31\\n");\n',
+            { mode: 0o755 },
+        );
+        /** A kit over one alias remote and the recording fake ssh binary, with the given TTY state. */
+        function kitWithTty(hasTty: boolean): Backupkit {
+            return new Backupkit(
+                {
+                    ...makeConfig({
+                        configPath: join(fixture.root, "config.jsonc"),
+                        stateDir: fixture.stateDir,
+                        targets: [fixture.target],
+                    }),
+                    remotes: { srv: { kind: "alias", name: "srv", alias: "myserver" } },
+                    sshBin: fakeSsh,
+                },
+                {
+                    now: () => fixture.clock.now,
+                    runtimeDir: join(fixture.root, "run"),
+                    env: {},
+                    hasTty,
+                    logger: captureLogger("error").log,
+                    execFn: async () => makeExecResult(),
+                    probeRsync: async () => ({ bin: "/fake/rsync", version: "3.2.7" }),
+                    // The probe travels through the check()-built runRemote closure,
+                    // so the real ssh argv (and its StrictHostKeyChecking) is recorded.
+                    probeRemote: async (params) => {
+                        await params.runRemote(["rsync", "--version"]);
+                        return "3.2.7";
+                    },
+                },
+            );
+        }
+        /** The recorded ssh argv lines that carry a StrictHostKeyChecking option. */
+        async function strictnessLines(): Promise<string[][]> {
+            const lines = (await readFile(sshLog, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as string[]);
+            return lines.filter((argv) => argv.some((arg) => arg.startsWith("StrictHostKeyChecking")));
+        }
+
+        await kitWithTty(false).check();
+        const unattended = await strictnessLines();
+        expect(unattended.length).toBeGreaterThan(0);
+        expect(unattended.every((argv) => argv.includes("StrictHostKeyChecking=yes"))).toBe(true);
+
+        await rm(sshLog, { force: true });
+        await kitWithTty(true).check();
+        const interactive = await strictnessLines();
+        expect(interactive.length).toBeGreaterThan(0);
+        expect(interactive.every((argv) => argv.includes("StrictHostKeyChecking=accept-new"))).toBe(true);
+    });
+
+    it("run path enforces the remote rsync floor: refusal fails the target without transfer, success is probed once", async () => {
+        // Regression for invariant 11: the floor was only enforced in check(),
+        // so a downgraded remote kept transferring on every run/daemon pass.
+        let probeOk = false;
+        let probeCount = 0;
+        let transferCount = 0;
+        const fixture = track(
+            await makeKit({
+                target: {
+                    src: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/data" },
+                },
+                deps: {
+                    probeRemote: async () => {
+                        probeCount += 1;
+                        if (!probeOk) {
+                            throw new Error("rsync too old on myserver (3.1.3 < 3.2.5) - refused");
+                        }
+                        return "3.2.7";
+                    },
+                    transfer: async (params) => {
+                        transferCount += 1;
+                        if (params.spec.dst.kind === "local") {
+                            await mkdir(params.spec.dst.path, { recursive: true });
+                        }
+                        const result = makeTransferResult();
+                        for (const attempt of result.attempts) {
+                            params.attemptLog?.push(attempt);
+                        }
+                        return result;
+                    },
+                },
+            }),
+        );
+        const first = await fixture.kit.run({ force: true });
+        expect(first.targets[0].status).toBe("failed");
+        expect(first.targets[0].reason).toBe("remote-unavailable");
+        expect(first.targets[0].error).toContain("rsync too old");
+        fixture.clock.now = new Date("2026-08-10T12:01:00Z");
+        const second = await fixture.kit.run({ force: true });
+        expect(second.targets[0].status).toBe("failed");
+        expect(probeCount).toBe(2); // failures are never cached - a fixed host re-probes
+        expect(transferCount).toBe(0); // never a silent transfer below the floor
+        probeOk = true;
+        fixture.clock.now = new Date("2026-08-10T12:02:00Z");
+        expect((await fixture.kit.run({ force: true })).targets[0].status).toBe("success");
+        fixture.clock.now = new Date("2026-08-10T12:03:00Z");
+        expect((await fixture.kit.run({ force: true })).targets[0].status).toBe("success");
+        expect(probeCount).toBe(3); // success memoized per connection identity per process
+        expect(transferCount).toBe(2);
+    });
+
+    it("an un-primeable key fails only that remote's targets: preflight succeeds, siblings run, check reports it", async () => {
+        // Regression: one prompt key with no TTY used to reject preflight and
+        // crash-loop the daemon, taking every healthy target down with it.
+        let probeCount = 0;
+        const fixture = track(await makeKit());
+        const remote: ResolvedRemote = {
+            kind: "explicit",
+            name: "srv",
+            host: "10.0.0.9",
+            user: "backup",
+            port: 22,
+            identityFile: "/fake/id",
+            passphrase: { kind: "prompt", value: "" },
+            knownHostsFile: "/fake/kh",
+        };
+        const remoteTarget = makeTarget({
+            name: "rweb",
+            src: { kind: "remote", remote, path: "/srv/data" },
+            dst: { kind: "local", path: fixture.destination },
+            destination: fixture.destination,
+        });
+        const kit = new Backupkit(
+            makeConfig({
+                configPath: join(fixture.root, "config.jsonc"),
+                stateDir: fixture.stateDir,
+                targets: [remoteTarget, fixture.target],
+            }),
+            {
+                now: () => fixture.clock.now,
+                runtimeDir: join(fixture.root, "run"),
+                env: {},
+                hasTty: false,
+                logger: captureLogger("error").log,
+                execFn: async () => makeExecResult(),
+                probeRsync: async () => ({ bin: "/fake/rsync", version: "3.2.7" }),
+                probeRemote: async () => {
+                    probeCount += 1;
+                    return "3.2.7";
+                },
+                loadKeysFn: async () => ({
+                    sock: null,
+                    failures: new Map([
+                        ["srv", 'key /fake/id is encrypted and not loaded; run "backupkit check" in a terminal, then restart the service'],
+                    ]),
+                }),
+                transfer: async (params) => {
+                    if (params.spec.dst.kind === "local") {
+                        await mkdir(params.spec.dst.path, { recursive: true });
+                    }
+                    return makeTransferResult();
+                },
+                estimate: async () => makeStats(),
+            },
+        );
+        await expect(kit.preflight()).resolves.toBeUndefined();
+        const report = await kit.run({ force: true });
+        expect(report.targets.map((t) => [t.target, t.status])).toEqual([
+            ["rweb", "failed"],
+            ["web", "success"],
+        ]);
+        expect(report.targets[0].reason).toBe("remote-unavailable");
+        expect(report.targets[0].error).toContain("backupkit check");
+        expect(probeCount).toBe(0); // the key gate fails before any remote probe
+        // The failed report is persisted, so status/backoff derive from it.
+        expect(await readdir(join(fixture.stateDir, "runs", "rweb"))).toHaveLength(1);
+        // check() still surfaces the priming failure loudly.
+        const checkReport = await kit.check();
+        expect(checkReport.ok).toBe(false);
+        expect(checkReport.errors.some((error) => error.includes("remote srv"))).toBe(true);
+    });
+
+    it("a forced first-run failure enters backoff once, not twice (no rehydrate-after-write double count)", async () => {
+        const fixture = track(
+            await makeKit({
+                deps: {
+                    transfer: async (): Promise<never> => {
+                        throw new TransferError("link down (exit 10)", { exitCode: 10, retriable: true, stderrTail: "" });
+                    },
+                },
+            }),
+        );
+        const first = await fixture.kit.run({ force: true });
+        expect(first.targets[0].status).toBe("failed");
+        // One failure = a 15-minute backoff. At +20 min the target must be
+        // retried; the double-count bug inflated it to 30 min and skipped this.
+        fixture.clock.now = new Date("2026-08-10T12:20:00Z");
+        const retry = await fixture.kit.run();
+        expect(retry.targets).toHaveLength(1);
+    });
+
+    it("disk-low damping: full re-evaluation at most every 5 minutes, one persisted report per episode, force bypasses", async () => {
+        let estimateCalls = 0;
+        const fixture = track(
+            await makeKit({
+                target: { minFree: { kind: "bytes", bytes: Number.MAX_SAFE_INTEGER } },
+                deps: {
+                    estimate: async () => {
+                        estimateCalls += 1;
+                        return makeStats();
+                    },
+                },
+            }),
+        );
+        const first = await fixture.kit.run({ force: true });
+        expect(first.targets[0].status).toBe("skipped");
+        expect(first.targets[0].reason).toBe("disk-low");
+        expect(estimateCalls).toBe(1);
+        // 30 s later (one scheduler tick): still due, but the guard is damped -
+        // no lock, no estimate, no second persisted report.
+        fixture.clock.now = new Date("2026-08-10T12:00:30Z");
+        const tick = await fixture.kit.run();
+        expect(tick.targets[0].reason).toBe("disk-low");
+        expect(estimateCalls).toBe(1);
+        expect(await readdir(join(fixture.stateDir, "runs", "web"))).toHaveLength(1);
+        // After the re-check interval the guard re-evaluates in full...
+        fixture.clock.now = new Date("2026-08-10T12:06:00Z");
+        await fixture.kit.run();
+        expect(estimateCalls).toBe(2);
+        // ...but a repeat disk-low skip is still not persisted (one report per episode).
+        expect(await readdir(join(fixture.stateDir, "runs", "web"))).toHaveLength(1);
+        // force bypasses the damping entirely.
+        fixture.clock.now = new Date("2026-08-10T12:06:30Z");
+        await fixture.kit.run({ force: true });
+        expect(estimateCalls).toBe(3);
     });
 });

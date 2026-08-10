@@ -494,7 +494,20 @@ class Validator {
         }
         const rsyncNode = obj.entries.get("rsync");
         if (rsyncNode !== undefined) {
-            target.rsync = this.validateRsyncOptions(rsyncNode, `${path}.rsync`);
+            const rsyncOptions: NonNullable<TargetConfig["rsync"]> =
+                this.validateRsyncOptions(rsyncNode, `${path}.rsync`) ?? {};
+            target.rsync = rsyncOptions;
+            if (target.direction === "push" && rsyncOptions.remoteRsyncBin !== undefined) {
+                const remoteRsyncNode = (rsyncNode.kind === "object"
+                    ? rsyncNode.entries.get("remoteRsyncBin")
+                    : undefined) ?? rsyncNode;
+                this.fail(
+                    remoteRsyncNode,
+                    `${path}.rsync.remoteRsyncBin`,
+                    "remoteRsyncBin is not allowed on a push target - the archive host's forced " +
+                        "command fixes the remote rsync binary; set it on the jail account's PATH instead",
+                );
+            }
         }
         const enabledNode = obj.entries.get("enabled");
         if (enabledNode !== undefined) {

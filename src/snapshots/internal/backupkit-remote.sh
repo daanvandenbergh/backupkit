@@ -139,10 +139,24 @@ check_rsync_path() {
 }
 
 # Validate an IFS-split "rsync --server ..." argv: option tokens only until
-# the lone ".", then exactly one path operand under the jail root. Option
-# values may never carry an absolute path or a ".." (the one exception is
-# --link-dest=../<snapshotName>, which our client legitimately sends and
-# which stays inside the jail by construction).
+# the lone ".", then exactly one path operand under the jail root
+# (check_rsync_path). The path operand bounds WHERE rsync reads/writes; this
+# function bounds what the OPTION flags can make rsync do with it, default-deny
+# on every escape vector:
+#
+#   - The compact short-flag bundle rsync sends (e.g. -logDtpre.iLsfxC): the
+#     letters BEFORE the first "." are the active flags. L (--copy-links),
+#     K (--keep-dirlinks) and k (--copy-dirlinks) there make the SERVER follow
+#     a symlink out of the jail (read escape via --sender+L, write escape via
+#     K) - reject them. Anything after "." is the -e capability advertisement
+#     (its L means "symlinks supported", inert) and is left alone. The pre-dot
+#     part must be flag letters only.
+#   - Symlink-following, command-exec (--rsync-path/--rsh/-e/--daemon), batch
+#     replay, and out-of-jail path-valued long options are rejected outright.
+#   - The ONE path-valued option our client legitimately sends,
+#     --link-dest=../<snapshotName>, is allowed and stays inside the jail by
+#     construction; any other long option is a benign flag confined to the
+#     bounded path operand, but still may carry no absolute path or ".." value.
 validate_rsync() {
     [ "$1" = "rsync" ] || return 1
     [ "$2" = "--server" ] || return 1
@@ -154,14 +168,14 @@ validate_rsync() {
             check_rsync_path "$1"
             return $?
         fi
-        case $1 in
-            -*) ;;
-            *) return 1 ;;
-        esac
+        # No shell metacharacter in any option token (defense in depth: nothing
+        # is ever re-parsed by a shell, but keep the surface clean).
         case $1 in
             *\'* | *\"* | *\`* | *\$* | *\;* | *\\* | *\** | *\[*) return 1 ;;
         esac
         case $1 in
+            # The one path-valued option our client sends: link into the
+            # sibling snapshot, which stays inside the jail by construction.
             --link-dest=*)
                 linkdest=${1#--link-dest=}
                 case $linkdest in
@@ -169,8 +183,37 @@ validate_rsync() {
                     *) return 1 ;;
                 esac
                 ;;
-            *=/*) return 1 ;;
-            *..*) return 1 ;;
+            # Options that would let the server follow a symlink out of the jail,
+            # run a client-chosen binary/shell, replay a batch, or redirect I/O
+            # to an out-of-jail path. Default-deny, listed explicitly.
+            --copy-links | --copy-unsafe-links | --copy-dirlinks | --keep-dirlinks \
+                | --munge-links | --no-munge-links | --rsync-path | --rsync-path=* \
+                | --rsh | --rsh=* | -e | --daemon | --files-from | --files-from=* \
+                | --read-batch | --read-batch=* | --write-batch=* | --only-write-batch=* \
+                | --compare-dest=* | --copy-dest=* | --partial-dir=* | --backup-dir=* \
+                | --temp-dir=* | -T | --log-file=* | --config=*)
+                return 1
+                ;;
+            # Any other long option: a benign flag (--numeric-ids, --delete,
+            # --partial, --timeout=N, --chmod=..., --no-D, ...), but never with
+            # an absolute-path or ".." value.
+            --*)
+                case $1 in
+                    *=/*) return 1 ;;
+                    *..*) return 1 ;;
+                esac
+                ;;
+            # The compact short-flag bundle: reject the symlink-following flags
+            # (L/K/k) in the pre-"." active-flags section; leave the "." and the
+            # -e capability chars after it. The pre-"." part is flag letters only.
+            -*)
+                pre=${1#-}
+                pre=${pre%%.*}
+                case $pre in
+                    "" | *[!A-Za-z]* | *L* | *K* | *k*) return 1 ;;
+                esac
+                ;;
+            *) return 1 ;;
         esac
         shift
     done

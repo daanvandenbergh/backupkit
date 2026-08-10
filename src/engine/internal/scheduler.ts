@@ -228,6 +228,12 @@ export class Scheduler {
                 const report = await this.deps.runTarget(target);
                 if ((report.status === "success" || report.status === "warning") && report.snapshot !== null) {
                     this.newestCache.set(target.name, report.snapshot);
+                } else if (report.status === "skipped" && report.reason === "window") {
+                    // A complete snapshot this loop did not create already fulfils
+                    // the window (a manual run, --force, or another writer): drop
+                    // the stale cache so the next tick re-lists instead of
+                    // re-entering the pipeline every 30 s for the rest of the window.
+                    this.newestCache.delete(target.name);
                 }
             } catch (error) {
                 if (isBackupkitError(error) && error.code === "lock-held") {

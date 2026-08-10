@@ -176,9 +176,15 @@ export async function runTarget(
 
             const spec = specFor(target, snapName, newest, deps);
 
+            // Every child in the pipeline - estimate, transfer, verify - gets the
+            // engine's shutdown signal, so graceful stop SIGTERMs whichever rsync
+            // is in flight (spec section 6: no pass may overrun TimeoutStopSec).
+            const execWithSignal: ExecFn = (bin, args, execOptions) =>
+                deps.execFn(bin, args, { ...execOptions, signal: options.signal });
+
             // Dry-run: estimate only - no claim, no transfer, no writes; retention planned, not executed.
             if (options.dryRun === true) {
-                const estimated = await deps.estimate({ rsyncBin: deps.rsyncBin, spec, log: deps.log, env: deps.env, execFn: deps.execFn });
+                const estimated = await deps.estimate({ rsyncBin: deps.rsyncBin, spec, log: deps.log, env: deps.env, execFn: execWithSignal });
                 stats = {
                     filesTransferred: 0,
                     bytesTransferred: 0,
@@ -195,7 +201,7 @@ export async function runTarget(
             // Disk guard (skipped entirely when minFree is false).
             let estimatedDelta: number | null = null;
             if (target.minFree !== null) {
-                const estimated = await deps.estimate({ rsyncBin: deps.rsyncBin, spec, log: deps.log, env: deps.env, execFn: deps.execFn });
+                const estimated = await deps.estimate({ rsyncBin: deps.rsyncBin, spec, log: deps.log, env: deps.env, execFn: execWithSignal });
                 estimatedDelta = estimated.totalTransferredSize;
                 const totalBytes = await deps.totalBytes();
                 if (target.minFree.kind === "percent" && totalBytes === null) {
@@ -230,8 +236,6 @@ export async function runTarget(
             snapshot = snapName;
 
             // Transfer with the retry loop, aborting on the engine's shutdown signal.
-            const execWithSignal: ExecFn = (bin, args, execOptions) =>
-                deps.execFn(bin, args, { ...execOptions, signal: options.signal });
             const result = await deps.transfer({
                 rsyncBin: deps.rsyncBin,
                 spec,
@@ -256,6 +260,13 @@ export async function runTarget(
             // Optional verify pass: --checksum dry-run against the partial; any content-change line fails loudly.
             if (target.rsync.verify) {
                 const verifyResult = await execWithSignal(deps.rsyncBin, buildArgs(spec, "verify"), { env: deps.env });
+                // Graceful shutdown during the verify pass is an abort, never a
+                // verify failure: "aborted" does not enter failure backoff and the
+                // partial stays for resume (spec section 6).
+                if (options.signal?.aborted === true) {
+                    deps.log.warn("run aborted", { snapshot: snapName });
+                    return report("aborted", "aborted", "aborted during verify pass");
+                }
                 const changed = verifyResult.stdout
                     .split("\n")
                     .map((line) => line.trim())

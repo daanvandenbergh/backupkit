@@ -542,6 +542,17 @@ describe("rsync options", () => {
         expectFail(base({ targets: { t1: { ...TARGET, rsync: { remoteRsyncBin: "rsync" } } } }), "absolute path");
     });
 
+    it("rejects remoteRsyncBin on a push target (the jail forces the remote binary)", () => {
+        expectFail(
+            base({
+                targets: {
+                    t1: { ...TARGET, direction: "push", rsync: { remoteRsyncBin: "/opt/homebrew/bin/rsync" } },
+                },
+            }),
+            "not allowed on a push target",
+        );
+    });
+
     it("rejects an unknown rsync key", () => {
         expectFail(base({ targets: { t1: { ...TARGET, rsync: { inplace: true } } } }), 'unknown key "inplace"');
     });

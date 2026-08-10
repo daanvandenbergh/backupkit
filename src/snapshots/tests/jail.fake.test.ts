@@ -122,6 +122,51 @@ describe("backupkit-remote jail script", () => {
             const result = await jail(cmd);
             expect(result.exitCode).toBe(0);
         });
+
+        it("permits a real backupkit push --server line with the full long-option set", async () => {
+            // The server-side command rsync sends for a backupkit push transfer:
+            // the compact bundle plus the benign long options buildArgs induces
+            // (numeric-ids, delete, chmod, no-D, xattrs, timeout, link-dest).
+            const cmd =
+                `rsync --server -logDtpre.iLsfxC --numeric-ids --delete --force ` +
+                `--chmod=ug-s --no-D --xattrs --partial --timeout=600 ` +
+                `--link-dest=../${BASE} . ${jailRoot}/web/${SNAP}.partial`;
+            const result = await jail(cmd);
+            expect(result.exitCode).toBe(0);
+        });
+    });
+
+    describe("rejected rsync --server symlink-following / escape options (jail confinement)", () => {
+        const DST = () => `${jailRoot}/web/${SNAP}.partial`;
+
+        it.each([
+            // Symlink-following short flags in the compact bundle's active section.
+            ["-L copy-links in bundle (read escape)", () => `rsync --server -logDtpreL.iLsfxC . ${DST()}`],
+            ["-L with --sender (read escape)", () => `rsync --server --sender -logDtpreL.iLsfxC . ${DST()}`],
+            ["-K keep-dirlinks in bundle (write escape)", () => `rsync --server -logDtpreK.iLsfxC . ${DST()}`],
+            ["-k copy-dirlinks in bundle", () => `rsync --server -logDtprek.iLsfxC . ${DST()}`],
+            // Symlink-following long options.
+            ["--copy-links long form", () => `rsync --server --copy-links -logDtpre.iLsfxC . ${DST()}`],
+            ["--copy-unsafe-links long form", () => `rsync --server --copy-unsafe-links -a . ${DST()}`],
+            ["--keep-dirlinks long form", () => `rsync --server --keep-dirlinks -a . ${DST()}`],
+            ["--copy-dirlinks long form", () => `rsync --server --copy-dirlinks -a . ${DST()}`],
+            // Command-exec / daemon escapes.
+            ["--rsync-path abuse (server binary)", () => `rsync --server --rsync-path=/bin/sh -a . ${DST()}`],
+            ["--rsh abuse", () => `rsync --server --rsh=/bin/sh -a . ${DST()}`],
+            ["-e rsh abuse", () => `rsync --server -e sh . ${DST()}`],
+            ["--daemon", () => `rsync --server --daemon`],
+            // Batch replay and out-of-jail path-valued options.
+            ["--files-from out of jail", () => `rsync --server --files-from=/etc/x -a . ${DST()}`],
+            ["--write-batch out of jail", () => `rsync --server --write-batch=/tmp/b -a . ${DST()}`],
+            ["--compare-dest out of jail", () => `rsync --server --compare-dest=/etc -a . ${DST()}`],
+            ["--copy-dest out of jail", () => `rsync --server --copy-dest=/etc -a . ${DST()}`],
+            ["--partial-dir (relative, now denied)", () => `rsync --server --partial-dir=escape -a . ${DST()}`],
+            ["--temp-dir out of jail", () => `rsync --server --temp-dir=/tmp -a . ${DST()}`],
+            ["--backup-dir out of jail", () => `rsync --server --backup-dir=/etc -a . ${DST()}`],
+        ])("rejects %s", async (_label, build) => {
+            await expectRejected(build());
+            expect(await fake.calls()).toEqual([]);
+        });
     });
 
     describe("rejected commands", () => {

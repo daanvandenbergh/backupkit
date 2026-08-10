@@ -257,6 +257,50 @@ describe("runTarget pipeline", () => {
         expect(store.names).toContain(SNAP);
     });
 
+    it("graceful abort during the verify pass is aborted, never verify-failed (no false backoff)", async () => {
+        const store = new FakeStore();
+        const controller = new AbortController();
+        // The verify child dies on the shutdown SIGTERM: exec resolves with a
+        // signal death exactly when the run's abort signal is set.
+        const deps = makeDeps(store, {
+            execFn: async () => {
+                controller.abort();
+                return { exitCode: null, signal: "SIGTERM" as const, stdout: "", stderr: "", timedOut: false, durationMs: 1 };
+            },
+        });
+        const report = await runTarget(makeTarget({ rsync: { ...makeTarget().rsync, verify: true } }), deps, {
+            signal: controller.signal,
+        });
+        expect(report.status).toBe("aborted");
+        expect(report.reason).toBe("aborted");
+        expect(store.calls.some((call) => call.startsWith("promote"))).toBe(false);
+        expect(store.locked).toBe(false);
+    });
+
+    it("the estimate pass receives the shutdown signal (dry-run and disk-guard estimates)", async () => {
+        const controller = new AbortController();
+        const seenSignals: (AbortSignal | undefined)[] = [];
+        /** Deps whose estimator spawns through the runner-provided execFn and whose execFn records the signal it got. */
+        function signalProbeDeps(store: FakeStore): ReturnType<typeof makeDeps> {
+            return makeDeps(store, {
+                estimate: async (params) => {
+                    await params.execFn?.("rsync", ["--dry-run"], {});
+                    return makeStats({ totalTransferredSize: 1 });
+                },
+                execFn: async (_bin, _args, options) => {
+                    seenSignals.push(options?.signal);
+                    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1 };
+                },
+            });
+        }
+        await runTarget(makeTarget(), signalProbeDeps(new FakeStore()), { dryRun: true, signal: controller.signal });
+        await runTarget(makeTarget({ minFree: { kind: "bytes", bytes: 0 } }), signalProbeDeps(new FakeStore()), {
+            signal: controller.signal,
+        });
+        expect(seenSignals).toHaveLength(2);
+        expect(seenSignals.every((signal) => signal === controller.signal)).toBe(true);
+    });
+
     it("aborted signal: report status aborted, lock released", async () => {
         const store = new FakeStore();
         const controller = new AbortController();

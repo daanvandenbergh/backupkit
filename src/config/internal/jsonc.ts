@@ -460,9 +460,13 @@ class Parser {
 
 /**
  * Parse JSONC source text into its node tree. `file` is used in error
- * messages only (`<file>:<line>:<col>: <problem>`). Throws ConfigError on any
- * grammar violation, duplicate key, or depth-cap breach.
+ * messages only (`<file>:<line>:<col>: <problem>`). A single leading UTF-8
+ * BOM (U+FEFF) is stripped first (RFC 8259 section 8.1 tolerance - editors
+ * such as Windows Notepad and PowerShell's `Out-File` emit one by default).
+ * Throws ConfigError on any grammar violation, duplicate key, or depth-cap
+ * breach.
  */
 export function parseJsonc(text: string, file: string): JsoncNode {
-    return new Parser(text, file).parseDocument();
+    const source = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    return new Parser(source, file).parseDocument();
 }

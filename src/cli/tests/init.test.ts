@@ -6,6 +6,8 @@
  * seam - nothing is written outside the fake map.
  */
 
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { STARTER_CONFIG } from "../../config/internal/starter.js";
@@ -27,6 +29,11 @@ describe("path resolution", () => {
 
         const xdg = fakeDeps({ euid: 501, env: { XDG_CONFIG_HOME: "/xdg" } });
         expect(initPath(undefined, xdg.deps)).toBe("/xdg/backupkit/config.jsonc");
+    });
+
+    it("falls back to os.homedir() (never a literal '~') when HOME is unset", () => {
+        const noHome = fakeDeps({ euid: 501, env: {} });
+        expect(initPath(undefined, noHome.deps)).toBe(join(homedir(), ".config", "backupkit", "config.jsonc"));
     });
 });
 

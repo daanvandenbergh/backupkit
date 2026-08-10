@@ -29,7 +29,7 @@ import { planRetention } from "../retention/retention.js";
 import { openStore, type SnapshotStore } from "../snapshots/store.js";
 import type { SnapshotInfo } from "../snapshots/types.js";
 import { isDue } from "../shared/time.js";
-import { deriveBackoff, readTargetReports, writeTargetReport } from "./internal/reports.js";
+import { deriveBackoff, readTargetReports, runIdFor, writeTargetReport } from "./internal/reports.js";
 import { backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "./internal/scheduler.js";
 import { runTarget, type TargetRunnerDeps } from "./internal/target-runner.js";
 import type {
@@ -65,6 +65,8 @@ export interface BackupkitDeps {
     estimate?: typeof dryRunStats;
     /** Local rsync probe. Default rsync/'s `probeLocalRsync`. */
     probeRsync?: typeof probeLocalRsync;
+    /** Remote rsync probe (version floor on every transfer path). Default rsync/'s `probeRemoteRsync`. */
+    probeRemote?: typeof probeRemoteRsync;
     /** Key loader. Default ssh/'s `loadKeys`. */
     loadKeysFn?: typeof loadKeys;
     /** Permission-check filesystem seam. Default the real filesystem. */
@@ -102,6 +104,15 @@ function remoteIdentity(remote: ResolvedRemote): string {
     return remote.kind === "alias" ? remote.alias : `${remote.user}@${remote.host}:${remote.port}`;
 }
 
+/**
+ * Minimum interval between full disk-low re-evaluations of one target. While
+ * the archive stays low the target remains due, so without damping every 30 s
+ * tick would re-run the lock, the listing, and the full rsync dry-run
+ * estimate. ponytail: fixed 5 min re-check - prompt recovery once space
+ * frees, a per-target knob only if someone ever needs one.
+ */
+const DISK_LOW_RECHECK_MS = 5 * 60_000;
+
 /** The versioned-backup engine over one resolved config. */
 export class Backupkit {
     /** The fully resolved config this instance runs. */
@@ -121,6 +132,8 @@ export class Backupkit {
         estimate: typeof dryRunStats;
         /** Local rsync probe. */
         probeRsync: typeof probeLocalRsync;
+        /** Remote rsync probe. */
+        probeRemote: typeof probeRemoteRsync;
         /** Key loader. */
         loadKeysFn: typeof loadKeys;
         /** Permission-check filesystem seam. */
@@ -146,8 +159,17 @@ export class Backupkit {
     /** Memoized local rsync probe. */
     private rsyncProbe: Promise<{ bin: string; version: string }> | null = null;
 
+    /** Memoized remote rsync probes per connection identity (failures clear the memo so a fixed host re-probes next run). */
+    private readonly remoteProbes = new Map<string, Promise<string>>();
+
+    /** Per-remote key-priming failures from preflight: remote name -> actionable message. Targets on these remotes fail individually. */
+    private keyFailures = new Map<string, string>();
+
     /** Sticky disk-low state per target (one error log per transition). */
     private readonly diskLowTargets = new Set<string>();
+
+    /** When each disk-low target's guard last ran a full evaluation (epoch ms), for the DISK_LOW_RECHECK_MS damping. */
+    private readonly diskLowCheckedAt = new Map<string, number>();
 
     /** The backoff tracker (rehydrated lazily per target from run reports). */
     private readonly backoff: BackoffTracker;
@@ -179,6 +201,7 @@ export class Backupkit {
             transfer: deps.transfer ?? runTransfer,
             estimate: deps.estimate ?? dryRunStats,
             probeRsync: deps.probeRsync ?? probeLocalRsync,
+            probeRemote: deps.probeRemote ?? probeRemoteRsync,
             loadKeysFn: deps.loadKeysFn ?? loadKeys,
             permissionDeps: deps.permissionDeps ?? defaultPermissionDeps(),
             hasTty: deps.hasTty,
@@ -232,11 +255,17 @@ export class Backupkit {
             },
             this.deps.permissionDeps,
         );
-        this.agentSock = await this.deps.loadKeysFn(remotes, {
+        // Key priming is per-remote fault-isolated (spec section 4 step 5): a
+        // remote whose key cannot be primed lands in keyFailures and only its
+        // targets fail in the run loop - preflight still succeeds, so the daemon
+        // and every other target keep running (no crash loop).
+        const keys = await this.deps.loadKeysFn(remotes, {
             runtimeDir: this.runtimeDir,
             log: this.log,
             hasTty: this.deps.hasTty,
         });
+        this.agentSock = keys.sock;
+        this.keyFailures = keys.failures;
     }
 
     /** The probed local rsync binary + version (memoized; failures clear the memo). */
@@ -253,6 +282,11 @@ export class Backupkit {
     /** The local ssh binary (config override or PATH "ssh"). */
     private sshBin(): string {
         return this.config.sshBin ?? "ssh";
+    }
+
+    /** Whether an interactive TTY is available (deps override, else the real stdin) - the accept-new gate of invariant 5. */
+    private isInteractive(): boolean {
+        return this.deps.hasTty ?? process.stdin.isTTY === true;
     }
 
     /** SSH_AUTH_SOCK for spawns against a remote: the backupkit agent for explicit, the inherited value for aliases. */
@@ -357,41 +391,195 @@ export class Backupkit {
         this.backoff.rehydrate(target.name, deriveBackoff(reports));
     }
 
+    /** A report for a run that never entered the pipeline (unavailable remote, throttled disk-low re-check). */
+    private syntheticReport(
+        target: ResolvedTarget,
+        status: TargetRunReport["status"],
+        reason: string,
+        error: string,
+    ): TargetRunReport {
+        const start = this.deps.now();
+        return {
+            runId: runIdFor(start, target.name),
+            target: target.name,
+            direction: target.direction,
+            snapshot: null,
+            status,
+            reason,
+            startedAt: start.toISOString(),
+            finishedAt: start.toISOString(),
+            attempts: [],
+            stats: null,
+            skippedFiles: [],
+            error,
+        };
+    }
+
+    /**
+     * The probed remote rsync version for a target's remote, memoized per
+     * connection identity so the floor costs one ssh round-trip per host per
+     * process (invariant 11 on the transfer path). A failed probe clears the
+     * memo, so a fixed or upgraded host is re-probed on its next run.
+     */
+    private remoteRsyncFor(target: ResolvedTarget, remote: ResolvedRemote): Promise<string> {
+        const identity = remoteIdentity(remote);
+        let probe = this.remoteProbes.get(identity);
+        if (probe === undefined) {
+            probe = this.deps.probeRemote({
+                identity,
+                runRemote: (argv) =>
+                    runRemote(remote, argv, {
+                        sshBin: this.sshBin(),
+                        context: "unattended",
+                        authSock: this.authSockFor(remote),
+                        log: this.log.with({ remote: remote.name }),
+                    }),
+                remoteRsyncBin: target.rsync.remoteRsyncBin,
+                log: this.log.with({ remote: remote.name }),
+            });
+            this.remoteProbes.set(identity, probe);
+            probe.catch(() => this.remoteProbes.delete(identity));
+        }
+        return probe;
+    }
+
+    /**
+     * The per-remote availability gate run before a target's pipeline: null
+     * when the remote is usable (or the transfer is purely local), else the
+     * failed report that replaces the run. Covers the two per-remote failure
+     * modes with one model: a key that could not be primed at preflight
+     * (spec section 4 step 5) and a remote rsync below the version floor or
+     * unreachable at probe time (invariant 11) - either fails only this
+     * remote's targets, never the daemon.
+     */
+    private async remoteGate(target: ResolvedTarget): Promise<TargetRunReport | null> {
+        const remote = remoteOf(target);
+        if (remote === null) {
+            return null;
+        }
+        const keyFailure = this.keyFailures.get(remote.name);
+        if (keyFailure !== undefined) {
+            this.log.error("remote unavailable - target fails without transfer", {
+                target: target.name,
+                remote: remote.name,
+                error: keyFailure,
+            });
+            return this.syntheticReport(target, "failed", "remote-unavailable", keyFailure);
+        }
+        try {
+            await this.remoteRsyncFor(target, remote);
+            return null;
+        } catch (error) {
+            const message = sanitize(error instanceof Error ? error.message : String(error));
+            this.log.error("remote rsync probe failed - target fails without transfer", {
+                target: target.name,
+                remote: remote.name,
+                error: message,
+            });
+            return this.syntheticReport(target, "failed", "remote-unavailable", message);
+        }
+    }
+
     /** Run one target through the pipeline, persist its report, and feed the backoff tracker. */
     private async runOne(
         target: ResolvedTarget,
         options: { force?: boolean; dryRun?: boolean; signal?: AbortSignal },
     ): Promise<TargetRunReport> {
-        const { bin } = await this.localRsync();
-        const remote = remoteOf(target);
-        const deps: TargetRunnerDeps = {
-            store: this.storeFor(target, "unattended"),
-            log: this.log.with({ target: target.name }),
-            now: this.deps.now,
-            rsyncBin: bin,
-            sshTokens: remote === null ? [] : sshArgs(remote, "unattended"),
-            env: this.childEnvFor(target),
-            transfer: this.deps.transfer,
-            estimate: this.deps.estimate,
-            execFn: this.deps.execFn,
-            totalBytes: () => this.totalBytesFor(target),
-            diskLowTargets: this.diskLowTargets,
-        };
-        const report = await runTarget(target, deps, options);
-        if (options.dryRun !== true) {
-            await writeTargetReport(this.config.stateDir, report);
+        // Disk-low damping: while the archive stayed low, the full evaluation
+        // (lock, listing, dry-run estimate) re-runs at most every
+        // DISK_LOW_RECHECK_MS instead of every scheduler tick. The synthetic
+        // skip is never persisted and `force` bypasses the throttle.
+        const lastLowCheck = this.diskLowCheckedAt.get(target.name);
+        if (
+            options.force !== true &&
+            lastLowCheck !== undefined &&
+            this.deps.now().getTime() - lastLowCheck < DISK_LOW_RECHECK_MS
+        ) {
+            return this.syntheticReport(
+                target,
+                "skipped",
+                "disk-low",
+                "archive disk low - next re-evaluation after the re-check interval",
+            );
+        }
+
+        const wasDiskLow = this.diskLowTargets.has(target.name);
+        let report = await this.remoteGate(target);
+        if (report === null) {
+            const { bin } = await this.localRsync();
+            const remote = remoteOf(target);
+            const deps: TargetRunnerDeps = {
+                store: this.storeFor(target, "unattended"),
+                log: this.log.with({ target: target.name }),
+                now: this.deps.now,
+                rsyncBin: bin,
+                sshTokens: remote === null ? [] : sshArgs(remote, "unattended"),
+                env: this.childEnvFor(target),
+                transfer: this.deps.transfer,
+                estimate: this.deps.estimate,
+                execFn: this.deps.execFn,
+                totalBytes: () => this.totalBytesFor(target),
+                diskLowTargets: this.diskLowTargets,
+            };
+            report = await runTarget(target, deps, options);
+        }
+
+        // Disk-low bookkeeping for the damping above.
+        if (report.status === "skipped" && report.reason === "disk-low") {
+            this.diskLowCheckedAt.set(target.name, this.deps.now().getTime());
+        } else {
+            this.diskLowCheckedAt.delete(target.name);
+        }
+
+        // Persist + feed backoff. Rehydration runs BEFORE the write so a
+        // first-touch (forced) run can never read its own report back from disk
+        // and double-count a failure. A repeat disk-low skip is not persisted:
+        // one report per episode keeps the condition from erasing the
+        // 50-report history that backoff rehydration and status() derive from.
+        const repeatDiskLow = wasDiskLow && report.status === "skipped" && report.reason === "disk-low";
+        if (options.dryRun !== true && !repeatDiskLow) {
             await this.ensureBackoffState(target);
+            await writeTargetReport(this.config.stateDir, report);
             this.backoff.record(target.name, report.status, new Date(report.finishedAt));
         }
         return report;
     }
 
-    /** Run every due target once (or the named subset). `force` bypasses due-ness, backoff, and bucket dedup. */
+    /**
+     * Run every due target once (or the named subset). `force` bypasses
+     * due-ness, backoff, and bucket dedup. One-shot runs are abortable:
+     * `stop()` aborts the in-flight target (its report lands as "aborted",
+     * the rsync child gets SIGTERM) and no further target starts - the same
+     * graceful-shutdown contract the daemon loop has (spec section 6).
+     */
     async run(options: { targets?: string[]; force?: boolean; dryRun?: boolean } = {}): Promise<RunReport> {
         const startedAt = this.deps.now().toISOString();
         await this.preflight();
+        const controller = new AbortController();
+        if (this.abortController === null) {
+            this.abortController = controller;
+        }
+        try {
+            return await this.runPass(startedAt, controller.signal, options);
+        } finally {
+            if (this.abortController === controller) {
+                this.abortController = null;
+            }
+        }
+    }
+
+    /** The run() pass over the selected targets, threaded with the abort signal. */
+    private async runPass(
+        startedAt: string,
+        signal: AbortSignal,
+        options: { targets?: string[]; force?: boolean; dryRun?: boolean },
+    ): Promise<RunReport> {
         const reports: TargetRunReport[] = [];
         for (const target of this.selectTargets(options.targets)) {
+            // A stop() during the pass aborts the in-flight target and starts no further one.
+            if (signal.aborted) {
+                break;
+            }
             // Disabled targets never run unless explicitly named.
             if (!target.enabled && options.targets === undefined) {
                 continue;
@@ -413,7 +601,7 @@ export class Backupkit {
                     continue;
                 }
             }
-            reports.push(await this.runOne(target, options));
+            reports.push(await this.runOne(target, { force: options.force, dryRun: options.dryRun, signal }));
         }
         return { startedAt, finishedAt: this.deps.now().toISOString(), targets: reports };
     }
@@ -447,10 +635,10 @@ export class Backupkit {
     }
 
     /**
-     * Graceful stop: end the tick loop, abort the in-flight transfer (its
-     * aborted report is written by the pipeline; lock release is structural
-     * via `withLock`), and resolve once the loop has exited. Second-signal
-     * semantics belong to the CLI.
+     * Graceful stop: end the tick loop, abort the in-flight transfer - of the
+     * daemon loop OR of a one-shot `run()` pass (its aborted report is written
+     * by the pipeline; lock release is structural via `withLock`), and resolve
+     * once the loop has exited. Second-signal semantics belong to the CLI.
      */
     async stop(): Promise<void> {
         const pending = this.startPromise;
@@ -656,6 +844,11 @@ export class Backupkit {
         }
         try {
             await this.preflight();
+            // Per-remote priming failures do not fail preflight (fault isolation),
+            // but check() is the diagnostic surface: report each one loudly.
+            for (const [remoteName, message] of this.keyFailures) {
+                errors.push(`remote ${remoteName}: ${message}`);
+            }
         } catch (error) {
             errors.push(sanitize(error instanceof Error ? error.message : String(error)));
         }
@@ -677,13 +870,16 @@ export class Backupkit {
             const remoteRsyncBin =
                 this.config.targets.find((t) => remoteOf(t)?.name === remote.name && t.rsync.remoteRsyncBin !== null)
                     ?.rsync.remoteRsyncBin ?? null;
+            // Invariant 5: accept-new (TOFU pinning) only while a human watches a
+            // real TTY; any non-TTY check() pins strictly like every unattended path.
+            const context: SshContext = this.isInteractive() ? "interactive" : "unattended";
             try {
-                row.rsyncVersion = await probeRemoteRsync({
+                row.rsyncVersion = await this.deps.probeRemote({
                     identity: remoteIdentity(remote),
                     runRemote: (argv) =>
                         runRemote(remote, argv, {
                             sshBin: this.sshBin(),
-                            context: "interactive",
+                            context,
                             authSock: this.authSockFor(remote),
                             log: this.log.with({ remote: remote.name }),
                         }),

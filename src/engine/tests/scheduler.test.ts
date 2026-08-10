@@ -264,6 +264,48 @@ describe("Scheduler loop (fake timers)", () => {
         await loop;
     });
 
+    it("a window-skip report drops the stale newest cache: re-list once, no per-tick pipeline storm", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { log } = captureLogger("error");
+        const tracker = new BackoffTracker(log);
+        const runs: string[] = [];
+        let listCalls = 0;
+        // Another writer (a manual `backupkit run`) creates the current window's
+        // snapshot behind the daemon's back: the store answers with it, but the
+        // daemon's cache still says "nothing complete".
+        let newest: string | null = null;
+        const scheduler = new Scheduler({
+            targets: [target],
+            log,
+            now: () => new Date(),
+            tickMs: 30_000,
+            backoff: tracker,
+            listNewest: async () => {
+                listCalls += 1;
+                return newest;
+            },
+            runTarget: async () => {
+                runs.push("web");
+                return { ...report("web", "skipped", null), reason: "window" };
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        // First tick: stale cache says due, the pipeline detects the fulfilled window.
+        expect(runs).toEqual(["web"]);
+        newest = "2026-08-10T120100Z"; // the other writer's snapshot, current window
+        await vi.advanceTimersByTimeAsync(30_000);
+        // The skip invalidated the cache: this tick re-listed instead of re-running.
+        expect(listCalls).toBe(2);
+        expect(runs).toEqual(["web"]);
+        await vi.advanceTimersByTimeAsync(30_000);
+        // And the refreshed cache keeps the target quiet for the rest of the window.
+        expect(runs).toEqual(["web"]);
+        expect(listCalls).toBe(2);
+        scheduler.stop();
+        await loop;
+    });
+
     it("stop() ends the loop promptly", async () => {
         const target = makeTarget({ name: "web", schedule: HOURLY });
         const { scheduler, runs } = makeLoop({ targets: [target] });

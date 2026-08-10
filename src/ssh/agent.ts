@@ -124,17 +124,20 @@ async function fileExists(path: string): Promise<boolean> {
     }
 }
 
-/** Unique explicit remotes by identityFile (first occurrence wins). */
-function uniqueExplicitRemotes(remotes: readonly ResolvedRemote[]): ExplicitRemote[] {
-    const seen = new Set<string>();
-    const unique: ExplicitRemote[] = [];
+/** Explicit remotes grouped by identityFile in first-seen order (one priming attempt per key; a failure marks every remote in the group). */
+function explicitRemotesByKey(remotes: readonly ResolvedRemote[]): Map<string, ExplicitRemote[]> {
+    const groups = new Map<string, ExplicitRemote[]>();
     for (const remote of remotes) {
-        if (remote.kind === "explicit" && !seen.has(remote.identityFile)) {
-            seen.add(remote.identityFile);
-            unique.push(remote);
+        if (remote.kind === "explicit") {
+            const group = groups.get(remote.identityFile);
+            if (group === undefined) {
+                groups.set(remote.identityFile, [remote]);
+            } else {
+                group.push(remote);
+            }
         }
     }
-    return unique;
+    return groups;
 }
 
 /**
@@ -289,23 +292,46 @@ async function primeKey(
     deps.log.info("loaded key into agent", { key });
 }
 
+/** The outcome of `loadKeys`: the agent socket plus every per-remote priming failure. */
+export interface LoadKeysResult {
+    /** The agent socket path for explicit-remote spawns, or null when no explicit remote exists (no agent started). */
+    sock: string | null;
+    /** Remote name -> actionable priming-failure message; every remote sharing an un-primeable identityFile is listed. Empty when all keys primed. */
+    failures: Map<string, string>;
+}
+
 /**
  * Prime every unique explicit-remote key into the persistent agent, ensuring
  * the agent first. Alias remotes are skipped entirely, and a remote list with
- * no explicit remote starts no agent at all and spawns nothing - the return
- * is null. Otherwise returns the agent socket path for the callers that set
- * SSH_AUTH_SOCK on explicit-remote spawns.
+ * no explicit remote starts no agent at all and spawns nothing (`sock` is
+ * null). Key priming is per-remote fault-isolated (spec section 4 step 5): a
+ * key that cannot be primed - e.g. an encrypted `prompt` key with no TTY -
+ * lands in `failures` for every remote using it, so the caller fails only
+ * that remote's targets while the daemon and every other remote keep running.
+ * Only agent-level failures (agent cannot start or answer) still throw.
  */
-export async function loadKeys(remotes: readonly ResolvedRemote[], deps: AgentDeps): Promise<string | null> {
-    const explicit = uniqueExplicitRemotes(remotes);
-    if (explicit.length === 0) {
+export async function loadKeys(remotes: readonly ResolvedRemote[], deps: AgentDeps): Promise<LoadKeysResult> {
+    const groups = explicitRemotesByKey(remotes);
+    if (groups.size === 0) {
         deps.log.debug("no explicit remotes - agent not started");
-        return null;
+        return { sock: null, failures: new Map() };
     }
     const sock = await ensureAgent(deps);
     const loaded = await loadedFingerprints(sock, deps);
-    for (const remote of explicit) {
-        await primeKey(remote, sock, loaded, deps);
+    const failures = new Map<string, string>();
+    for (const group of groups.values()) {
+        try {
+            await primeKey(group[0], sock, loaded, deps);
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            for (const remote of group) {
+                failures.set(remote.name, message);
+            }
+            deps.log.error("key priming failed - targets on this key's remotes will fail until it is fixed", {
+                key: group[0].identityFile,
+                error: message,
+            });
+        }
     }
-    return sock;
+    return { sock, failures };
 }

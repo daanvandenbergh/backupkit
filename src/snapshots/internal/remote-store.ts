@@ -82,9 +82,18 @@ class RemoteLockBackend implements LockBackend {
 
     /**
      * TTL staleness: list the lock directory and parse its snapshot-named
-     * marker; older than 24 h (or unlistable / no parseable marker -
-     * unparseable = stale) means stale. Holder pid/hostname are unknowable
-     * through this command surface and stay null.
+     * marker; older than 24 h means stale, an unlistable lock means stale. A
+     * lock with NO parseable marker is treated as held, NOT stale: acquisition
+     * is two round-trips (mkdir the lock, then mkdir the marker), so a
+     * markerless lock is almost always one a contender caught mid-acquire, and
+     * stealing it would run two pipelines against the same archive root
+     * concurrently. This is the remote analogue of the local backend's
+     * META_GRACE_MS window, but unbounded: the jail's `find` surface cannot
+     * read the lock dir's mtime, so there is no time signal for a markerless
+     * lock. ponytail: the price is that a holder that crashed in the tiny
+     * mkdir->marker window leaves a lock only an operator `rm -rf` can clear;
+     * every marker-present lock still auto-recovers via the 24 h TTL. Holder
+     * pid/hostname are unknowable through this command surface and stay null.
      */
     async inspect(): Promise<LockInspection> {
         const stale = (detail: string): LockInspection => ({ stale: true, pid: null, hostname: null, detail });
@@ -107,7 +116,7 @@ class RemoteLockBackend implements LockBackend {
             }
             return { stale: false, pid: null, hostname: null, detail: `created ${name}` };
         }
-        return stale("lock records no creation time");
+        return { stale: false, pid: null, hostname: null, detail: "no creation marker yet (assuming freshly acquired)" };
     }
 
     /** Remove the lock directory. */

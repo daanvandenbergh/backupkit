@@ -44,7 +44,7 @@ describe("systemd unit", () => {
         ["NoNewPrivileges=true"],
         ["PrivateTmp=true"],
         ["ProtectSystem=strict"],
-        ["ReadWritePaths=/data/archive /var/lib/backupkit /run/backupkit /etc/backupkit"],
+        ['ReadWritePaths="/data/archive" "/var/lib/backupkit" "/run/backupkit" "/etc/backupkit"'],
         ["RestrictSUIDSGID=true"],
         ["PrivateDevices=true"],
         ["ProtectHome=read-only"],
@@ -68,6 +68,11 @@ describe("systemd unit", () => {
         expect(systemdQuote('/pa"th')).toBe('"/pa\\"th"');
         expect(systemdQuote("/pa\\th")).toBe('"/pa\\\\th"');
         expect(systemdQuote("/pa%th")).toBe('"/pa%%th"');
+    });
+
+    it("quotes each ReadWritePaths entry so a space-containing path stays one systemd list item", () => {
+        const spaced = systemdUnit({ ...base, readWritePaths: ["/Volumes/My Backups", "/var/lib/backupkit"] });
+        expect(spaced.split("\n")).toContain('ReadWritePaths="/Volumes/My Backups" "/var/lib/backupkit"');
     });
 
     it("emits ReadOnlyPaths=/root/.ssh only when an alias remote is configured", () => {

@@ -114,3 +114,37 @@ describe("exec", () => {
         expect(result.stderr).toBe("");
     });
 });
+
+describe("exec vs grandchildren holding the stdio pipes", () => {
+    /** Node source that spawns a lingering grandchild inheriting this child's pipes, then runs `tail` in the parent. */
+    function spawnLingerer(grandchildMs: number, tail: string): string {
+        return (
+            'const { spawn } = require("node:child_process");' +
+            // unref: the parent must not wait for the grandchild before exiting.
+            `spawn(process.execPath, ["-e", "setTimeout(() => {}, ${grandchildMs})"], { stdio: "inherit" }).unref();` +
+            tail
+        );
+    }
+
+    it("the timeout is a real hang bound: a grandchild holding the pipes cannot defeat it", async () => {
+        // The direct child hangs and gets killed at the timeout; its grandchild
+        // inherited the stdio pipes and lives on for 3 s. The result must settle
+        // on the child's exit (plus the bounded drain), not on pipe EOF.
+        const started = Date.now();
+        const result = await exec(NODE, ["-e", spawnLingerer(3000, "setTimeout(() => {}, 3000);")], { timeoutMs: 300 });
+        expect(result.timedOut).toBe(true);
+        expect(result.exitCode).toBeNull();
+        expect(Date.now() - started).toBeLessThan(2500);
+    });
+
+    it("a child that exits in time is never labeled timedOut by a lingering grandchild", async () => {
+        // The direct child exits 0 immediately; only the grandchild keeps the
+        // pipes open past the timeout. The successful run must resolve promptly
+        // with timedOut false - a fabricated timeout would trigger caller retries.
+        const started = Date.now();
+        const result = await exec(NODE, ["-e", spawnLingerer(3000, "")], { timeoutMs: 1000 });
+        expect(result.exitCode).toBe(0);
+        expect(result.timedOut).toBe(false);
+        expect(Date.now() - started).toBeLessThan(2500);
+    });
+});

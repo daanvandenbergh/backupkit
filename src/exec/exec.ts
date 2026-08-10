@@ -73,11 +73,24 @@ export function minimalEnv(): Record<string, string> {
 }
 
 /**
+ * How long to keep draining stdout/stderr after the direct child has exited.
+ * The pipes normally reach EOF within milliseconds of the exit; only a
+ * grandchild that inherited them keeps them open longer, and such a
+ * descendant must never defeat the timeout/abort contract or delay the
+ * result indefinitely - so the outcome settles on the child's own exit plus
+ * this bounded grace, not on pipe EOF.
+ */
+const STREAM_DRAIN_MS = 500;
+
+/**
  * Spawn `bin` with the given argv array and resolve with its outcome.
  * `shell: false` always; the returned promise rejects only when the process
  * cannot be spawned at all (e.g. ENOENT) - every other outcome, including
  * non-zero exits, signals, and timeouts, resolves with an ExecResult for the
- * caller's classifier to judge.
+ * caller's classifier to judge. The result settles when the DIRECT child
+ * exits (plus a short output-drain grace): a grandchild holding the stdio
+ * pipes can neither stall the promise past the timeout nor turn a finished
+ * run into a fabricated `timedOut`.
  */
 export function exec(bin: string, args: readonly string[], options: ExecOptions = {}): Promise<ExecResult> {
     const start = Date.now();
@@ -93,12 +106,18 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
         let stdout = "";
         let stderr = "";
         let timedOut = false;
+        let exited = false;
         let termTimer: NodeJS.Timeout | null = null;
         let killTimer: NodeJS.Timeout | null = null;
         let abortKillTimer: NodeJS.Timeout | null = null;
+        let drainTimer: NodeJS.Timeout | null = null;
 
         if (options.timeoutMs !== undefined) {
             termTimer = setTimeout(() => {
+                // A child that already exited cannot time out - only the pipes are draining.
+                if (exited) {
+                    return;
+                }
                 timedOut = true;
                 child.kill("SIGTERM");
                 killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
@@ -127,6 +146,13 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
             signal?.removeEventListener("abort", onAbort);
         };
 
+        /** Resolve with the child's outcome (idempotent: the promise ignores later calls). */
+        const settle = (exitCode: number | null, exitSignal: NodeJS.Signals | null): void => {
+            cleanup();
+            if (drainTimer !== null) clearTimeout(drainTimer);
+            resolve({ exitCode, signal: exitSignal, stdout, stderr, timedOut, durationMs: Date.now() - start });
+        };
+
         child.stdout?.setEncoding("utf8");
         child.stdout?.on("data", (chunk: string) => {
             stdout += chunk;
@@ -141,9 +167,17 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
             reject(error);
         });
 
-        child.on("close", (exitCode, exitSignal) => {
+        // The direct child's exit is the authoritative end of the run: stop the
+        // timeout/abort machinery and give the output pipes a bounded drain
+        // window. 'close' (pipe EOF) settles immediately when it arrives first.
+        child.on("exit", (exitCode, exitSignal) => {
+            exited = true;
             cleanup();
-            resolve({ exitCode, signal: exitSignal, stdout, stderr, timedOut, durationMs: Date.now() - start });
+            drainTimer = setTimeout(() => settle(exitCode, exitSignal), STREAM_DRAIN_MS);
+        });
+
+        child.on("close", (exitCode, exitSignal) => {
+            settle(exitCode, exitSignal);
         });
     });
 }

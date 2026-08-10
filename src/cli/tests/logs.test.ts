@@ -8,12 +8,17 @@
 import { describe, expect, it } from "vitest";
 
 import { main } from "../main.js";
-import { MACOS_LOG_FILES } from "../internal/service/units.js";
+import { MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "../internal/service/units.js";
 import { fakeDeps, makeExecResult } from "./fakes.js";
+
+/** Fake deps with the systemd unit already installed (the normal Linux case). */
+function linuxDeps(options: Parameters<typeof fakeDeps>[0] = {}): ReturnType<typeof fakeDeps> {
+    return fakeDeps({ ...options, files: { [SYSTEMD_UNIT_PATH]: "[Unit]\n", ...options.files } });
+}
 
 describe("Linux (journalctl)", () => {
     it("tails the unit with the default 100 lines over inherited stdio", async () => {
-        const h = fakeDeps();
+        const h = linuxDeps();
         expect(await main(["logs"], h.deps)).toBe(0);
         expect(h.execCalls).toHaveLength(1);
         expect([h.execCalls[0].bin, ...h.execCalls[0].args]).toEqual(["journalctl", "-u", "backupkit", "-n", "100"]);
@@ -26,20 +31,27 @@ describe("Linux (journalctl)", () => {
         [["logs", "--follow", "-n", "20"], ["journalctl", "-u", "backupkit", "-n", "20", "-f"]],
         [["logs", "--lines=7"], ["journalctl", "-u", "backupkit", "-n", "7"]],
     ])("%j builds %j", async (argv, expected) => {
-        const h = fakeDeps();
+        const h = linuxDeps();
         expect(await main(argv, h.deps)).toBe(0);
         expect([h.execCalls[0].bin, ...h.execCalls[0].args]).toEqual(expected);
     });
 
     it("passes the child's exit code through", async () => {
-        const h = fakeDeps({ execResults: [{ match: (bin) => bin === "journalctl", result: makeExecResult({ exitCode: 3 }) }] });
+        const h = linuxDeps({ execResults: [{ match: (bin) => bin === "journalctl", result: makeExecResult({ exitCode: 3 }) }] });
         expect(await main(["logs"], h.deps)).toBe(3);
     });
 
     it("rejects a non-numeric -n with exit 64", async () => {
-        const h = fakeDeps();
+        const h = linuxDeps();
         expect(await main(["logs", "-n", "ten"], h.deps)).toBe(64);
         expect(h.err[0]).toContain("--lines takes a whole number");
+        expect(h.execCalls).toEqual([]);
+    });
+
+    it("reports the missing-source message with exit 1 when the unit was never installed", async () => {
+        const h = fakeDeps();
+        expect(await main(["logs"], h.deps)).toBe(1);
+        expect(h.err).toEqual(["no daemon logs found - is the service installed? (backupkit service install)"]);
         expect(h.execCalls).toEqual([]);
     });
 });

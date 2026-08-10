@@ -108,7 +108,7 @@ export function systemdUnit(options: SystemdUnitOptions): string {
         "NoNewPrivileges=true",
         "PrivateTmp=true",
         "ProtectSystem=strict",
-        `ReadWritePaths=${options.readWritePaths.join(" ")}`,
+        `ReadWritePaths=${options.readWritePaths.map(systemdQuote).join(" ")}`,
         "RestrictSUIDSGID=true",
         "PrivateDevices=true",
         "ProtectHome=read-only",

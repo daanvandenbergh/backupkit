@@ -42,7 +42,7 @@ export interface TargetRunReport {
     snapshot: string | null;
     /** Outcome status. */
     status: RunStatus;
-    /** Machine-readable skip/failure reason ("window", "disk-low", "clock-skew", "verify-failed", "aborted", "dry-run"), or null. */
+    /** Machine-readable skip/failure reason ("window", "disk-low", "clock-skew", "verify-failed", "aborted", "dry-run", "remote-unavailable"), or null. */
     reason: string | null;
     /** ISO start time of the run. */
     startedAt: string;

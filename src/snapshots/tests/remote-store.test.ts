@@ -283,6 +283,35 @@ describe("RemoteSnapshotStore", () => {
             expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
         });
 
+        it("does not steal a fresh markerless lock caught in the mkdir->marker window", async () => {
+            // Contender's mkdir loses (EEXIST); the winner has created the lock
+            // dir but not yet its snapshot-named marker, so find lists nothing.
+            // The contender must treat this as held (LockHeldError), never
+            // rm -rf it - stealing here runs two pipelines against one archive.
+            const { runner, calls } = fakeRunner((argv) => {
+                if (argv[0] === "mkdir" && argv[1] === "--") {
+                    return { exitCode: 1, stderr: "mkdir: File exists" };
+                }
+                if (argv[0] === "find" && argv[1] === LOCK) {
+                    return { stdout: "" };
+                }
+                return {};
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            let ran = false;
+            const error = await store
+                .withLock(async () => {
+                    ran = true;
+                })
+                .then(
+                    () => null,
+                    (e: unknown) => e,
+                );
+            expect(error).toBeInstanceOf(LockHeldError);
+            expect(ran).toBe(false);
+            expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
+        });
+
         it("stale takeover: a marker past the 24h TTL is removed and the lock re-acquired", async () => {
             const twentyFiveHoursAgo = "2026-08-09T021502Z";
             let lockMkdirs = 0;

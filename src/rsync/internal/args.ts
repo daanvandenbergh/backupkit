@@ -30,7 +30,12 @@ export interface TransferOptions {
     preserveOwnership: boolean;
     /** Allow device/special files; false adds --no-devices --no-specials. */
     preserveDevices: boolean;
-    /** Absolute remote rsync binary path (--rsync-path), or null for the remote default. */
+    /**
+     * Absolute remote rsync binary path (`--rsync-path`), or null for the
+     * remote default. Honored only for a pull (remote source); on a push the
+     * jail's forced command fixes the server binary and this is not emitted
+     * (see `buildArgs`).
+     */
     remoteRsyncBin: string | null;
 }
 
@@ -114,7 +119,15 @@ export function buildArgs(spec: TransferSpec, mode: BuildMode): string[] {
     for (const pattern of spec.exclude) {
         args.push(`--exclude=${pattern}`);
     }
-    if (o.remoteRsyncBin !== null) {
+    // --rsync-path selects the server binary on the FAR side, so it is honored
+    // only for a pull (remote SOURCE). A push destination is the jailed archive
+    // server whose forced command (`backupkit-remote`) already fixes the server
+    // binary; a client-supplied `--rsync-path=<bin>` would make ssh's original
+    // command `<bin> --server ...`, which the jail rejects by design (it must
+    // never exec a client-chosen binary - that is a shell escape). So on a push
+    // target `remoteRsyncBin` is a no-op at the wire: the operator points the
+    // jail account's own PATH at a rsync >= 3.2.5. ponytail: pull-only knob.
+    if (o.remoteRsyncBin !== null && spec.src.kind === "remote") {
         args.push(`--rsync-path=${o.remoteRsyncBin}`);
     }
     if (spec.src.kind === "remote" || spec.dst.kind === "remote") {

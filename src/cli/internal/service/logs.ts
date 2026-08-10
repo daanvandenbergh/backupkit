@@ -2,13 +2,16 @@
  * The `backupkit logs` command (spec section 7): journalctl -u backupkit on
  * Linux, tail over the launchd log files on macOS - inherited stdio, no
  * timeout, the child's exit code passed through. No --json (journald already
- * has `-o json`).
+ * has `-o json`). Both branches probe their log source's existence before
+ * spawning (the unit file on Linux, the log files on macOS) so an
+ * unregistered service reports the missing-source message instead of the
+ * child's silent success.
  */
 
 import type { CliDeps } from "../context.js";
 import { parseFlags, UsageError } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
-import { MACOS_LOG_FILES } from "./units.js";
+import { MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "./units.js";
 
 /** The message printed when no log source exists. */
 const NO_LOGS = "no daemon logs found - is the service installed? (backupkit service install)";
@@ -46,6 +49,13 @@ export async function logsCommand(argv: string[], deps: CliDeps): Promise<number
         return result.exitCode ?? 1;
     }
 
+    // Mirror the macOS branch: probe the log source before spawning, so an
+    // unregistered unit reports the spec'd missing-source message instead of
+    // journalctl's silent "-- No entries --" success (exit 0).
+    if (!deps.files.exists(SYSTEMD_UNIT_PATH)) {
+        deps.stderr(NO_LOGS);
+        return 1;
+    }
     try {
         const result = await deps.execFn("journalctl", ["-u", "backupkit", "-n", lines, ...(follow ? ["-f"] : [])], {
             stdio: "inherit",

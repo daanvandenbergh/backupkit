@@ -130,7 +130,6 @@ describe("buildArgs: exact full-argv equality across all three modes", () => {
             "--exclude=we ird $(rm -rf ~)",
             "--exclude=--delete",
             "--exclude=semi;colon'quo\"te",
-            "--rsync-path=/usr/local/bin/rsync",
             "-e",
             "ssh -o BatchMode=yes",
             "--link-dest=../2026-08-09T031500Z",
@@ -334,5 +333,46 @@ describe("buildArgs: option toggles", () => {
 
     it("--bwlimit token is passed verbatim", () => {
         expect(buildArgs(spec(defaultOptions({ bwlimit: "512" })), "transfer")).toContain("--bwlimit=512");
+    });
+});
+
+describe("buildArgs: remoteRsyncBin is a pull-only knob (jail compatibility)", () => {
+    const bin = "/opt/homebrew/bin/rsync";
+
+    it("emits --rsync-path for a pull (remote source)", () => {
+        const args = buildArgs(
+            {
+                src: explicitRemote("/var/www"),
+                dst: local("/srv/backups/web/2026-08-10T031500Z.partial"),
+                options: defaultOptions({ remoteRsyncBin: bin }),
+                exclude: [],
+                sshTokens: ["ssh"],
+                linkDestBase: null,
+                fakeSuper: false,
+            },
+            "transfer",
+        );
+        expect(args).toContain(`--rsync-path=${bin}`);
+    });
+
+    it("never emits --rsync-path for a push (remote destination), even with remoteRsyncBin set", () => {
+        // A push destination is the jailed archive server; a client-supplied
+        // --rsync-path would make ssh run `<bin> --server ...`, which the jail
+        // rejects. The forced command fixes the server binary instead.
+        for (const mode of MODES) {
+            const args = buildArgs(
+                {
+                    src: local("/var/www"),
+                    dst: aliasRemote("/backups/web/2026-08-10T031500Z.partial"),
+                    options: defaultOptions({ remoteRsyncBin: bin }),
+                    exclude: [],
+                    sshTokens: ["ssh"],
+                    linkDestBase: null,
+                    fakeSuper: false,
+                },
+                mode,
+            );
+            expect(args.some((a) => a.startsWith("--rsync-path"))).toBe(false);
+        }
     });
 });

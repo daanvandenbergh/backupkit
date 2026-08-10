@@ -79,6 +79,20 @@ describe("parseJsonc: plain JSON", () => {
     });
 });
 
+describe("parseJsonc: UTF-8 BOM tolerance", () => {
+    /** U+FEFF, the byte-order mark. */
+    const BOM = String.fromCharCode(0xfeff);
+
+    it("parses a BOM-prefixed document identically to the same text without one", () => {
+        const text = '{"a": 1, "b": "x"}';
+        expect(toValue(parse(BOM + text))).toEqual(toValue(parse(text)));
+    });
+
+    it("does not treat a BOM elsewhere in the document as trivia", () => {
+        expectFail(`{"a": ${BOM}1}`, "unexpected character");
+    });
+});
+
 describe("parseJsonc: comments", () => {
     it.each([
         ["a line comment", '// hello\n{"a": 1}', { a: 1 }],
