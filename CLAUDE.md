@@ -24,10 +24,11 @@ re-exported from `index.ts`; internal ones are deliberately not exported.
 so a change is not done until both are green. Vitest collects `src/**/tests/**/*.test.ts` only.
 
 ## Conventions
-- **Tests go in a `tests/` subdir next to the code**, NEVER alongside the source -
-  `src/<module>/tests/<thing>.test.ts`. (The imported `ts_modular_coding` rule shows a test at the
-  module root; this project overrides that, and `vitest.config.ts` only collects the subdir - a test
-  written beside its source silently never runs.)
+- **Tests live in a `tests/` subdir** - `src/tests/` for `src/*.ts`, `src/<module>/tests/` for a
+  module. The imported audit-tests rule governs how to write them and mandates that placement;
+  what it cannot know is that `vitest.config.ts` collects **only** that path (both depths, verified).
+  A test written beside its source is not a warning - it silently never runs and `npm test` stays
+  green. Where the imported `ts_modular_coding` rule shows a test at the module root, this wins.
 - **An architectural promise is kept by a red test, not by this document.** When a rule matters
   (a module that must not reach the filesystem, a flag that must never be passed), write the test
   that fails when it breaks, and name it here.
