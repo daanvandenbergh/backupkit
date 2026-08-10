@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -239,6 +239,50 @@ describe("backupkit-remote jail script", () => {
         it("a rejected rsync command never reaches the rsync binary", async () => {
             await expectRejected(`rsync --server -a . /etc`);
             expect(await fake.calls()).toEqual([]);
+        });
+    });
+
+    describe("symlink-component traversal escape (resolved path must stay under the jail)", () => {
+        // The string checks permit an attacker-named symlink whose leaf is in the
+        // allowed charset (e.g. "evil"); rsync's default --links bundle writes one
+        // INTO the jail. A second command then traverses it so the kernel
+        // dereferences the intermediate symlink and the write lands OUTSIDE the
+        // jail. check_no_symlink_prefix rejects any operand whose existing prefix
+        // is a symlink, closing this.
+        it("blocks the /etc/cron.d/pwn write via an intermediate symlink for mv, mkdir, and rsync dest", async () => {
+            const web = `${jailRoot}/web`;
+            await mkdir(`${web}/${SNAP}.partial`, { recursive: true });
+            await writeFile(`${web}/${SNAP}.partial/payload`, "x");
+            // Attacker-planted symlink INSIDE the jail, leaf passes the charset check.
+            await symlink("/", `${web}/evil`);
+
+            // mv the payload through the symlink toward /etc/cron.d/pwn: rejected.
+            await expectRejected(quoted(["mv", "--", `${web}/${SNAP}.partial/payload`, `${web}/evil/etc/cron.d/pwn`]));
+            // mkdir -p through the symlink: rejected.
+            await expectRejected(quoted(["mkdir", "-p", "--", `${web}/evil/etc/cron.d`]));
+            // rsync --server destination through the symlink: rejected, never reaches rsync.
+            await expectRejected(`rsync --server -logDtpre.iLsfxC . ${web}/evil/etc`);
+            expect(await fake.calls()).toEqual([]);
+            // Nothing escaped the jail.
+            expect(existsSync("/etc/cron.d/pwn")).toBe(false);
+        });
+
+        it("rejects an operand whose LEAF itself is a symlink (broken symlink included)", async () => {
+            const web = `${jailRoot}/web`;
+            await mkdir(web, { recursive: true });
+            await symlink("/nonexistent-target", `${web}/${SNAP}`); // broken symlink: -L true, -e false
+            await expectRejected(quoted(["rm", "-rf", "--", `${web}/${SNAP}`]));
+        });
+
+        it("still accepts legitimate operations on real (non-symlink) paths under the jail", async () => {
+            const web = `${jailRoot}/web`;
+            await mkdir(`${web}/${SNAP}.partial`, { recursive: true });
+            // mkdir a not-yet-existing target (final component absent): must pass.
+            expect((await jail(quoted(["mkdir", "-p", "--", `${web}/${SNAP}`]))).exitCode).toBe(0);
+            // mv real .partial -> a fresh final name: must pass.
+            expect((await jail(quoted(["mv", "--", `${web}/${SNAP}.partial`, `${web}/${BASE}`]))).exitCode).toBe(0);
+            // rsync --server into a partial under a real tree: must pass.
+            expect((await jail(`rsync --server -logDtpre.iLsfxC . ${web}/${SNAP}.partial`)).exitCode).toBe(0);
         });
     });
 

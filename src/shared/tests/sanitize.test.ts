@@ -28,6 +28,23 @@ describe("sanitize", () => {
         expect(sanitize(input)).toBe(input);
     });
 
+    it.each([
+        ["C1 CSI (U+009B, single-byte escape introducer)", 0x9b],
+        ["C1 low boundary (U+0080)", 0x80],
+        ["C1 high boundary (U+009F)", 0x9f],
+        ["LINE SEPARATOR (U+2028)", 0x2028],
+        ["PARAGRAPH SEPARATOR (U+2029)", 0x2029],
+        ["RIGHT-TO-LEFT OVERRIDE (U+202E)", 0x202e],
+    ] as const)("strips %s", (_label, codePoint) => {
+        expect(sanitize("a" + String.fromCodePoint(codePoint) + "b")).toBe("ab");
+    });
+
+    it("strips a UTF-8-decoded C1 CSI that would otherwise start a terminal escape", () => {
+        // 0xC2 0x9B decodes to U+009B (CSI); a hostile filename can smuggle it.
+        const decoded = Buffer.from([0xc2, 0x9b]).toString("utf8");
+        expect(sanitize("log" + decoded + "31mred")).toBe("log31mred");
+    });
+
     it("neutralizes a hostile remote filename end to end", () => {
         const hostile = "ok\x1b]0;pwned\x07\r\nfake log line";
         expect(sanitize(hostile)).toBe("ok]0;pwnedfake log line");

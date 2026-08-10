@@ -6,6 +6,7 @@
  * start/stop/abort flow.
  */
 
+import { exec } from "../../exec/exec.js";
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -252,7 +253,7 @@ describe("Backupkit", () => {
         const report = await fixture.kit.check();
         expect(report.jailLines).toHaveLength(1);
         expect(report.jailLines[0].line).toBe(
-            'restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ' +
+            'restrict,command="/usr/local/bin/backupkit-remote \'/srv/backups\'" ' +
                 '<append the public key your ssh_config uses for "myserver": ssh-add -L, or the .pub of its IdentityFile>',
         );
     });
@@ -296,8 +297,36 @@ describe("Backupkit", () => {
         );
         const report = await cold.check();
         expect(report.jailLines[0].line).toBe(
-            'restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAAtest comment',
+            'restrict,command="/usr/local/bin/backupkit-remote \'/srv/backups\'" ssh-ed25519 AAAAtest comment',
         );
+    });
+
+    it("check: a destination with spaces and quotes is shell- and authorized_keys-safe", async () => {
+        // A local-with-spaces destination is legitimate; a naive line would let the
+        // space widen $ROOT and the quote break out of command="...". The generated
+        // line must survive BOTH nesting layers and hand backupkit-remote the whole
+        // destination as exactly one $1 argument.
+        const destination = '/Volumes/My "Backups"';
+        const fixture = track(
+            await makeKit({
+                target: {
+                    direction: "push",
+                    dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: destination },
+                    destination,
+                },
+            }),
+        );
+        const report = await fixture.kit.check();
+        const line = report.jailLines[0].line;
+        expect(line).toContain(
+            'restrict,command="/usr/local/bin/backupkit-remote \'/Volumes/My \\"Backups\\"\'"',
+        );
+
+        // Emulate sshd: strip the command="..." field, undo authorized_keys
+        // backslash-escaping, then let a shell parse it and report $1.
+        const field = /command="((?:\\.|[^"\\])*)"/.exec(line)![1].replace(/\\(["\\])/g, "$1");
+        const parsed = await exec("sh", ["-c", `set -- ${field}; shift; printf %s "$1"`]);
+        expect(parsed.stdout).toBe(destination);
     });
 
     it("start/stop: the immediate tick runs the due target, stop resolves the loop", async () => {

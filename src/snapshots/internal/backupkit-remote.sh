@@ -80,8 +80,38 @@ check_component() {
     [ ${#comp} -le 64 ]
 }
 
+# True when NO existing prefix component of the (already string-validated,
+# under-$ROOT) path operand $1 is a symlink. The string checks only bound the
+# LITERAL path; this bounds the RESOLVED path. Walk from $ROOT down, appending
+# one component at a time: if any existing prefix is a symlink (`-L`, incl. a
+# broken one) reject, so mv/mkdir/rsync can never dereference an
+# attacker-planted intermediate symlink and land the write OUTSIDE the jail.
+# The final component may not exist yet (a mkdir/mv target) - once a prefix does
+# not exist, nothing deeper can, so accept.
+check_no_symlink_prefix() {
+    sp=$ROOT
+    srest=${1#"$ROOT"/}
+    while [ -n "$srest" ]; do
+        case $srest in
+            */*)
+                scomp=${srest%%/*}
+                srest=${srest#*/}
+                ;;
+            *)
+                scomp=$srest
+                srest=
+                ;;
+        esac
+        sp=$sp/$scomp
+        [ -L "$sp" ] && return 1
+        [ -e "$sp" ] || return 0
+    done
+    return 0
+}
+
 # True when lifecycle path operand $1 is strictly under $ROOT with every
-# leaf component permitted by check_component.
+# leaf component permitted by check_component AND no existing prefix is a
+# symlink (the resolved path stays under $ROOT).
 check_lifecycle_path() {
     lpath=$1
     case $lpath in
@@ -105,7 +135,7 @@ check_lifecycle_path() {
         esac
         check_component "$lcomp" || return 1
     done
-    return 0
+    check_no_symlink_prefix "$lpath"
 }
 
 # True when rsync path operand $1 is strictly under $ROOT with no ".." or
@@ -135,7 +165,7 @@ check_rsync_path() {
             "" | ..) return 1 ;;
         esac
     done
-    return 0
+    check_no_symlink_prefix "$rpath"
 }
 
 # Validate an IFS-split "rsync --server ..." argv: option tokens only until

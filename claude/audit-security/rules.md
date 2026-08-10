@@ -44,3 +44,12 @@ even when nothing visibly fails.
     line for every remote kind, and injects NO identity/port/known_hosts options for aliases;
     an alias remote admits no sibling config fields, and the alias charset excludes every
     character that could confuse host:path splitting, option parsing, or quoting.
+15. The push jail validates the RESOLVED path, not just the literal string: for every path
+    operand, `backupkit-remote` walks each existing prefix component and refuses if any is a
+    symlink, so an attacker-planted symlink inside the jail (rsync transfers symlinks by
+    default) can never be traversed to write outside `$ROOT`. The `authorized_keys` forced
+    command shell-quotes the jail root so a destination with spaces or quotes cannot widen or
+    break out of it.
+16. Every remote-derived string is stripped of C0, DEL, C1 (0x80-0x9f), and the bidi/line
+    separators U+2028/U+2029/U+202E before it reaches a log or a run-report - no
+    terminal-escape or bidi-spoof survives into operator-facing output.

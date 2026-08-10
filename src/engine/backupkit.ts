@@ -22,6 +22,7 @@ import { sanitize } from "../shared/sanitize.js";
 import { parseSnapshotName } from "../shared/snapshot-name.js";
 import type { Endpoint, ResolvedRemote } from "../shared/types.js";
 import { loadKeys } from "../ssh/agent.js";
+import { quoteShellArg } from "../ssh/internal/quote.js";
 import { checkFilePermissions, defaultPermissionDeps, type PermissionDeps } from "../ssh/permissions.js";
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
 import { dryRunStats, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
@@ -102,6 +103,27 @@ function remoteOf(target: ResolvedTarget): ResolvedRemote | null {
 /** The remote-probe cache identity: `user@host:port` for explicit remotes, the alias string for aliases. */
 function remoteIdentity(remote: ResolvedRemote): string {
     return remote.kind === "alias" ? remote.alias : `${remote.user}@${remote.host}:${remote.port}`;
+}
+
+/**
+ * Build the `restrict,command="..."` authorized_keys prefix for a push target,
+ * with the destination made safe to survive TWO nested contexts (security
+ * invariant 10). A raw destination containing a space, double quote, or
+ * backslash could otherwise widen $ROOT to a parent directory or break out of
+ * the `command="..."` quoting.
+ *
+ * The destination crosses two layers before reaching backupkit-remote as $1:
+ *   1. sshd's `$SHELL -c <command>` re-parses the command string as a shell
+ *      line, so the destination must be exactly one shell word -> single-quote
+ *      it with {@link quoteShellArg}.
+ *   2. That word sits inside the authorized_keys `command="..."` double-quoted
+ *      field, where `\` and `"` are the only escapes -> backslash-escape both
+ *      (backslash first) so a `'\''` sequence or a literal `"` cannot terminate
+ *      the field early.
+ */
+function jailCommandPrefix(destination: string): string {
+    const word = quoteShellArg(destination).replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+    return `restrict,command="/usr/local/bin/backupkit-remote ${word}"`;
 }
 
 /**
@@ -900,7 +922,7 @@ export class Backupkit {
                 continue;
             }
             const remote = target.dst.remote;
-            const prefix = `restrict,command="/usr/local/bin/backupkit-remote ${target.destination}"`;
+            const prefix = jailCommandPrefix(target.destination);
             if (remote.kind === "alias") {
                 jailLines.push({
                     target: target.name,
