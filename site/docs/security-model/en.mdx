@@ -1,0 +1,82 @@
+---
+title: "Security Model"
+description: "Pull-preferred trust, the push forced-command jail and its symlink defense, contextual host-key pinning, key permissions, and hardening advice."
+tab: "Guide"
+group: "Concepts"
+order: 2
+icon: "shield"
+keywords:
+    - security
+    - ssh
+    - jail
+    - host key
+    - permissions
+image: "/assets/docs/security-model/hero.en.jpg"
+updated: "2026-08-10"
+---
+
+Backupkit moves data over ssh and writes it to an archive, so its security model is about who can reach what. This page describes the defenses backupkit enforces: the pull-preferred trust direction, the forced-command jail that constrains a push key, contextual host-key pinning, the file-permission preflight, and the mount hardening that limits what a restored tree can do.
+
+## Prefer pull so a compromised source cannot reach the archive
+
+The strongest control is architectural. In a **pull** target the backup server reaches out to the source and the source holds no credential to the archive, so a compromised source host cannot read, delete, or tamper with any snapshot. Pull is the default for this reason. **Push** exists for hosts that must initiate the connection themselves; because the source then holds a credential that reaches the archive, backupkit jails that credential (below). See [Push vs Pull Architecture](/docs/push-vs-pull) for the full comparison.
+
+## The no-hang, no-downgrade ssh baseline
+
+Every ssh invocation carries a fixed option baseline that backupkit injects on the command line, where it overrides anything in the user's `ssh_config` by OpenSSH's own precedence rules. The baseline is:
+
+- `BatchMode=yes` - no ssh code path can ever block on an interactive prompt;
+- `ConnectTimeout=15`, `ServerAliveInterval=15`, `ServerAliveCountMax=4` - a dead link fails fast instead of hanging a run;
+- `StrictHostKeyChecking` - `yes` for any unattended run, `accept-new` only during an interactive `check` on a TTY. The value `no` is unrepresentable; a key mismatch is always fatal and is never retried at any layer.
+
+This baseline is injected for both remote kinds, so even an alias remote whose `ssh_config` is lax still gets the strict, no-hang guarantees. For an explicit remote backupkit additionally pins the identity: `IdentitiesOnly=yes`, `PreferredAuthentications=publickey`, a dedicated `UserKnownHostsFile`, and the exact `-i <identityFile>` and `-p <port>` from your config. An alias remote gets only the baseline plus `LogLevel=ERROR`; its host, user, key, port, and known_hosts all come from `ssh_config`, which backupkit deliberately does not second-guess.
+
+## The push jail: a forced command that validates the resolved path
+
+A push key is never a plain shell key. It is wired into `authorized_keys` behind the `backupkit-remote` forced command, and `backupkit check` generates the exact line from your loaded config and real key:
+
+```
+restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...
+```
+
+`restrict` strips port, agent, PTY, and X11 forwarding. The forced command then reads `$SSH_ORIGINAL_COMMAND` and permits **only**:
+
+- `rsync --server` transfers whose single path operand resolves under the jail root, with the symlink-following and command-executing rsync flags (`--copy-links`, `--keep-dirlinks`, `--rsync-path`, `--rsh`, batch replay, out-of-jail path options) rejected outright; and
+- the exact directory operations the snapshot store issues (`mkdir`, `find`, `mv`, `rm -rf`, `df`, and `rsync --version`), each with every path operand under the jail root and every leaf component matching a snapshot name, its `.partial`/`.deleting` form, `.backupkit.lock`, or a target-name-charset component.
+
+Everything else exits with a rejection. There is no `eval` anywhere in the script - validated operands are `exec`'d directly, so no shell ever re-parses attacker-controlled text.
+
+### The symlink-resolution defense
+
+String checks alone would only bound the *literal* path. Because rsync transfers symlinks by default, an attacker who can write into the jail could plant a symlink and try to make a later `mv` or `mkdir` follow it out of the jail root. To stop that, for every path operand `backupkit-remote` walks each existing prefix component from the jail root down and refuses if any is a symlink. That bounds the *resolved* path, so a planted intermediate symlink can never be traversed to write outside the jail root. The `authorized_keys` forced command also shell-quotes the jail root, so a root path containing spaces or quotes cannot widen or break out of the jail.
+
+For an alias push remote, `check` cannot see the real public key, so instead of a complete line it prints the `restrict,command=...` prefix and the instruction to append the public key the alias authenticates with. No example or generated line ever shows an unrestricted key.
+
+## Host-key pinning is contextual
+
+Backupkit pins host keys on first contact (trust on first use), but only while a human is watching. During an interactive `backupkit check` on a TTY, `StrictHostKeyChecking=accept-new` lets an unpinned host be recorded. Every unattended run uses `StrictHostKeyChecking=yes` and refuses an unpinned or changed host.
+
+Where the pin is stored depends on the remote kind:
+
+- **Explicit remotes** pin into a dedicated known_hosts file, `<configDir>/known_hosts` by default (override with `knownHostsFile`). Backupkit creates it `0600` when absent.
+- **Alias remotes** use the user's own known_hosts, exactly as `ssh <alias>` would, so backupkit and interactive ssh never disagree about the same host.
+
+A changed host key - the classic man-in-the-middle signal - is fatal everywhere and is never auto-removed; the error names the file to edit by hand after you have verified the host.
+
+## Key and file permissions fail closed
+
+Before any network I/O, backupkit runs a permission preflight and refuses to continue on a permissive mode. It always checks the files it owns: the config file (not group- or other-writable, owned by your effective uid or root), the state and runtime directories (`0700`, created so when absent), and every local destination root (exists, not group/other-writable).
+
+For each **explicit** remote it additionally checks the private key and any `file:` passphrase file (no group/other bits, owned by your euid or root), the `.pub` sidecar when present, and the dedicated known_hosts file. **Alias** remotes contribute no rows: the `ssh_config` files and the keys they name are ssh's own enforcement domain, and ssh already refuses a world-readable key itself. Skipping ssh's files is never a reason to skip checking backupkit's own.
+
+Passphrases never appear in a config value, environment variable, argv, or log. The only ways a passphrase is ever carried are ssh-add's own TTY prompt (`passphrase: "prompt"`, refused when there is no TTY) or a `0600` askpass file (`passphrase: "file:/abs/path"`). An alias remote cannot carry a passphrase at all - the field is not part of its shape.
+
+## Harden the archive filesystem
+
+A backup archive holds files that came from another machine, so treat it as untrusted at rest. Backupkit already strips setuid/setgid bits from received trees and refuses device and special files unless a target opts in with `preserveDevices`. Reinforce that at the mount layer: mount the filesystem holding your destination roots with `nosuid` and `nodev` (and `nosymfollow` where your platform supports it), so even a future bug cannot leave an executable setuid file or a device node sitting in the archive.
+
+## Related
+
+- [Push vs Pull Architecture](/docs/push-vs-pull) - the trust direction in depth
+- [Configuration Reference](/docs/configuration) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
+- [Daemon Setup](/docs/daemon-setup) - the hardened service unit and how keys behave across reboots

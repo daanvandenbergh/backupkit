@@ -1,0 +1,188 @@
+---
+title: "Configuration Reference"
+description: "Every backupkit config field: the JSONC format, remotes (explicit and alias), targets, schedules, retention, retry, and rsync tuning, with defaults."
+tab: "Reference"
+group: "Configuration"
+order: 1
+icon: "document"
+keywords:
+    - configuration
+    - config
+    - jsonc
+    - schedule
+    - remotes
+image: "/assets/docs/configuration/hero.en.jpg"
+updated: "2026-08-10"
+---
+
+Backupkit reads a single `config.jsonc` describing your remotes, targets, schedules, and retention. This page documents every field and its default. `backupkit init` writes a fully commented starter you can edit in place; the sections below are the complete reference.
+
+## The config file format
+
+The config is **JSONC**: strict JSON plus exactly three tolerances - `//` line comments, `/* */` block comments (non-nesting), and one optional trailing comma before a `}` or `]`. The canonical filename is `config.jsonc`; a plain `config.json` is also accepted, since valid JSON is a strict subset.
+
+Two rules are stricter than `JSON.parse`:
+
+- **Duplicate keys are fatal.** A repeated key in any object is a config error naming both lines, so a shadowed remote or target can never be silently dropped.
+- **Nesting is capped** at 64 levels.
+
+Every command resolves the config path the same way: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/` (probing `config.jsonc` then `config.json`), then `${XDG_CONFIG_HOME:-~/.config}/backupkit/`. A `--config` or `$BACKUPKIT_CONFIG` path is used verbatim; a missing file there is an error, never a fallthrough. Both `config.jsonc` and `config.json` present in one directory is an error naming both.
+
+## Top-level fields
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `remotes` | object | required | Machines this host talks to, keyed by short name |
+| `targets` | object | required | What to back up, keyed by target name (run order = document order) |
+| `name` | string | `"backupkit"` | Instance label used in logs and lock files |
+| `retention` | object | keep everything | Default GFS retention for targets defining none |
+| `stateDir` | string | `/var/lib/backupkit` (root) else `~/.local/state/backupkit` | Run-report root |
+| `logging` | object | `{ level: "info" }` | `level` (`error`/`warn`/`info`/`debug`) and optional `file` |
+| `rsyncBin` | string | probe `/opt/homebrew/bin/rsync`, `/usr/local/bin/rsync`, then PATH | Local rsync override |
+| `sshBin` | string | from PATH | Local ssh override |
+
+Remote and target keys match `/^[a-z0-9][a-z0-9._-]*$/`, max 64 characters.
+
+## Remotes
+
+A remote is one of two mutually exclusive shapes. The presence of an `alias` key selects which.
+
+### Explicit remote
+
+Backupkit owns the identity, key loading, and known_hosts.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `host` | string | required | Hostname or IP (IPv6 literals allowed) |
+| `user` | string | required | SSH username, `/^[a-z_][a-z0-9._-]{0,31}$/i` |
+| `identityFile` | string | required | Absolute path to the private key (no whitespace or quotes) |
+| `port` | integer | `22` | SSH port, 1-65535 |
+| `passphrase` | string | none | `"file:/abs/path"` or `"prompt"` - never the passphrase itself |
+| `knownHostsFile` | string | `<configDir>/known_hosts` | Override the dedicated known_hosts path |
+
+```jsonc
+"remotes": {
+    "example": {
+        "host": "10.0.0.11",
+        "user": "backup-reader",
+        "identityFile": "/etc/backupkit/keys/example_ed25519",
+    },
+}
+```
+
+The `passphrase` value is validated to be `"file:/..."` or exactly `"prompt"`; a raw passphrase or an `env:` form is rejected. See the [Security Model](/docs/security-model) for how each form is loaded.
+
+### Alias remote
+
+An alias remote reuses a `Host` entry from your `ssh_config`. It carries **one** field, `alias`, and nothing else - host, user, key, port, and known_hosts all come from ssh. Any sibling field is a config error.
+
+Given this in `~/.ssh/config`:
+
+```
+Host myserver
+    HostName 10.0.0.11
+    User backup-reader
+    IdentityFile /etc/backupkit/keys/example_ed25519
+```
+
+the matching backupkit remote is a single line:
+
+```jsonc
+"remotes": {
+    "myserver": { "alias": "myserver" },
+}
+```
+
+The alias must match `/^[a-z0-9_][a-z0-9._-]*$/i`, max 64 - no whitespace, quotes, `:`, `@`, `/`, or leading `-`, so it can never confuse rsync's `host:path` split or ssh's option parsing. Backupkit still injects its safety option baseline on the command line, which overrides `ssh_config`, so an alias remote keeps the no-hang and strict-host-key guarantees even if your `ssh_config` is lax.
+
+## Targets
+
+Each target is keyed by name; the key becomes the snapshot subdirectory and the log identifier.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `direction` | `"pull"` \| `"push"` | required | Pull fetches from the remote; push sends to it |
+| `remote` | string | required | A key of `remotes` |
+| `source` | string | required | Directory to back up (pull: on the remote; push: local) |
+| `destination` | string | required | Archive root (pull: local; push: on the remote) |
+| `exclude` | string[] | `[]` | rsync exclude patterns |
+| `schedule` | object | `{ interval: "day" }` | When to run (matrix below) |
+| `retention` | object \| `false` | top-level default | Per-target retention; `false` = never prune |
+| `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
+| `minFree` | string \| `false` | `"5%"` | Free-space floor; `false` disables the guard |
+| `rsync` | object | `{}` | Per-target rsync tuning (below) |
+| `enabled` | boolean | `true` | `false` = configured but never scheduled |
+
+All path fields are absolute (`~` is rejected), contain no NUL or newline, and must not start with `-`. `minFree` is `"N%"` (0-50) or an absolute binary size like `"10G"` / `"500M"`.
+
+### Schedules
+
+The `schedule` object sets the window. Anchors are optional and gated to the intervals they make sense for.
+
+| Field | Type / range | Valid for interval | Default |
+| --- | --- | --- | --- |
+| `interval` | `minute` \| `hour` \| `day` \| `week` \| `month` | always (required) | - |
+| `intervalCount` | integer >= 1 | every interval | `1` |
+| `at` | `"HH:MM"` UTC | day, week, month | `"00:00"` |
+| `on` | `mon`..`sun` | week | `"mon"` |
+| `dayOfMonth` | integer 1-28 | month | `1` |
+
+An anchor outside its valid interval is a config error naming the field - for example `at` on a `minute` schedule, or `dayOfMonth` on anything but `month`. `dayOfMonth` caps at 28 so the anchored day exists in every month, with no clamping and no skipped February. `month` windows are true calendar months in UTC (months-since-epoch indexing), never a 30.5-day approximation. One worked example per interval:
+
+```jsonc
+"schedule": { "interval": "minute", "intervalCount": 5 }              // every 5 minutes
+"schedule": { "interval": "hour", "intervalCount": 6 }                // every 6 hours
+"schedule": { "interval": "day", "at": "03:00" }                      // daily at 03:00 UTC
+"schedule": { "interval": "week", "on": "sun", "at": "01:00" }        // weekly, Sunday 01:00 UTC
+"schedule": { "interval": "month", "dayOfMonth": 1, "at": "04:00" }   // monthly, the 1st at 04:00 UTC
+```
+
+### Retry
+
+The only retry knob is the transfer attempt count. Delays are fixed and not configurable.
+
+```jsonc
+"retry": { "attempts": 5 }
+```
+
+`attempts` is an integer 1-10, default 5. Between attempts, backupkit waits 15 seconds, doubling to a 300-second cap with plus-or-minus 20% jitter, always resuming into the same `.partial` snapshot.
+
+### rsync tuning
+
+The optional `rsync` object tunes the transfer per target. All fields are optional.
+
+| Field | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `compress` | boolean | `true` | `-z` compression |
+| `bwlimit` | string | unlimited | `--bwlimit`, e.g. `"10M"` or a bare number (KiB/s) |
+| `ioTimeoutSec` | integer | `600` | `--timeout` seconds |
+| `xattrs` | boolean | `false` | `--xattrs` |
+| `preserveOwnership` | boolean | `true` | receive owner/group; `false` adds `--no-owner --no-group` |
+| `preserveDevices` | boolean | `false` | allow device/special files (rsync `-D`) |
+| `remoteRsyncBin` | string | remote default | `--rsync-path` |
+| `verify` | boolean | `false` | pre-promote `--checksum --dry-run` pass |
+
+## Retention
+
+The top-level `retention` object is the default GFS policy for targets that define none. Each field keeps a tier of snapshots; a snapshot survives if any rule claims it.
+
+```jsonc
+"retention": {
+    "keepLast": 7,
+    "keepDaily": 14,
+    "keepWeekly": 8,
+    "keepMonthly": 12,
+}
+```
+
+All counts are non-negative integers. Omit the object to keep everything forever; set a target's `retention` to `false` to keep everything for that target. An empty `{}` is rejected. See [Versioning & Retention](/docs/retention) for how the tiers choose snapshots.
+
+## The starter as a worked example
+
+`backupkit init` writes a complete, commented config that passes validation as shipped - a unit test parses and validates it, so the example can never drift from the schema. Start from that file and edit it in place rather than writing one from scratch.
+
+## Related
+
+- [Versioning & Retention](/docs/retention) - how retention rules select snapshots
+- [Security Model](/docs/security-model) - key, passphrase, and known_hosts handling
+- [CLI Reference](/docs/cli-reference) - the commands that read this config

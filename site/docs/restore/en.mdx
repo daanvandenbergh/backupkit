@@ -1,0 +1,90 @@
+---
+title: "Restoring a Backup"
+description: "Copy one snapshot to a fresh path with backupkit restore, resolve the latest snapshot, and optionally checksum-verify the copy."
+tab: "Guide"
+group: "Operate"
+order: 2
+icon: "check"
+keywords:
+    - restore
+    - recover
+    - snapshot
+    - verify
+image: "/assets/docs/restore/hero.en.jpg"
+updated: "2026-08-10"
+---
+
+Restoring copies one snapshot out of the archive to a fresh path you choose. It never writes into an existing directory and never deletes anything, so a restore cannot damage the archive or an existing tree. This guide shows how to restore a snapshot and how to verify the copy.
+
+**Prerequisites:** a target with at least one complete snapshot. Confirm with `backupkit list`.
+
+## Restore a snapshot
+
+Give `restore` the target, the snapshot name, and a `--output` path that does not exist yet:
+
+```bash
+backupkit restore var-www 2026-08-10T031500Z --output /tmp/restored-www
+```
+
+On success it prints one line:
+
+```
+restored var-www/2026-08-10T031500Z -> /tmp/restored-www
+```
+
+The copy uses `rsync -a --sparse -H`, so permissions, sparse files, and hard links inside the snapshot are preserved. Symlinks are copied as symlinks, never followed. `--delete` is never passed - restore only ever writes into a fresh path.
+
+## Restore the latest snapshot
+
+Pass `latest` as the snapshot name to restore the newest complete snapshot, resolved the same way in the CLI and the library:
+
+```bash
+backupkit restore var-www latest --output /tmp/restored-www
+```
+
+If you name a snapshot that is not complete or does not exist, restore refuses and names the newest complete snapshot for that target instead, so you can retry with a valid name.
+
+## Where you can restore to
+
+The `--output` path must not already exist - there is no restore-into-existing mode. Its parent directory must exist, and that parent must not resolve inside any configured destination root. Restoring on top of, or inside, an archive is refused outright, so a restore can never overwrite the very snapshots it reads from. Choose an output path outside every archive.
+
+## Verify the copy
+
+Add `--verify` for a post-copy integrity check. It runs a checksum dry-run comparison between the snapshot and the restored tree; if any file differs, the restore fails and lists the differing paths.
+
+```bash
+backupkit restore var-www latest --output /tmp/restored-www --verify
+```
+
+A clean verify pass appends `(verified)` to the output line:
+
+```
+restored var-www/2026-08-10T031500Z -> /tmp/restored-www (verified)
+```
+
+Verification is opt-in because it re-reads both sides in full. Skip it for a routine restore; use it when you need proof the copy is bit-for-bit the snapshot.
+
+## Restoring from the library
+
+The CLI is a thin view over `Backupkit.restore()`, which returns a `RestoreReport`:
+
+```ts
+import { Backupkit } from "@daanvandenbergh/backupkit";
+
+const kit = Backupkit.fromConfig();
+const report = await kit.restore({
+    target: "var-www",
+    snapshot: "latest",
+    output: "/tmp/restored-www",
+    verify: true,
+});
+// report: { target, snapshot, output, verified }
+```
+
+The same rules apply: `snapshot` accepts `latest`, `output` must be a fresh path outside every archive, and `verified` is `true` only after a clean verify pass.
+
+## Related
+
+- [Getting Started](/docs/getting-started) - list snapshots and run a backup
+- [Versioning & Retention](/docs/retention) - how snapshots are named and kept
+- [CLI Reference](/docs/cli-reference) - the full `restore` flag set

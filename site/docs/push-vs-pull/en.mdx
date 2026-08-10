@@ -1,0 +1,55 @@
+---
+title: "Push vs Pull Architecture"
+description: "Why a target's direction is pull or push, why pull is the safe default, and what changes in the pipeline for each."
+tab: "Guide"
+group: "Concepts"
+order: 1
+icon: "workflow"
+keywords:
+    - pull
+    - push
+    - direction
+    - architecture
+image: "/assets/docs/push-vs-pull/hero.en.jpg"
+updated: "2026-08-10"
+---
+
+Every target sets a `direction`: `"pull"` or `"push"`. It decides which machine initiates the ssh connection and which side holds the archive - and that single choice is the largest security decision in a backup setup. This page explains the two directions, why pull is the default, and what the pipeline does differently for each.
+
+## The two directions
+
+The `direction` field is required on every target and takes exactly two values:
+
+- **`"pull"`** - this machine (the backup server) connects out to the remote and fetches its `source` into a local `destination`. The `source` is a path on the remote; the `destination` is a local archive root.
+- **`"push"`** - this machine (the source host) connects out to the remote and sends its local `source` to a `destination` on the remote. The `source` is a local path; the `destination` is a path on the archive server.
+
+In both cases *this* machine is the one running backupkit and opening the ssh connection. The difference is which end owns the data and which end owns the archive.
+
+## Why pull is the safe default
+
+Pull is recommended because it inverts the trust relationship in your favour. With pull, the backup server holds the credentials and reaches into the source host; the source host has no way to reach the archive. If the source host is compromised, the attacker has no credentials to the backup server, cannot read other machines' backups stored there, and cannot delete or tamper with existing snapshots. The archive is simply out of reach.
+
+For a pull target the remote account only needs to be able to *read* the source, so a read-only user is enough - the starter config names its example user `backup-reader` for exactly this reason.
+
+Push exists for the case where the source host must initiate the connection - for example when the backup server cannot route to the source, or the source sits behind NAT. Push is more dangerous because the source host now holds a credential that reaches the archive, so backupkit constrains that credential hard (see below).
+
+## What push locks down
+
+When you push, the key the source host authenticates with is never an unrestricted shell key. Backupkit jails it behind a forced command, `backupkit-remote`, installed on the archive server. `backupkit check` prints the exact `authorized_keys` line to install:
+
+```
+restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...
+```
+
+The `restrict` prefix disables port forwarding, agent forwarding, PTY allocation, and X11. The forced command then permits only the exact `rsync --server` transfers and the handful of directory operations backupkit's snapshot store issues, each confined to the jail root you name. Anything else the key tries to run exits with a rejection. The [Security Model](/docs/security-model) covers the jail - including its symlink-resolution defense - in full.
+
+## What the pipeline does for each direction
+
+Once a target is resolved, backupkit maps its `direction` into a source endpoint and a destination endpoint exactly once, and no downstream code branches on the direction again. Everything after that - the snapshot store, the disk guard, retention, restore - operates on those two endpoints. A pull target has a remote source and a local destination; a push target has a local source and a remote destination. The archive layout is identical either way: snapshots live at `<destination>/<target>/<timestamp>/`, with each run hard-linked against the previous complete snapshot.
+
+Because the mechanics are symmetric, you can mix directions in one config: pull most of your fleet into a central archive, and let a NAT-bound host push to the same archive, all scheduled by the same daemon.
+
+## Related
+
+- [Security Model](/docs/security-model) - the push jail, host-key pinning, and key permissions
+- [Configuration Reference](/docs/configuration) - the `direction`, `source`, and `destination` fields

@@ -1,0 +1,90 @@
+# Deploy a scribekit (Next.js) site to GitHub Pages.
+#
+# Prerequisites (the skill sets these up; verify they are present):
+#   - next.config.* reads NEXT_PUBLIC_BASE_PATH and sets output/basePath from it (see the app template).
+#   - Pages is enabled - the Configure Pages step sets `enablement: true` to do this automatically on the
+#     first run (fallback if an org blocks it: Settings -> Pages -> Source: "GitHub Actions").
+#
+# `actions/configure-pages@v6` outputs the correct `base_path` for your Pages URL (empty for a custom
+# domain / user-org site, "/<repo>" for a project site). We pass it to the build as NEXT_PUBLIC_BASE_PATH
+# so the app owns the base path - both next.config (routes/assets/next.js links) AND the hero <img> read
+# the same value, which is what makes raw /assets hero paths resolve under a project subpath.
+#
+# If your Next app is NOT at the repo root (e.g. it lives in `web/`), uncomment the
+# `defaults.run.working-directory` block below and set the path, and change the
+# upload `path:` to `<subdir>/out`.
+
+name: Deploy to GitHub Pages
+
+on:
+    push:
+        branches: [main]
+    workflow_dispatch:
+
+# Least-privilege token: only what deploy-pages needs.
+permissions:
+    contents: read
+    pages: write
+    id-token: write
+
+# One deploy at a time; let an in-flight run finish rather than cancelling it.
+concurrency:
+    group: pages
+    cancel-in-progress: false
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        defaults:
+            run:
+                working-directory: site   # the Next app lives in site/ (repo root is the library)
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  # Next.js 16 requires Node >= 20.9; 22 is the current LTS.
+                  node-version: 22
+                  # `cache: npm` needs a committed package-lock.json (same as `npm ci` below).
+                  # No lockfile? Remove this line and change `npm ci` to `npm install`.
+                  cache: npm
+                  cache-dependency-path: site/package-lock.json
+
+            # Outputs `base_path` (e.g. "/<repo>" for a project site, empty/"/" for root hosting).
+            # We do NOT use `static_site_generator: next` here: the app sets its own basePath from
+            # NEXT_PUBLIC_BASE_PATH below, so its hero <img> can read the same value.
+            # `enablement: true` turns Pages on (build type "GitHub Actions") on the first run, so a fresh
+            # repo doesn't fail with "Get Pages site failed / Not Found". If an org policy blocks it,
+            # enable Pages once by hand (Settings -> Pages -> Source: "GitHub Actions") and this is a no-op.
+            - name: Configure Pages
+              id: pages
+              uses: actions/configure-pages@v6
+              with:
+                  enablement: true
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Build static export
+              env:
+                  # The app's next.config + hero <img> both read this. Root hosting -> resolves to empty.
+                  NEXT_PUBLIC_BASE_PATH: ${{ steps.pages.outputs.base_path }}
+              run: npx --no-install next build
+
+            - name: Upload artifact
+              uses: actions/upload-pages-artifact@v5
+              with:
+                  path: site/out
+
+    deploy:
+        needs: build
+        runs-on: ubuntu-latest
+        environment:
+            name: github-pages
+            url: ${{ steps.deployment.outputs.page_url }}
+        steps:
+            - name: Deploy to GitHub Pages
+              id: deployment
+              uses: actions/deploy-pages@v5
