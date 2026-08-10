@@ -7,7 +7,10 @@
  * exact next command. install/uninstall/start/stop/restart require root.
  */
 
+import { statSync } from "node:fs";
+
 import type { ResolvedConfig } from "../../../config/types.js";
+import { ConfigError } from "../../../shared/errors.js";
 import type { CliDeps } from "../context.js";
 import { parseFlags, UsageError } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -68,6 +71,47 @@ async function action(deps: CliDeps, bin: string, args: string[]): Promise<numbe
 }
 
 /**
+ * Refuse to act on a config file that is not trustworthy: it must be owned by
+ * the effective uid or root, and must not be group- or other-writable.
+ *
+ * The lifecycle verbs run as root and act on CONFIG-CHOSEN paths - they `mkdir`
+ * the `logging.file` directory and the stateDir, and grant both to the unit's
+ * sandbox - but none of them runs the daemon's permission preflight, which is
+ * where this check otherwise lives. Without it, anyone who can write the config
+ * file picks a directory root creates (`"logging.file": "/etc/cron.d/bk.log"`).
+ * ssh/permissions.ts `checkFilePermissions` holds the fuller matrix (keys,
+ * passphrase files, known_hosts, destination roots); this is deliberately only
+ * its config-file row, so install stays synchronous and needs no ssh inputs.
+ *
+ * A path that cannot be stat'ed is nothing to check: `loadConfig` has already
+ * READ this exact file microseconds earlier (a failure there is a ConfigError),
+ * so in production the file is always there.
+ */
+function assertConfigTrusted(deps: CliDeps, configPath: string): void {
+    let uid: number;
+    let mode: number;
+    try {
+        const info = statSync(configPath);
+        uid = info.uid;
+        mode = info.mode;
+    } catch {
+        return;
+    }
+    if ((mode & 0o022) !== 0) {
+        throw new ConfigError(
+            `config file ${configPath} is group/other-writable (mode ${(mode & 0o777).toString(8).padStart(3, "0")}); run: chmod go-w ${configPath}`,
+            { file: configPath },
+        );
+    }
+    if (deps.euid !== null && uid !== deps.euid && uid !== 0) {
+        throw new ConfigError(
+            `config file ${configPath} is owned by uid ${uid}, not uid ${deps.euid} or root; run: chown root ${configPath}`,
+            { file: configPath },
+        );
+    }
+}
+
+/**
  * Write every file the unit definition consists of, from the CURRENT config,
  * and report whether that changed anything on disk.
  *
@@ -80,12 +124,19 @@ async function action(deps: CliDeps, bin: string, args: string[]): Promise<numbe
  * the daemon therefore re-derives this first - see `syncUnits`.
  */
 function writeUnits(deps: CliDeps, config: ResolvedConfig): boolean {
+    // Every directory below is a CONFIG-CHOSEN path this process creates as
+    // root, so the config file's trust is checked before any of them.
+    assertConfigTrusted(deps, config.configPath);
     // A configured logging.file needs its directory to exist before the daemon
     // writes its first line - on Linux it is also a ReadWritePaths member.
     const logDir = logDirOf(config);
     if (logDir !== null) {
         deps.files.mkdir(logDir, 0o750);
     }
+    // The stateDir is an UNPREFIXED ReadWritePaths member, and systemd resolves
+    // that list before ExecStart: it has to exist by the time the unit starts,
+    // or namespace setup fails fatally instead of the daemon creating it.
+    deps.files.mkdir(config.stateDir, 0o700);
     const desired: [string, string][] =
         deps.platform === "darwin"
             ? [

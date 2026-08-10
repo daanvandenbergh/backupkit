@@ -139,6 +139,13 @@ export interface SchedulerDeps {
     runTarget: (target: ResolvedTarget) => Promise<TargetRunReport>;
     /** Newest complete snapshot name for a target (called once per target, then cached from reports). */
     listNewest: (target: ResolvedTarget) => Promise<string | null>;
+    /**
+     * Persist a report for a target that never entered the pipeline, and feed
+     * the backoff tracker with it. Used for the due-check failure below: without
+     * it a target whose archive host is unreachable would leave no record at
+     * all, so `status` would keep reporting the last success forever.
+     */
+    recordOutcome: (target: ResolvedTarget, status: RunStatus, reason: string, error: string) => Promise<void>;
     /** The shared backoff tracker (rehydrated by the engine before the loop starts). */
     backoff: BackoffTracker;
 }
@@ -208,9 +215,24 @@ export class Scheduler {
                 try {
                     newest = await this.deps.listNewest(target);
                 } catch (error) {
-                    this.deps.log.warn("could not list snapshots for due check - skipping this tick", {
+                    // A failed due check is a FAILED RUN, not a quiet skip. For a
+                    // push target this listing is an ssh round-trip, so every
+                    // persistent condition (archive host down, key revoked, jail
+                    // script renamed) lands here - and a warn-and-continue left no
+                    // report, so consecutiveFailures stayed 0, backoff never
+                    // engaged, and `status` reported the last success forever
+                    // while nothing ran for weeks.
+                    const message = String(error);
+                    this.deps.log.error("could not list snapshots for the due check - target run recorded as failed", {
                         target: target.name,
-                        error: String(error),
+                        error: message,
+                    });
+                    // A failing state dir must never end the daemon loop.
+                    await this.deps.recordOutcome(target, "failed", "due-check-failed", message).catch((writeError) => {
+                        this.deps.log.error("could not persist the due-check failure report", {
+                            target: target.name,
+                            error: String(writeError),
+                        });
                     });
                     continue;
                 }

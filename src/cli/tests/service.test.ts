@@ -7,7 +7,10 @@
  * the engine's rows.
  */
 
-import { describe, expect, it } from "vitest";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
 
 import type { ResolvedConfig } from "../../config/types.js";
 import { main } from "../main.js";
@@ -92,8 +95,10 @@ describe("Linux lifecycle", () => {
         expect(h.execCalls[0].options?.stdio).toBe("inherit");
         expect(h.out).toEqual(["installed - start it: backupkit service start"]);
         expect(h.fileMap.has(NEWSYSLOG_CONF_PATH)).toBe(false);
-        // No logging.file in the default fixture: nothing extra to create.
-        expect(h.mkdirs).toEqual([]);
+        // No logging.file in the default fixture: only the stateDir, which is an
+        // unprefixed ReadWritePaths member and so must exist before the unit
+        // starts (systemd resolves that list before ExecStart).
+        expect(h.mkdirs).toEqual([{ path: "/var/lib/backupkit", mode: 0o700 }]);
     });
 
     // Without both halves the daemon crash-loops: ProtectSystem=strict denies
@@ -107,7 +112,10 @@ describe("Linux lifecycle", () => {
         config.logging = { level: "info", file: "/var/log/backupkit/backupkit.log" };
         const h = fakeDeps({ config });
         expect(await main(["service", "install"], h.deps)).toBe(0);
-        expect(h.mkdirs).toEqual([{ path: "/var/log/backupkit", mode: 0o750 }]);
+        expect(h.mkdirs).toEqual([
+            { path: "/var/log/backupkit", mode: 0o750 },
+            { path: "/var/lib/backupkit", mode: 0o700 },
+        ]);
         expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"/var/log/backupkit"');
     });
 
@@ -179,7 +187,7 @@ describe("Linux lifecycle", () => {
             ],
         });
         expect(await main(["service", verb], h.deps)).toBe(0);
-        expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"/mnt/archive"');
+        expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"-/mnt/archive"');
         expect(h.out).toContain("config changed since install - refreshed the service unit");
         expect(h.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual(["systemctl", "daemon-reload"]);
     });
@@ -240,6 +248,65 @@ describe("Linux lifecycle", () => {
         expect(h.out[0]).toBe("service: active (pid 1234)");
         expect(h.out[1]).toContain("TARGET");
         expect(h.out[2]).toContain("web");
+    });
+});
+
+/**
+ * `install` mkdirs CONFIG-CHOSEN paths as root (the logging.file directory, the
+ * stateDir) and grants them to the unit's sandbox, but it never runs the
+ * daemon's permission preflight - so nothing used to check who may rewrite that
+ * config. `"logging.file": "/etc/cron.d/bk.log"` was enough to have root
+ * `mkdir -p /etc/cron.d` and hand the daemon a write grant for it.
+ *
+ * Ownership and mode are real-filesystem facts (no seam in `CliDeps.files`),
+ * so these cases use a real temp file. A config path that cannot be stat'ed -
+ * every other test in this file - is skipped by design: `loadConfig` has
+ * already read the real file by then.
+ */
+describe("install checks the config file's trust before acting on it", () => {
+    let dir: string | null = null;
+
+    afterEach(() => {
+        if (dir !== null) {
+            rmSync(dir, { recursive: true, force: true });
+            dir = null;
+        }
+    });
+
+    /** A real config file at `mode`, and a config whose logging.file targets /etc/cron.d. */
+    function hostileConfig(mode: number): ResolvedConfig {
+        dir = mkdtempSync(join(tmpdir(), "backupkit-trust-"));
+        const file = join(dir, "config.jsonc");
+        writeFileSync(file, "{}");
+        chmodSync(file, mode);
+        const config = makeConfig({ configPath: file, stateDir: "/var/lib/backupkit", targets: [makeTarget()] });
+        config.logging = { level: "info", file: "/etc/cron.d/bk.log" };
+        return config;
+    }
+
+    it("refuses a group/other-writable config with exit 2, before creating any directory", async () => {
+        const h = fakeDeps({ config: hostileConfig(0o666) });
+        expect(await main(["service", "install"], h.deps)).toBe(2);
+        expect(h.err[0]).toContain("group/other-writable");
+        expect(h.err[0]).toContain("chmod go-w");
+        expect(h.mkdirs).toEqual([]);
+        expect(h.fileMap.has(SYSTEMD_UNIT_PATH)).toBe(false);
+    });
+
+    it("refuses a config owned by neither the effective uid nor root", async () => {
+        // euid 0 (install requires root) against a config owned by the test user.
+        const h = fakeDeps({ config: hostileConfig(0o600) });
+        expect(await main(["service", "install"], h.deps)).toBe(2);
+        expect(h.err[0]).toContain("is owned by uid");
+        expect(h.mkdirs).toEqual([]);
+    });
+
+    it("refuses on start too - every verb that writes the unit runs the same check", async () => {
+        const config = hostileConfig(0o666);
+        const h = fakeDeps({ config, files: installedFiles("linux", config) });
+        expect(await main(["service", "start"], h.deps)).toBe(2);
+        expect(h.mkdirs).toEqual([]);
+        expect(h.execCalls).toEqual([]);
     });
 });
 

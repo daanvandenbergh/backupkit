@@ -15,7 +15,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { loadConfig } from "../config/config.js";
 import type { ResolvedConfig, ResolvedTarget } from "../config/types.js";
 import { exec, minimalEnv, type ExecOptions, type ExecResult } from "../exec/exec.js";
-import { ConfigError, RestoreError } from "../shared/errors.js";
+import { ConfigError, isBackupkitError, RestoreError } from "../shared/errors.js";
 import { formatEndpoint } from "../shared/format.js";
 import { Logger } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
@@ -26,11 +26,11 @@ import { quoteShellArg } from "../ssh/internal/quote.js";
 import { checkFilePermissions, defaultPermissionDeps, type PermissionDeps } from "../ssh/permissions.js";
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
 import { dryRunStats, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
-import { planRetention } from "../retention/retention.js";
+import { planRetention, type RetentionPlan } from "../retention/retention.js";
 import { openStore, type SnapshotStore } from "../snapshots/store.js";
-import type { SnapshotInfo } from "../snapshots/types.js";
+import { splitFutureSnapshots, type SnapshotInfo } from "../snapshots/types.js";
 import { isDue } from "../shared/time.js";
-import { deriveBackoff, readTargetReports, runIdFor, writeTargetReport } from "./internal/reports.js";
+import { deriveBackoff, newestStats, readTargetReports, runIdFor, writeTargetReport } from "./internal/reports.js";
 import { backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "./internal/scheduler.js";
 import { runTarget, type TargetRunnerDeps } from "./internal/target-runner.js";
 import type {
@@ -303,6 +303,7 @@ export class Backupkit {
                 configPath: this.config.configPath,
                 stateDir: this.config.stateDir,
                 runtimeDir: this.runtimeDir,
+                loggingFile: this.config.logging.file,
                 localDestinationRoots: localRoots,
                 remotes,
             },
@@ -335,6 +336,22 @@ export class Backupkit {
     /** The local ssh binary (config override or PATH "ssh"). */
     private sshBin(): string {
         return this.config.sshBin ?? "ssh";
+    }
+
+    /**
+     * The complete `-e` command for rsync: the ssh BINARY followed by
+     * `sshArgs`' options, or [] when no remote is involved.
+     *
+     * `sshArgs` returns options only - it is shared with `runRemote`, which
+     * spawns ssh directly and supplies the binary itself. rsync's `-e` value is
+     * a whole command line, so handing it the bare option list made rsync try to
+     * exec `-o` ("Failed to exec -o: No such file or directory", exit 14) and
+     * every remote transfer, estimate and restore failed. THE one producer of
+     * that command - the transfer path and restore both come through here, so
+     * they cannot drift apart again.
+     */
+    private sshCommandFor(remote: ResolvedRemote | null): string[] {
+        return remote === null ? [] : [this.sshBin(), ...sshArgs(remote, "unattended")];
     }
 
     /** Whether an interactive TTY is available (deps override, else the real stdin) - the accept-new gate of invariant 5. */
@@ -417,10 +434,19 @@ export class Backupkit {
             if (pctIndex < 4 || !/^[0-9]+$/.test(tokens[pctIndex - 3])) {
                 return null;
             }
-            return Number(tokens[pctIndex - 3]) * 1024;
+            // The digit test has no length bound: a hostile `df` answering 400
+            // digits parses to Infinity, which would make a percent minFree
+            // floor infinite (or, on the free-bytes side, pass unconditionally).
+            const bytes = Number(tokens[pctIndex - 3]) * 1024;
+            return Number.isSafeInteger(bytes) ? bytes : null;
         } catch {
             return null;
         }
+    }
+
+    /** The newest complete snapshot name of a target, or null when the archive is empty. */
+    private async newestComplete(target: ResolvedTarget): Promise<string | null> {
+        return (await this.storeFor(target, "unattended").listComplete()).at(-1) ?? null;
     }
 
     /** Resolve target names to targets in CONFIG order; unknown names are a ConfigError listing the valid ones. */
@@ -450,7 +476,13 @@ export class Backupkit {
         this.backoff.rehydrate(target.name, deriveBackoff(reports));
     }
 
-    /** A report for a run that never entered the pipeline (unavailable remote, throttled disk-low re-check). */
+    /**
+     * A report for a run that never entered the pipeline: an unavailable
+     * remote, a throttled disk-low re-check, a held destination lock, or a due
+     * check that could not reach the archive. Every one of those paths MUST
+     * produce a report - a target that silently never runs is the failure mode
+     * `status()` exists to make impossible.
+     */
     private syntheticReport(
         target: ResolvedTarget,
         status: TargetRunReport["status"],
@@ -573,21 +605,41 @@ export class Backupkit {
         let report = await this.remoteGate(target);
         if (report === null) {
             const { bin } = await this.localRsync();
-            const remote = remoteOf(target);
             const deps: TargetRunnerDeps = {
                 store: this.storeFor(target, "unattended", options.signal),
                 log: this.log.with({ target: target.name }),
                 now: this.deps.now,
                 rsyncBin: bin,
-                sshTokens: remote === null ? [] : sshArgs(remote, "unattended"),
+                sshTokens: this.sshCommandFor(remoteOf(target)),
                 env: this.childEnvFor(target),
                 transfer: this.deps.transfer,
                 estimate: this.deps.estimate,
                 execFn: this.deps.execFn,
                 totalBytes: () => this.totalBytesFor(target),
                 diskLowTargets: this.diskLowTargets,
+                previousStats: async () =>
+                    newestStats(await readTargetReports(this.config.stateDir, target.name, this.log)),
             };
-            report = await runTarget(target, deps, options);
+            try {
+                report = await runTarget(target, deps, options);
+            } catch (error) {
+                // LockHeldError is the one error the pipeline lets escape. It used
+                // to escape here too, unrecorded: the scheduler logged a warn and
+                // continued, so a target stuck behind a lock nobody releases (a
+                // future-dated remote marker, an operator's forgotten manual run)
+                // kept reporting `lastResult: success` with 0 failures forever.
+                // The report is written first, then the error is rethrown - the
+                // invocation-aborting semantics are unchanged.
+                if (!isBackupkitError(error) || error.code !== "lock-held") {
+                    throw error;
+                }
+                const held = this.syntheticReport(target, "skipped", "lock-held", sanitize(error.message));
+                if (options.dryRun !== true) {
+                    await this.ensureBackoffState(target);
+                    await writeTargetReport(this.config.stateDir, held);
+                }
+                throw error;
+            }
         }
 
         // Disk-low bookkeeping for the damping above.
@@ -661,7 +713,7 @@ export class Backupkit {
                     });
                     continue;
                 }
-                const newest = (await this.storeFor(target, "unattended").listComplete()).at(-1) ?? null;
+                const newest = await this.newestComplete(target);
                 const newestDate = newest === null ? null : parseSnapshotName(newest);
                 if (!isDue(target.schedule, newestDate, now)) {
                     continue;
@@ -702,8 +754,14 @@ export class Backupkit {
             now: this.deps.now,
             tickMs: this.deps.tickMs,
             backoff: this.backoff,
-            listNewest: async (target) => (await this.storeFor(target, "unattended").listComplete()).at(-1) ?? null,
+            listNewest: (target) => this.newestComplete(target),
             runTarget: (target) => this.runOne(target, { signal }),
+            recordOutcome: async (target, status, reason, error) => {
+                const report = this.syntheticReport(target, status, reason, sanitize(error));
+                await this.ensureBackoffState(target);
+                await writeTargetReport(this.config.stateDir, report);
+                this.backoff.record(target.name, report.status, new Date(report.finishedAt));
+            },
         });
         this.startPromise = this.scheduler.start().finally(() => {
             this.scheduler = null;
@@ -787,6 +845,21 @@ export class Backupkit {
             );
         }
         await this.preflight();
+        // Invariant 11: restore's rsync talks to the remote as SENDER - the
+        // server-to-client-write direction the >= 3.2.5 floor exists for. Every
+        // scheduled transfer gates on this probe; restore used to be the one
+        // sibling entrypoint that skipped it.
+        if (target.dst.kind === "remote") {
+            try {
+                await this.remoteRsyncFor(target, target.dst.remote);
+            } catch (error) {
+                throw new RestoreError(
+                    `remote rsync check failed for ${target.dst.remote.name} - refusing to restore: ${sanitize(
+                        error instanceof Error ? error.message : String(error),
+                    )}`,
+                );
+            }
+        }
         const store = this.storeFor(target, "unattended");
         const complete = await store.listComplete();
         const newest = complete.at(-1) ?? null;
@@ -814,8 +887,13 @@ export class Backupkit {
             throw new RestoreError(`output parent directory ${dirname(output)} does not exist`);
         }
         for (const root of new Set(this.config.targets.filter((t) => t.dst.kind === "local").map((t) => t.dst.path))) {
-            const realRoot = await realpath(root).catch(() => null);
-            if (realRoot !== null && (realParent === realRoot || realParent.startsWith(realRoot + sep))) {
+            // A root that does not exist yet (a configured target that has never
+            // run) still has to be honored: skipping it on a failed realpath let
+            // `restore web --output /srv/B/out` write straight into target B's
+            // archive root. Every ResolvedConfig path is already normalized, so
+            // the literal prefix comparison is the correct fallback.
+            const realRoot = await realpath(root).catch(() => resolve(root));
+            if (realParent === realRoot || realParent.startsWith(realRoot + sep)) {
                 throw new RestoreError(`output ${output} resolves inside the archive root ${root} - choose a path outside every archive`);
             }
         }
@@ -825,7 +903,7 @@ export class Backupkit {
             target.dst.kind === "local"
                 ? { kind: "local", path: join(target.dst.path, target.name, snapshot) }
                 : { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, target.name, snapshot) };
-        const sshTokens = target.dst.kind === "remote" ? sshArgs(target.dst.remote, "unattended") : [];
+        const sshTokens = this.sshCommandFor(target.dst.kind === "remote" ? target.dst.remote : null);
         const env =
             target.dst.kind === "remote" && this.authSockFor(target.dst.remote) !== null
                 ? { ...minimalEnv(), SSH_AUTH_SOCK: this.authSockFor(target.dst.remote) as string }
@@ -833,9 +911,24 @@ export class Backupkit {
         const remoteArgs = sshTokens.length === 0 ? [] : ["-e", sshTokens.join(" ")];
         const src = formatEndpoint(snapEndpoint) + "/";
 
+        // Restore writes with the SAME hardening ingest applies (invariant 12).
+        // `-a` implies -p and -D, so without these a snapshot holding a
+        // setuid-root binary or a /dev/mem node - which a compromised push
+        // source CAN place in its own archive, since the client's --chmod never
+        // reaches the server argv - would be faithfully recreated by a root
+        // `backupkit restore`. The output is deliberately forced outside every
+        // archive root, so the nosuid/nodev mount that covers the archive cannot
+        // cover it either. `preserveDevices` is honored exactly as on ingest.
+        const hardening = ["--numeric-ids", "--chmod=ug-s"];
+        if (!target.rsync.preserveDevices) {
+            hardening.push("--no-devices", "--no-specials");
+        }
+
         // The copy: never --delete, symlinks copied as symlinks, awaited and exit-checked.
         const { bin } = await this.localRsync();
-        const copy = await this.deps.execFn(bin, ["-a", "--sparse", "-H", ...remoteArgs, src, output], { env });
+        const copy = await this.deps.execFn(bin, ["-a", "--sparse", "-H", ...hardening, ...remoteArgs, src, output], {
+            env,
+        });
         if (copy.exitCode !== 0) {
             throw new RestoreError(
                 `restore copy failed (rsync exit ${copy.exitCode ?? "signal"}): ${sanitize(copy.stderr).slice(-500)}`,
@@ -847,7 +940,7 @@ export class Backupkit {
         if (options.verify === true) {
             const verify = await this.deps.execFn(
                 bin,
-                ["-a", "--checksum", "--dry-run", "--itemize-changes", ...remoteArgs, src, output],
+                ["-a", "--checksum", "--dry-run", "--itemize-changes", ...hardening, ...remoteArgs, src, output],
                 { env },
             );
             const changed = verify.stdout
@@ -865,24 +958,28 @@ export class Backupkit {
         return { target: target.name, snapshot, output, verified };
     }
 
-    /** Apply retention now (or plan only with `dryRun`). */
+    /**
+     * Apply retention now (or plan only with `dryRun`). This is also the
+     * operator's override for the pipeline's content-collapse tripwire: a run
+     * that tripped it promotes but prunes nothing, and `prune` is what clears
+     * the backlog once a human has confirmed the shrink is real.
+     */
     async prune(options: { targets?: string[]; dryRun?: boolean } = {}): Promise<PruneReport> {
         const reports: TargetPruneReport[] = [];
         for (const target of this.selectTargets(options.targets)) {
             const store = this.storeFor(target, "unattended");
             const errors: string[] = [];
             if (options.dryRun === true) {
-                const plan = planRetention(await store.listComplete(), target.retention, this.deps.now());
+                const plan = this.planFor(await store.listComplete(), target);
                 reports.push({ target: target.name, plan, executed: false, errors });
                 continue;
             }
             const plan = await store.withLock(async () => {
-                const names = await store.listComplete();
-                const inner = planRetention(names, target.retention, this.deps.now());
-                if (inner.keep.length === 0 && inner.prune.length > 0) {
-                    errors.push("retention plan would remove all snapshots, refusing");
-                    return { ...inner, prune: [] };
-                }
+                const inner = this.planFor(await store.listComplete(), target);
+                // There is no "would remove all snapshots" check here: the floor
+                // is planRetention always claiming a "newest" plus the store's own
+                // newest-complete guard (`newestUndeletable`), which no plan can
+                // talk past. A `keep.length === 0` test was unreachable code.
                 for (const name of [...inner.prune].reverse()) {
                     try {
                         await store.remove(name);
@@ -896,6 +993,33 @@ export class Backupkit {
             reports.push({ target: target.name, plan, executed: plan.prune.length > 0, errors });
         }
         return { targets: reports };
+    }
+
+    /**
+     * The retention plan for one target over a store listing: the policy runs on
+     * the genuinely-dated names, and future-dated names are appended to the
+     * prune list - but only while genuine history exists, so a target whose only
+     * snapshot is future-dated keeps it rather than losing its last copy.
+     */
+    private planFor(names: string[], target: ResolvedTarget): RetentionPlan {
+        const { genuine, future } = splitFutureSnapshots(names, this.deps.now());
+        const plan = planRetention(genuine, target.retention, this.deps.now());
+        if (future.length === 0) {
+            return plan;
+        }
+        if (genuine.length === 0) {
+            // Nothing genuine to fall back on: the future-dated names may hold the
+            // only copy of the data (a snapshot this host wrote while its clock was
+            // wrong), so they are kept and shown as such, never pruned.
+            this.log.error("every snapshot of this target is dated in the future - keeping them; check this host's clock", {
+                target: target.name,
+                snapshots: future.slice(0, 10).join(", "),
+            });
+            return { keep: [...future].reverse().map((name) => ({ name, reasons: ["future-dated"] })), prune: [] };
+        }
+        // Newest first, like every RetentionPlan: the future-dated names sort
+        // after everything genuine, so they lead the list reversed.
+        return { keep: plan.keep, prune: [...[...future].reverse(), ...plan.prune] };
     }
 
     /**

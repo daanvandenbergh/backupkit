@@ -124,6 +124,31 @@ async function fileExists(path: string): Promise<boolean> {
     }
 }
 
+/**
+ * Write a `.pub` sidecar at mode 0644 with O_EXCL (`flag: "wx"`). O_EXCL is
+ * load-bearing: `fileExists` probes with `stat`, which FOLLOWS symlinks, so a
+ * DANGLING symlink planted at `<key>.pub` reads as absent - and a plain write
+ * would then follow it and create/truncate whatever it names, as whatever uid
+ * backupkit runs under (root, for the daemon). With O_EXCL the kernel refuses
+ * both the dangling symlink and a racing writer. Either outcome means we did
+ * NOT generate this sidecar, so it fails loudly rather than treating a file of
+ * unknown provenance as ours.
+ */
+async function writePubSidecar(pubPath: string, content: string): Promise<void> {
+    try {
+        await writeFile(pubPath, content, { mode: 0o644, flag: "wx" });
+    } catch (error) {
+        const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
+        if (code === "EEXIST") {
+            throw new SshError(
+                `${pubPath} appeared while backupkit was generating it (a pre-planted symlink or a racing ` +
+                    `process won); inspect and remove it, then retry`,
+            );
+        }
+        throw new SshError(`${pubPath} could not be written: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+
 /** Explicit remotes grouped by identityFile in first-seen order (one priming attempt per key; a failure marks every remote in the group). */
 function explicitRemotesByKey(remotes: readonly ResolvedRemote[]): Map<string, ExplicitRemote[]> {
     const groups = new Map<string, ExplicitRemote[]>();
@@ -178,8 +203,9 @@ async function probeUnencrypted(key: string, deps: AgentDeps): Promise<ExecResul
  * `-y -P ""` probe; encrypted keys regenerate it only interactively (`file:`
  * passphrase via the askpass env, `prompt` via ssh-keygen's own /dev/tty
  * prompt) and fail unattended with a pointer at `backupkit check`. Written
- * 0644. Returns the unencrypted probe result when one was run (so the caller
- * need not repeat it).
+ * 0644 through `writePubSidecar` (O_EXCL - never following a planted symlink).
+ * Returns the unencrypted probe result when one was run (so the caller need
+ * not repeat it).
  */
 async function ensurePubSidecar(remote: ExplicitRemote, deps: AgentDeps): Promise<ExecResult | null> {
     const key = remote.identityFile;
@@ -195,7 +221,7 @@ async function ensurePubSidecar(remote: ExplicitRemote, deps: AgentDeps): Promis
                     `configure "passphrase" for remote "${remote.name}" or fix the key: ${toolTail(probe.stderr)}`,
             );
         }
-        await writeFile(pubPath, probe.stdout, { mode: 0o644 });
+        await writePubSidecar(pubPath, probe.stdout);
         return probe;
     }
     if (!hasTty(deps)) {
@@ -213,7 +239,7 @@ async function ensurePubSidecar(remote: ExplicitRemote, deps: AgentDeps): Promis
     if (generated.exitCode !== 0) {
         throw new SshError(`ssh-keygen -y -f ${key} failed (exit ${generated.exitCode}): ${toolTail(generated.stderr)}`);
     }
-    await writeFile(pubPath, generated.stdout, { mode: 0o644 });
+    await writePubSidecar(pubPath, generated.stdout);
     return null;
 }
 

@@ -107,6 +107,40 @@ describe("exec", () => {
         expect(result.stdout.trim()).toBe("/");
     });
 
+    it("does not flag truncation for ordinary small output", async () => {
+        const result = await exec(NODE, ["-e", "process.stdout.write('small'); process.stderr.write('small')"]);
+        expect(result.truncated).toBe(false);
+    });
+
+    it("caps captured stdout at the cap and keeps the HEAD (the stats block)", async () => {
+        // 400 KiB from the child against a 1 KiB cap: the daemon-killing case is
+        // the same shape at 512 MB, where the unbounded append threw RangeError
+        // inside a 'data' listener and took the process down.
+        const result = await exec(
+            NODE,
+            ["-e", "process.stdout.write('HEAD'); for (let i = 0; i < 100; i++) process.stdout.write('x'.repeat(4096));"],
+            { maxCapturedChars: 1024 },
+        );
+        expect(result.exitCode).toBe(0);
+        expect(result.stdout).toHaveLength(1024);
+        expect(result.stdout.startsWith("HEAD")).toBe(true);
+        expect(result.truncated).toBe(true);
+    });
+
+    it("caps captured stderr at the cap and keeps the TAIL (the error text)", async () => {
+        const result = await exec(
+            NODE,
+            [
+                "-e",
+                "for (let i = 0; i < 100; i++) process.stderr.write('x'.repeat(4096)); process.stderr.write('REMOTE HOST IDENTIFICATION HAS CHANGED');",
+            ],
+            { maxCapturedChars: 1024 },
+        );
+        expect(result.stderr.length).toBeLessThanOrEqual(1024);
+        expect(result.stderr).toContain("REMOTE HOST IDENTIFICATION HAS CHANGED");
+        expect(result.truncated).toBe(true);
+    });
+
     it("inherit mode runs the child and returns empty stdout/stderr", async () => {
         const result = await exec(NODE, ["-e", "process.exit(7)"], { stdio: "inherit" });
         expect(result.exitCode).toBe(7);

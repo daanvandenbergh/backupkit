@@ -125,6 +125,51 @@ describe("resolveConfigPath", () => {
         }
         expect(error!.message).toContain('run "backupkit init" to create one');
     });
+
+    // configPath is a ResolvedConfig member: dirname(configPath) becomes a
+    // ReadWritePaths entry and the default known_hosts location, and the value
+    // itself becomes the unit's ExecStart --config argument. Returned verbatim,
+    // `--config config.jsonc` produced ReadWritePaths="." and a relative
+    // ExecStart in a ROOT unit systemd starts with cwd / (a crash loop), and a
+    // cwd-dependent host-key store.
+    it("absolutizes a relative --config against the cwd", () => {
+        const file = join(dirA, "config.jsonc");
+        writeFileSync(file, VALID_CONFIG);
+        const previous = process.cwd();
+        try {
+            process.chdir(dirA);
+            expect(resolvePath("config.jsonc")).toBe(join(process.cwd(), "config.jsonc"));
+            expect(resolvePath("./config.jsonc")).toBe(join(process.cwd(), "config.jsonc"));
+        } finally {
+            process.chdir(previous);
+        }
+    });
+
+    it("normalizes '.', '..', and duplicate slashes out of the returned path", () => {
+        const file = join(dirA, "config.jsonc");
+        writeFileSync(file, VALID_CONFIG);
+        expect(resolvePath(`${dirA}/./config.jsonc`)).toBe(file);
+        expect(resolvePath(`${dirA}//config.jsonc`)).toBe(file);
+        expect(resolvePath(`${dirB}/../etc/config.jsonc`)).toBe(file);
+    });
+
+    it("absolutizes $BACKUPKIT_CONFIG the same way", () => {
+        const file = join(dirA, "config.jsonc");
+        writeFileSync(file, VALID_CONFIG);
+        expect(resolvePath(undefined, { BACKUPKIT_CONFIG: `${dirA}//./config.jsonc` })).toBe(file);
+    });
+
+    // A newline in configPath reaches systemdQuote, where it would close the
+    // ExecStart directive and let the rest become an arbitrary further unit
+    // directive. Rejected at the source as well as at the sink.
+    it.each([["/etc/backupkit/config.jsonc\nExecStartPre=/bin/sh"], ["/etc/c\rx"], ["/etc/c\0x"]])(
+        "rejects a config path containing a NUL or newline: %j",
+        (value) => {
+            expect(() => resolvePath(value)).toThrow(ConfigError);
+            expect(() => resolvePath(value)).toThrow("NUL or newline");
+            expect(() => resolvePath(undefined, { BACKUPKIT_CONFIG: value })).toThrow("NUL or newline");
+        },
+    );
 });
 
 describe("loadConfig", () => {

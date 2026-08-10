@@ -74,6 +74,27 @@ const NAME_REGEX = /^[a-z0-9][a-z0-9._-]*$/;
 /** ssh_config alias charset - excludes whitespace, quotes, ':', '@', '/', and a leading '-' by construction. */
 const ALIAS_REGEX = /^[a-z0-9_][a-z0-9._-]*$/i;
 
+/**
+ * Hostname / IPv4 charset - a POSITIVE charset, mirroring ALIAS_REGEX: letters,
+ * digits, '.', '-', '_', never a leading '-'.
+ *
+ * A blacklist is not enough here. `host` reaches `formatEndpoint`, which emits
+ * `user@host:path`, and rsync treats an argument whose first '/' precedes the
+ * first ':' as a LOCAL path - so a host of "10.0.0.5/x" silently turned a push
+ * target's destination into a local relative directory. A leading '-' becomes
+ * an ssh OPTION ("-oProxyCommand=..."), a NUL makes spawn throw a raw
+ * ERR_INVALID_ARG_VALUE instead of a config error, and a control character
+ * reaches the operator's terminal through error messages.
+ */
+const HOST_REGEX = /^[a-z0-9_][a-z0-9._-]*$/i;
+
+/**
+ * Unbracketed IPv6 literal, with an optional zone id - the documented form for
+ * `host` (formatEndpoint adds the brackets, so a pre-bracketed "[::1]" would be
+ * double-bracketed and is rejected).
+ */
+const HOST_IPV6_REGEX = /^[0-9a-f:]+(%[a-z0-9._-]+)?$/i;
+
 /** SSH username charset. */
 const USER_REGEX = /^[a-z_][a-z0-9._-]{0,31}$/i;
 
@@ -194,7 +215,17 @@ class Validator {
      * same normal form the operands are built in.
      */
     private expectPath(node: JsoncNode, path: string, noWhitespaceQuotes: boolean): string {
-        const value = this.expectString(node, path);
+        return this.checkPath(node, path, this.expectString(node, path), noWhitespaceQuotes);
+    }
+
+    /**
+     * `expectPath`'s rules applied to a path that is only PART of the node's
+     * string - today the remainder of a `"file:/abs/path"` passphrase source,
+     * which is published as an absolute path in the ResolvedConfig and so must
+     * be in the same normal form as every other path there. Errors are reported
+     * against the node, at the field's dotted path.
+     */
+    private checkPath(node: JsoncNode, path: string, value: string, noWhitespaceQuotes: boolean): string {
         if (value.startsWith("~")) {
             this.fail(node, path, '"~" is not expanded - use an absolute path');
         }
@@ -258,8 +289,14 @@ class Validator {
         }
         const hostNode = obj.entries.get("host")!;
         const host = this.expectString(hostNode, `${path}.host`);
-        if (host.length === 0 || /[\s'"@]/.test(host)) {
-            this.fail(hostNode, `${path}.host`, "invalid host - must be non-empty with no whitespace, quotes, or '@'");
+        if (host.length > 253 || !(HOST_REGEX.test(host) || HOST_IPV6_REGEX.test(host))) {
+            this.fail(
+                hostNode,
+                `${path}.host`,
+                "invalid host - must be a hostname or IPv4 matching /^[a-z0-9_][a-z0-9._-]*$/i, or an " +
+                    "unbracketed IPv6 literal, at most 253 characters (no whitespace, quotes, '@', '/', " +
+                    "control characters, or a leading '-')",
+            );
         }
         const userNode = obj.entries.get("user")!;
         const user = this.expectString(userNode, `${path}.user`);
@@ -285,7 +322,14 @@ class Validator {
                     'passphrase must be "file:/path" or "prompt" - never the passphrase itself',
                 );
             }
-            remote.passphrase = passphrase;
+            // The remainder of "file:..." is published as an absolute path
+            // (defaults.ts slices the prefix off), so it gets the SAME treatment
+            // identityFile gets - the prefix test alone accepted ".." escapes,
+            // duplicate slashes, spaces, quotes, and embedded newlines.
+            remote.passphrase =
+                passphrase === "prompt"
+                    ? passphrase
+                    : `file:${this.checkPath(passphraseNode, `${path}.passphrase`, passphrase.slice("file:".length), true)}`;
         }
         const knownHostsNode = obj.entries.get("knownHostsFile");
         if (knownHostsNode !== undefined) {
@@ -465,6 +509,21 @@ class Validator {
             source: this.expectPath(obj.entries.get("source")!, `${path}.source`, false),
             destination: this.expectPath(obj.entries.get("destination")!, `${path}.destination`, false),
         };
+        // Cross-field rule: a PUSH destination becomes $ROOT inside the archive
+        // host's forced command, whose `set -- $CMD` word-splits the remote
+        // command - and real rsync backslash-escapes a space in the path it
+        // sends. Every rsync through the jail is then rejected while the
+        // lifecycle commands still succeed, so the config validates, `backupkit
+        // check` reports OK, and no backup ever completes. A PULL destination is
+        // purely local and works fine with spaces.
+        if (target.direction === "push" && /[\s'"]/.test(target.destination)) {
+            this.fail(
+                obj.entries.get("destination")!,
+                `${path}.destination`,
+                "a push destination may not contain whitespace or quote characters - it is the jail root of " +
+                    "the archive host's forced command, which word-splits the remote command",
+            );
+        }
         const excludeNode = obj.entries.get("exclude");
         if (excludeNode !== undefined) {
             target.exclude = this.validateExclude(excludeNode, `${path}.exclude`);

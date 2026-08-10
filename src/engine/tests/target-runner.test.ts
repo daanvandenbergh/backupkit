@@ -35,10 +35,13 @@ function fakeTransfer(outcome: TransferResult | Error, seen: unknown[] = []): ty
 }
 
 /** A fake estimator returning fixed stats, counting its invocations. */
-function fakeEstimate(delta: number, counter = { calls: 0 }): typeof dryRunStats {
+function fakeEstimate(delta: number, counter = { calls: 0 }, filesTransferred?: number): typeof dryRunStats {
     return async () => {
         counter.calls += 1;
-        return makeStats({ totalTransferredSize: delta });
+        return makeStats({
+            totalTransferredSize: delta,
+            ...(filesTransferred === undefined ? {} : { filesTransferred }),
+        });
     };
 }
 
@@ -53,9 +56,10 @@ function makeDeps(store: FakeStore, overrides: Partial<TargetRunnerDeps> = {}): 
         env: undefined,
         transfer: fakeTransfer(makeTransferResult()),
         estimate: fakeEstimate(1000),
-        execFn: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1 }),
+        execFn: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false, durationMs: 1 }),
         totalBytes: async () => null,
         diskLowTargets: new Set(),
+        previousStats: async () => null,
         ...overrides,
     };
 }
@@ -201,7 +205,7 @@ describe("runTarget pipeline", () => {
         const deps = makeDeps(store, {
             execFn: async (_bin, args) => {
                 argvs.push([...args]);
-                return { exitCode: 0, signal: null, stdout: ".d..t...... ./\n", stderr: "", timedOut: false, durationMs: 1 };
+                return { exitCode: 0, signal: null, stdout: ".d..t...... ./\n", stderr: "", timedOut: false, truncated: false, durationMs: 1 };
             },
         });
         const report = await runTarget(makeTarget({ rsync: { ...makeTarget().rsync, verify: true } }), deps);
@@ -220,6 +224,7 @@ describe("runTarget pipeline", () => {
                 stdout: ">f.st...... a.txt\n",
                 stderr: "",
                 timedOut: false,
+                truncated: false,
                 durationMs: 1,
             }),
         });
@@ -239,6 +244,88 @@ describe("runTarget pipeline", () => {
         const removes = store.calls.filter((call) => call.startsWith("remove:"));
         expect(removes).toEqual(["remove:2026-08-01T000000Z", "remove:2026-08-02T000000Z"]);
         expect(store.names).toEqual([SNAP]);
+    });
+
+    // Every transfer runs `--delete --force` and retention selects purely on
+    // names and counts, so a compromised source presenting an empty tree on each
+    // scheduled run promotes empty snapshots and retention ages the real history
+    // out - the one way a source can destroy its own archive despite the jail.
+    describe("content-collapse tripwire", () => {
+        it("skips retention, reports the collapse and logs at error level when the file count collapses", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z"];
+            const { log, lines } = captureLogger("error");
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    log,
+                    previousStats: async () => ({
+                        filesTransferred: 5,
+                        bytesTransferred: 500,
+                        totalFiles: 1000,
+                        deltaBytes: 500,
+                    }),
+                    transfer: fakeTransfer(makeTransferResult({ stats: makeStats({ totalFiles: 3 }) })),
+                }),
+            );
+            expect(report.status).toBe("success");
+            expect(report.contentCollapse).toEqual({ previousFiles: 1000, files: 3 });
+            // Promoted (the data is already transferred), but nothing pruned.
+            expect(store.names).toContain(SNAP);
+            expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("content collapse"))).toBe(true);
+        });
+
+        it("a shrink inside the threshold prunes normally and reports no collapse", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z"];
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    previousStats: async () => ({
+                        filesTransferred: 5,
+                        bytesTransferred: 500,
+                        totalFiles: 20,
+                        deltaBytes: 500,
+                    }),
+                    transfer: fakeTransfer(makeTransferResult({ stats: makeStats({ totalFiles: 10 }) })),
+                }),
+            );
+            expect(report.contentCollapse).toBeNull();
+            expect(store.calls.filter((call) => call.startsWith("remove:")).length).toBeGreaterThan(0);
+        });
+
+        it("a first run with no baseline never trips the wire", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z"];
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    previousStats: async () => null,
+                    transfer: fakeTransfer(makeTransferResult({ stats: makeStats({ totalFiles: 0 }) })),
+                }),
+            );
+            expect(report.contentCollapse).toBeNull();
+            expect(store.calls.filter((call) => call.startsWith("remove:")).length).toBeGreaterThan(0);
+        });
+    });
+
+    // A source presenting tens of millions of empty files exhausts the archive
+    // filesystem's inodes and breaks every target on it, with bytes to spare.
+    it("skips with disk-low on an inode shortfall, and ignores inodes when the store cannot report them", async () => {
+        const store = new FakeStore();
+        store.freeInodeCount = 1000;
+        const target = makeTarget({ minFree: { kind: "bytes", bytes: 0 } });
+        const hungry = makeDeps(store, { estimate: fakeEstimate(0, { calls: 0 }, 10_000_000) });
+        const report = await runTarget(target, hungry);
+        expect(report.status).toBe("skipped");
+        expect(report.reason).toBe("disk-low");
+        expect(report.error).toContain("free inodes");
+
+        const blind = new FakeStore();
+        blind.freeInodeCount = null;
+        const unknown = await runTarget(target, makeDeps(blind, { estimate: fakeEstimate(0, { calls: 0 }, 10_000_000) }));
+        expect(unknown.status).toBe("success");
     });
 
     it("a retention failure never demotes a promoted run - it lands in the error field", async () => {
@@ -265,7 +352,7 @@ describe("runTarget pipeline", () => {
         const deps = makeDeps(store, {
             execFn: async () => {
                 controller.abort();
-                return { exitCode: null, signal: "SIGTERM" as const, stdout: "", stderr: "", timedOut: false, durationMs: 1 };
+                return { exitCode: null, signal: "SIGTERM" as const, stdout: "", stderr: "", timedOut: false, truncated: false, durationMs: 1 };
             },
         });
         const report = await runTarget(makeTarget({ rsync: { ...makeTarget().rsync, verify: true } }), deps, {
@@ -289,7 +376,7 @@ describe("runTarget pipeline", () => {
                 },
                 execFn: async (_bin, _args, options) => {
                     seenSignals.push(options?.signal);
-                    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1 };
+                    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false, durationMs: 1 };
                 },
             });
         }

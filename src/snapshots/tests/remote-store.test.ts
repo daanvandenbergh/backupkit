@@ -29,7 +29,7 @@ const NOW = new Date("2026-08-10T03:15:02Z");
 
 /** Build a complete ExecResult from a partial override. */
 function result(over: Partial<ExecResult> = {}): ExecResult {
-    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1, ...over };
+    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false, durationMs: 1, ...over };
 }
 
 /** NUL-joined find output for full paths under a directory. */
@@ -162,11 +162,31 @@ describe("RemoteSnapshotStore", () => {
     });
 
     describe("promote", () => {
-        it("issues exactly mv -- <partial> <final>", async () => {
+        it("issues mv -- <partial> <final> then verifies the rename did not nest", async () => {
             const { runner, calls } = fakeRunner(rootListing([`${NEW}.partial`, OLD]));
             const store = new RemoteSnapshotStore(ROOT, runner, log);
             await store.promote(NEW);
-            expect(calls.at(-1)).toEqual(["mv", "--", `${ROOT}/${NEW}.partial`, `${ROOT}/${NEW}`]);
+            expect(calls.slice(-2)).toEqual([
+                ["mv", "--", `${ROOT}/${NEW}.partial`, `${ROOT}/${NEW}`],
+                ["find", `${ROOT}/${NEW}`, "-maxdepth", "1", "-mindepth", "1", "-print0"],
+            ]);
+        });
+
+        // POSIX `mv A B` with B an existing DIRECTORY moves A inside B, exit 0.
+        // If <name> appears between the listing and the mv, the finished snapshot
+        // lands at <name>/<name>.partial and the pipeline used to report success
+        // on an archive that no longer holds the snapshot where it says it does.
+        it("detects a nested mv (the destination appeared mid-flight) and fails loudly", async () => {
+            const { runner } = fakeRunner((argv) => {
+                if (argv[0] !== "find") {
+                    return {};
+                }
+                return argv[1] === ROOT
+                    ? { stdout: findOutput(ROOT, [`${NEW}.partial`, OLD]) }
+                    : { stdout: findOutput(`${ROOT}/${NEW}`, [`${NEW}.partial`]) };
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.promote(NEW)).rejects.toThrow(/nested instead of renaming/);
         });
 
         it("refuses when the complete name already exists (no mv issued)", async () => {
@@ -234,10 +254,58 @@ describe("RemoteSnapshotStore", () => {
             ["missing percent token", "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 500000 100000 400000 21 /\n"],
             ["percent token too early", "x 21% y\nz 42% w\n"],
             ["empty output", ""],
+            // The all-digits test had no length bound: 400 digits parse to
+            // Infinity, and `Infinity >= anything` makes the disk guard pass
+            // unconditionally on a full archive.
+            [
+                "an unbounded digit run that would parse to Infinity",
+                `Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 500000 100000 ${"9".repeat(400)} 21% /\n`,
+            ],
+            [
+                "an available column above the safe-integer range",
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 500000 100000 90071992547409910 21% /\n",
+            ],
         ])("rejects malformed df output: %s", async (_label, stdout) => {
             const { runner } = fakeRunner((argv) => (argv[0] === "df" ? { stdout } : {}));
             const store = new RemoteSnapshotStore(ROOT, runner, log);
             await expect(store.freeBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
+    });
+
+    describe("freeInodes", () => {
+        // The jail answers `df -Pk --` only, whose POSIX output has no inode
+        // columns, and its command grammar is an exact string match - so a push
+        // store must say "unknown" rather than guess, and the disk guard skips
+        // its inode half.
+        it("is null and issues no remote command", async () => {
+            const { runner, calls } = fakeRunner();
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.freeInodes()).resolves.toBeNull();
+            expect(calls).toEqual([]);
+        });
+    });
+
+    // A future-dated complete snapshot is one `mkdir -p --` away for a jailed
+    // writer. It used to be undeletable (it sorts newest), which bricked the
+    // target: every run failed clock-skew and prune could never clear it.
+    describe("future-dated snapshots", () => {
+        const FUTURE = "2099-01-01T000000Z";
+
+        it("is deletable while genuine history exists; the newest genuine one is not", async () => {
+            const { runner, calls } = fakeRunner(rootListing([OLD, NEW, FUTURE]));
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await expect(store.remove(NEW)).rejects.toThrow(/refusing to delete the newest/);
+            await store.remove(FUTURE);
+            expect(calls.slice(-2)).toEqual([
+                ["mv", "--", `${ROOT}/${FUTURE}`, `${ROOT}/${FUTURE}.deleting`],
+                ["rm", "-rf", "--", `${ROOT}/${FUTURE}.deleting`],
+            ]);
+        });
+
+        it("is protected when it is the only snapshot - never lose the last copy", async () => {
+            const { runner } = fakeRunner(rootListing([FUTURE]));
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await expect(store.remove(FUTURE)).rejects.toThrow(/refusing to delete the newest/);
         });
     });
 
@@ -340,6 +408,44 @@ describe("RemoteSnapshotStore", () => {
                 ["mkdir", "-p"],
                 ["rm", "-rf"],
             ]);
+        });
+
+        // Regression: the TTL was `now - created > TTL`, so a marker dated in the
+        // FUTURE gave a negative age the TTL could never exceed and the lock was
+        // reported held FOREVER. A jailed writer plants one with a single
+        // `mkdir -p -- <lock>/2099-01-01T000000Z` (the jail accepts it by
+        // design), and an honest holder SIGKILLed while its clock was wrong
+        // leaves the same thing behind. That is a permanent DoS on the target.
+        it("stale takeover: a marker dated in the FUTURE is stale, not held forever", async () => {
+            let lockMkdirs = 0;
+            const { runner } = fakeRunner((argv) => {
+                if (argv[0] === "mkdir" && argv[1] === "--") {
+                    lockMkdirs += 1;
+                    return { exitCode: lockMkdirs === 1 ? 1 : 0 };
+                }
+                if (argv[0] === "find" && argv[1] === LOCK) {
+                    return { stdout: findOutput(LOCK, ["2099-01-01T000000Z"]) };
+                }
+                return {};
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await expect(store.withLock(async () => "took over")).resolves.toBe("took over");
+        });
+
+        it("a marker inside the TTL in either direction is still live contention", async () => {
+            for (const marker of ["2026-08-10T031000Z", "2026-08-10T040000Z"]) {
+                const { runner } = fakeRunner((argv) => {
+                    if (argv[0] === "mkdir" && argv[1] === "--") {
+                        return { exitCode: 1 };
+                    }
+                    if (argv[0] === "find" && argv[1] === LOCK) {
+                        return { stdout: findOutput(LOCK, [marker]) };
+                    }
+                    return {};
+                });
+                const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+                await expect(store.withLock(async () => "never")).rejects.toBeInstanceOf(LockHeldError);
+            }
         });
 
         it("a lock whose directory cannot be listed is treated as stale", async () => {

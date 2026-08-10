@@ -28,6 +28,9 @@ describe("sshArgs", () => {
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=4",
             "-o", "StrictHostKeyChecking=yes",
+            "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no",
+            "-o", "ForwardX11Trusted=no",
             "-o", "UserKnownHostsFile=/etc/backupkit/known_hosts",
             "-o", "IdentitiesOnly=yes",
             "-o", "PreferredAuthentications=publickey",
@@ -52,6 +55,9 @@ describe("sshArgs", () => {
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=4",
             "-o", "StrictHostKeyChecking=yes",
+            "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no",
+            "-o", "ForwardX11Trusted=no",
             "-o", "LogLevel=ERROR",
         ]);
     });
@@ -63,9 +69,39 @@ describe("sshArgs", () => {
             "-o", "ServerAliveInterval=15",
             "-o", "ServerAliveCountMax=4",
             "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ForwardAgent=no",
+            "-o", "ForwardX11=no",
+            "-o", "ForwardX11Trusted=no",
             "-o", "LogLevel=ERROR",
         ]);
     });
+
+    // A `Host * / ForwardAgent yes` in the user's ssh_config would otherwise
+    // forward backupkit's agent (holding the archive key, no lifetime, no
+    // confirmation) into every host backupkit dials - including a compromised
+    // pull source. Both remote kinds, and the rsync `-e` path that reuses these
+    // tokens, must pin it off.
+    it.each(["ForwardAgent=no", "ForwardX11=no", "ForwardX11Trusted=no"])(
+        "%s is pinned for every remote kind and context",
+        (option) => {
+            for (const remote of [EXPLICIT, ALIAS]) {
+                for (const context of ["unattended", "interactive"] as const) {
+                    expect(sshArgs(remote, context)).toContain(option);
+                }
+            }
+        },
+    );
+
+    it.each(["ForwardAgent=yes", "ForwardX11=yes", "ForwardX11Trusted=yes"])(
+        "%s is emitted in no combination",
+        (option) => {
+            for (const remote of [EXPLICIT, ALIAS]) {
+                for (const context of ["unattended", "interactive"] as const) {
+                    expect(sshArgs(remote, context)).not.toContain(option);
+                }
+            }
+        },
+    );
 
     it.each(FORBIDDEN_FOR_ALIAS)("alias mode never carries %s (asserted as absence)", (forbidden) => {
         for (const context of ["unattended", "interactive"] as const) {

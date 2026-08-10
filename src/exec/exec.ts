@@ -39,6 +39,12 @@ export interface ExecOptions {
      * error at this layer; the caller's classifier judges the outcome.
      */
     signal?: AbortSignal;
+    /**
+     * Override the per-stream capture cap (see MAX_CAPTURED_CHARS). Exists so a
+     * test can prove the cap without allocating hundreds of megabytes; no
+     * production caller sets it.
+     */
+    maxCapturedChars?: number;
 }
 
 /** Outcome of one process execution. */
@@ -55,7 +61,21 @@ export interface ExecResult {
     timedOut: boolean;
     /** Wall-clock duration of the child in milliseconds. */
     durationMs: number;
+    /** True when captured stdout or stderr hit the capture cap and was truncated. */
+    truncated: boolean;
 }
+
+/**
+ * Per-stream capture cap, in JS string units (~1 MiB of ASCII). A hostile
+ * remote's rsync stderr flows through ssh into this pipe, and an unbounded
+ * `stdout += chunk` past V8's ~512 MB string limit throws RangeError INSIDE a
+ * 'data' listener - outside the promise body, with no uncaughtException handler
+ * anywhere - which kills the daemon into a restart loop. Long before that a
+ * several-hundred-MB heap string invites the OOM killer. Only the last 2 KiB of
+ * stderr and a small leading stats block of stdout are ever consumed, so this
+ * window is orders of magnitude more than any caller reads.
+ */
+const MAX_CAPTURED_CHARS = 1024 * 1024;
 
 /**
  * The minimal default child environment: PATH and HOME copied from this
@@ -105,6 +125,8 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
 
         let stdout = "";
         let stderr = "";
+        let truncated = false;
+        const cap = options.maxCapturedChars ?? MAX_CAPTURED_CHARS;
         let timedOut = false;
         let exited = false;
         let termTimer: NodeJS.Timeout | null = null;
@@ -150,16 +172,39 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
         const settle = (exitCode: number | null, exitSignal: NodeJS.Signals | null): void => {
             cleanup();
             if (drainTimer !== null) clearTimeout(drainTimer);
-            resolve({ exitCode, signal: exitSignal, stdout, stderr, timedOut, durationMs: Date.now() - start });
+            resolve({
+                exitCode,
+                signal: exitSignal,
+                stdout,
+                stderr,
+                timedOut,
+                durationMs: Date.now() - start,
+                truncated,
+            });
         };
 
+        // Capture is bounded per stream (MAX_CAPTURED_CHARS): stdout keeps the
+        // HEAD (rsync's stats block comes early), stderr keeps the TAIL (the
+        // error and the classification needles come last).
         child.stdout?.setEncoding("utf8");
         child.stdout?.on("data", (chunk: string) => {
+            if (stdout.length >= cap) {
+                truncated = true;
+                return;
+            }
             stdout += chunk;
+            if (stdout.length > cap) {
+                stdout = stdout.slice(0, cap);
+                truncated = true;
+            }
         });
         child.stderr?.setEncoding("utf8");
         child.stderr?.on("data", (chunk: string) => {
             stderr += chunk;
+            if (stderr.length > cap) {
+                stderr = stderr.slice(-cap);
+                truncated = true;
+            }
         });
 
         child.on("error", (error) => {

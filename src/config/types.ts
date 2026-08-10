@@ -35,7 +35,14 @@ export type RemoteConfig = ExplicitRemoteConfig | AliasRemoteConfig;
 
 /** Fully specified remote: backupkit owns key loading, known_hosts, and identity selection. */
 export interface ExplicitRemoteConfig {
-    /** Hostname or IP. IPv6 literals allowed (bracketed by the endpoint formatter). Required. */
+    /**
+     * Hostname or IPv4 matching /^[a-z0-9_][a-z0-9._-]*$/i, or an UNBRACKETED
+     * IPv6 literal (the endpoint formatter adds the brackets), max 253 chars.
+     * Like `alias`, it excludes '/', ':' outside an IPv6 literal, a leading '-',
+     * whitespace, quotes, '@', and control characters - each of those confuses
+     * rsync's host:path split, ssh option parsing, or the operator's terminal.
+     * Required.
+     */
     host: string;
     /** SSH username, /^[a-z_][a-z0-9._-]{0,31}$/i. Required. */
     user: string;
@@ -47,6 +54,8 @@ export interface ExplicitRemoteConfig {
      * Passphrase source for an encrypted key. "file:/abs/path" (0600, owner euid/root,
      * read via the shipped SSH_ASKPASS helper) or "prompt" (ssh-add's own TTY prompt
      * during `backupkit check`; refused when no TTY). Omit for unencrypted keys.
+     * The path after "file:" obeys the same rules as `identityFile` (absolute,
+     * no "."/".." component, no whitespace or quotes) and is normalized.
      * Raw passphrases and "env:" forms are rejected by the validator. Only valid
      * alongside identityFile - alias remotes cannot carry a passphrase.
      */
@@ -132,7 +141,14 @@ export interface TargetConfig {
     remote: string;
     /** Directory to back up (contents synced). pull: absolute path ON the remote. push: absolute local path. Required. */
     source: string;
-    /** Archive root. pull: absolute local path. push: absolute path ON the remote (must equal the jail root of the forced command). Snapshots at <destination>/<name>/<snapshot>/. Required. */
+    /**
+     * Archive root. pull: absolute local path (whitespace allowed). push:
+     * absolute path ON the remote (must equal the jail root of the forced
+     * command) and may NOT contain whitespace or quote characters - it is
+     * word-split by the jail's remote-command parser, which would reject every
+     * rsync while the lifecycle commands still succeed. Snapshots at
+     * <destination>/<name>/<snapshot>/. Required.
+     */
     destination: string;
     /** rsync exclude patterns, one --exclude=<p> argv element each. Default []. */
     exclude?: string[];

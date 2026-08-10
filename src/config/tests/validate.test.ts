@@ -135,9 +135,36 @@ describe("explicit remotes", () => {
         expectFail(base({ remotes: { r1: { ...REMOTE, host } } }), "remotes.r1.host", "invalid host");
     });
 
-    it("accepts an IPv6 host literal", () => {
-        expect(() => validate(base({ remotes: { r1: { ...REMOTE, host: "fe80::1" } } }))).not.toThrow();
+    // `host` mirrors ALIAS_REGEX, which excludes ':', '/', and a leading '-'
+    // because they "confuse host:path splitting, option parsing, or quoting" -
+    // and host has the same three problems. formatEndpoint emits
+    // `user@host:path`, and rsync reads an argument whose first '/' precedes the
+    // first ':' as a LOCAL path, so "10.0.0.5/x" silently turned a push target's
+    // destination into a local relative directory. A leading '-' is an ssh
+    // option, a NUL makes spawn throw a raw ERR_INVALID_ARG_VALUE instead of a
+    // config error, and an ESC reaches the operator's terminal through
+    // SshError messages.
+    it.each([
+        ["a host that is an ssh option", "-oProxyCommand=x"],
+        ["a leading dash", "-h"],
+        ["a slash", "10.0.0.5/x"],
+        ["a trailing path", "host/../x"],
+        ["a NUL", "\u0000evil"],
+        ["an escape sequence", "h\u001b[2Jost"],
+        ["a DEL character", "host\u007f"],
+        ["a colon in a hostname", "host:2222"],
+        ["a bracketed IPv6 literal (formatEndpoint adds the brackets)", "[::1]"],
+        ["a 254-character host", `${"a".repeat(250)}.com`],
+    ] as const)("rejects %s", (_label, host) => {
+        expectFail(base({ remotes: { r1: { ...REMOTE, host } } }), "remotes.r1.host", "invalid host");
     });
+
+    it.each([["fe80::1"], ["::1"], ["fe80::1%eth0"], ["backup.example.com"], ["_svc-1"], ["10.0.0.11"], ["Host."]])(
+        "accepts host %s",
+        (host) => {
+            expect(() => validate(base({ remotes: { r1: { ...REMOTE, host } } }))).not.toThrow();
+        },
+    );
 
     it.each([["1user"], ["-user"], ["us er"], ["a".repeat(33)]])("rejects user %s", (user) => {
         expectFail(base({ remotes: { r1: { ...REMOTE, user } } }), "remotes.r1.user", "invalid ssh user");
@@ -179,6 +206,27 @@ describe("explicit remotes", () => {
 
     it.each([["file:/etc/backupkit/keys/pass"], ["prompt"]])("accepts passphrase %s", (passphrase) => {
         expect(() => validate(base({ remotes: { r1: { ...REMOTE, passphrase } } }))).not.toThrow();
+    });
+
+    // defaults.ts publishes the part after "file:" as an absolute passphrase-file
+    // path, so it must get the same treatment identityFile gets. The prefix test
+    // alone (/^file:\/.+/, unanchored, and `.` never matches \n) accepted ".."
+    // escapes, duplicate slashes, spaces, quotes, and embedded newlines - a
+    // ResolvedConfig path outside the one normal form.
+    it.each([
+        ["a .. escape", "file:/etc/keys/../../home/attacker/pass", '"." or ".." component'],
+        ["a . component", "file:/etc/./keys/pass", '"." or ".." component'],
+        ["whitespace", "file:/etc/my keys/pass", "whitespace or quote"],
+        ["a quote", "file:/etc/'keys'/pass", "whitespace or quote"],
+        ["an embedded newline", "file:/etc/keys/pass\nExecStartPre=/bin/sh", "NUL or newline"],
+    ] as const)("rejects a file: passphrase with %s", (_label, passphrase, fragment) => {
+        expectFail(base({ remotes: { r1: { ...REMOTE, passphrase } } }), "remotes.r1.passphrase", fragment);
+    });
+
+    it("normalizes duplicate slashes in a file: passphrase path", () => {
+        const result = validate(base({ remotes: { r1: { ...REMOTE, passphrase: "file://etc//keys//pass" } } }));
+        const remote = result.remotes[0].remote;
+        expect("passphrase" in remote && remote.passphrase).toBe("file:/etc/keys/pass");
     });
 
     it("rejects a knownHostsFile with whitespace", () => {
@@ -624,6 +672,39 @@ describe("cross-field rules", () => {
         // The jail's own prefix rule, applied to the resolved pair.
         const root = validated.targets[0].target.destination;
         expect(posix.join(root, "web").startsWith(`${root}/`)).toBe(true);
+    });
+
+    // Same seam, the other half: a space in a PUSH destination is the jail root
+    // real rsync backslash-escapes and the jail's `set -- $CMD` then
+    // word-splits, so every rsync through the jail is rejected while the
+    // lifecycle commands still succeed - config validates, `check` reports OK,
+    // and no backup ever completes. A PULL destination is purely local.
+    it.each([
+        ["a space", "/srv/My Backups"],
+        ["a tab", "/srv/My\tBackups"],
+        ["a single quote", "/srv/'backups'"],
+        ["a double quote", '/srv/"backups"'],
+    ] as const)("rejects a push destination with %s", (_label, destination) => {
+        expectFail(
+            base({ targets: { web: { direction: "push", remote: "r1", source: "/var/www", destination } } }),
+            "targets.web.destination",
+            "a push destination may not contain whitespace or quote characters",
+        );
+    });
+
+    it("accepts the same whitespace destination for a pull target", () => {
+        const validated = validate(
+            base({ targets: { web: { ...TARGET, destination: "/Volumes/My Backups" } } }),
+        );
+        expect(validated.targets[0].target.destination).toBe("/Volumes/My Backups");
+    });
+
+    it("still accepts a clean push destination", () => {
+        expect(() =>
+            validate(
+                base({ targets: { web: { direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" } } }),
+            ),
+        ).not.toThrow();
     });
 
     it.each([

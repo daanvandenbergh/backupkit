@@ -8,7 +8,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { ConfigError } from "../shared/errors.js";
 import { parseJsonc } from "./internal/jsonc.js";
 import { validateConfig } from "./internal/validate.js";
@@ -41,21 +41,45 @@ function defaultProbeDirs(env: Record<string, string | undefined>): string[] {
 }
 
 /**
+ * Put one config-path candidate into the single normal form every path in a
+ * ResolvedConfig is in: NUL/newline refused, then made absolute against the
+ * current working directory and normalized (`.`/`..`/duplicate slashes gone).
+ *
+ * `configPath` is not just a file to read - it is a ResolvedConfig member, and
+ * `dirname(configPath)` feeds the unit's `ReadWritePaths`, the default
+ * `knownHostsFile` location, and the unit's `ExecStart`. A relative
+ * `--config config.jsonc` therefore produced `ReadWritePaths="."` and
+ * `ExecStart=... "--config" "config.jsonc"` in a ROOT unit that systemd starts
+ * with cwd `/` (a crash loop), and a cwd-dependent host-key store where an
+ * interactive `check` from another directory pins a fresh key instead of
+ * comparing against the pinned one.
+ */
+function normalizeConfigPath(value: string): string {
+    if (/[\0\n\r]/.test(value)) {
+        throw new ConfigError("config file path may not contain NUL or newline characters");
+    }
+    return resolve(value);
+}
+
+/**
  * Resolve the config file path using the fixed order: (1) the CLI --config
- * argument verbatim, (2) $BACKUPKIT_CONFIG verbatim, (3) /etc/backupkit/,
+ * argument, (2) $BACKUPKIT_CONFIG, (3) /etc/backupkit/,
  * (4) ${XDG_CONFIG_HOME:-~/.config}/backupkit/ - the directory steps probe
  * config.jsonc then config.json and fail loudly when BOTH exist ("keep one").
- * A missing verbatim path (steps 1-2) is a ConfigError, never a fallthrough;
- * nothing found anywhere is a ConfigError listing every probed path.
+ * A missing path from steps 1-2 is a ConfigError, never a fallthrough;
+ * nothing found anywhere is a ConfigError listing every probed path. Whatever
+ * the source, the returned path is absolute and normalized
+ * (`normalizeConfigPath`).
  */
 export function resolveConfigPath(cliArg?: string, options?: ResolvePathOptions): string {
     const env = options?.env ?? process.env;
     const verbatim = cliArg ?? env.BACKUPKIT_CONFIG;
     if (verbatim !== undefined && verbatim !== "") {
-        if (!existsSync(verbatim)) {
-            throw new ConfigError(`config file not found: ${verbatim}`);
+        const path = normalizeConfigPath(verbatim);
+        if (!existsSync(path)) {
+            throw new ConfigError(`config file not found: ${path}`);
         }
-        return verbatim;
+        return path;
     }
     const probeDirs = options?.probeDirs ?? defaultProbeDirs(env);
     const probed: string[] = [];
@@ -68,10 +92,10 @@ export function resolveConfigPath(cliArg?: string, options?: ResolvePathOptions)
             throw new ConfigError(`both ${jsonc} and ${json} exist - keep one`);
         }
         if (hasJsonc) {
-            return jsonc;
+            return normalizeConfigPath(jsonc);
         }
         if (hasJson) {
-            return json;
+            return normalizeConfigPath(json);
         }
         probed.push(jsonc, json);
     }

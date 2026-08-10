@@ -41,6 +41,9 @@ export class FakeStore implements SnapshotStore {
     /** Free bytes reported by freeBytes(). */
     free = Number.MAX_SAFE_INTEGER;
 
+    /** Free inodes reported by freeInodes() (null = this store cannot report them). */
+    freeInodeCount: number | null = null;
+
     /** Ordered call log: "listComplete", "claimPartial:<n>", "promote:<n>", "remove:<n>", "freeBytes", "lock", "unlock". */
     calls: string[] = [];
 
@@ -92,6 +95,12 @@ export class FakeStore implements SnapshotStore {
     async freeBytes(): Promise<number> {
         this.calls.push("freeBytes");
         return this.free;
+    }
+
+    /** The configured free-inode count (null by default, like the remote store). */
+    async freeInodes(): Promise<number | null> {
+        this.calls.push("freeInodes");
+        return this.freeInodeCount;
     }
 
     /** Scope-shaped lock recording acquire/release; throws failLock when set. */
@@ -177,7 +186,16 @@ export function makeTransferResult(overrides: Partial<TransferResult> = {}): Tra
 
 /** A successful, empty ExecResult fixture. */
 export function makeExecResult(overrides: Partial<ExecResult> = {}): ExecResult {
-    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1, ...overrides };
+    return {
+        exitCode: 0,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        truncated: false,
+        durationMs: 1,
+        ...overrides,
+    };
 }
 
 /** One recorded exec call. */

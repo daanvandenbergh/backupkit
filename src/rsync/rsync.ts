@@ -4,10 +4,11 @@
  * local/remote version probes (hard floor rsync >= 3.2.5, openrsync refused).
  * All spawning goes through exec/; ssh identity and connections arrive as
  * prebuilt DATA (`sshTokens` on the TransferSpec, an injected runner for remote
- * probes), so this module never reaches ssh/ to make a connection. The one
- * import it does take on ssh/ is the pure stderr classifier
- * (`internal/classify.ts` -> `ssh/classify.ts`), because which stderr text
- * means "permanently failed" must have exactly one owner.
+ * probes), so this module never reaches ssh/ to make a connection. The imports
+ * it does take on ssh/ are the pure stderr helpers - the classifier
+ * (`internal/classify.ts` -> `ssh/classify.ts`) and `sshStderrTail` - because
+ * how a stderr tail is cut, and which text in it means "permanently failed",
+ * must have exactly one owner.
  */
 
 import { exec, type ExecOptions, type ExecResult } from "../exec/exec.js";
@@ -15,6 +16,7 @@ import { SshError, TransferError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { CONTROL_RETRY_POLICY, transferRetryPolicy, withTransientRetry } from "../shared/retry.js";
 import { sanitize } from "../shared/sanitize.js";
+import { sshStderrTail } from "../ssh/classify.js";
 import { buildArgs, type TransferSpec } from "./internal/args.js";
 import { classifyExit, type ExitClass } from "./internal/classify.js";
 import { parseStats2, type RsyncStats } from "./internal/stats.js";
@@ -46,11 +48,6 @@ const LOCAL_FIX = 'install rsync >= 3.2.5 (macOS: "brew install rsync"; Debian/U
 
 /** Matches the version triple in an rsync --version banner ("rsync  version 3.2.7  protocol version 31"). */
 const VERSION_BANNER = /rsync\s+version\s+v?([0-9]+)\.([0-9]+)\.([0-9]+)/;
-
-/** Take the sanitized last 2 KiB of a stderr stream (the spec's report/classification tail). */
-function stderrTailOf(stderr: string): string {
-    return sanitize(stderr.slice(-2048));
-}
 
 /** Throw the standard non-retriable TransferError for a probe/build failure (no child exit involved). */
 function refuse(message: string): never {
@@ -160,7 +157,7 @@ export function probeRemoteRsync(params: {
     const probe = withTransientRetry(
         async () => {
             const result = await params.runRemote([bin, "--version"]);
-            const tail = stderrTailOf(result.stderr);
+            const tail = sshStderrTail(result.stderr);
             if (result.exitCode === 255 || result.exitCode === null || result.timedOut) {
                 throw new SshError(`rsync version probe failed on ${params.identity}: ${tail || "ssh transport error"}`, {
                     retriable: classifyExit(255, tail).retriable,
@@ -273,7 +270,7 @@ export async function runTransfer(params: {
                 throw new TransferError("transfer aborted", { exitCode: null, retriable: false, stderrTail: "" });
             }
             const result = await execFn(params.rsyncBin, argv, { env: params.env });
-            const tail = stderrTailOf(result.stderr);
+            const tail = sshStderrTail(result.stderr);
             const cls = classifyExit(result.exitCode, tail);
             attempts.push({ exitCode: result.exitCode, class: cls.class, durationMs: result.durationMs, stderrTail: tail });
             if (!cls.promote) {
@@ -334,7 +331,7 @@ export async function dryRunStats(params: {
     return withTransientRetry(
         async () => {
             const result = await execFn(params.rsyncBin, argv, { env: params.env });
-            const tail = stderrTailOf(result.stderr);
+            const tail = sshStderrTail(result.stderr);
             const cls = classifyExit(result.exitCode, tail);
             if (!cls.promote) {
                 throw new TransferError(`delta estimate failed: ${cls.message}`, {

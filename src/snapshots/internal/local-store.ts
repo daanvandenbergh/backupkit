@@ -16,6 +16,7 @@ import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
 import { isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
+import { newestUndeletable } from "../types.js";
 import { isPidAlive, pidStartTime, withLockScope, type LockBackend, type LockInspection, type LockMeta } from "./lock.js";
 
 /** Name of the lock directory inside a store root. */
@@ -30,11 +31,57 @@ const LOCK_DIR_NAME = ".backupkit.lock";
  */
 const META_GRACE_MS = 30_000;
 
+/**
+ * Staleness TTL for a lock held by ANOTHER host (shared archive): 24 hours,
+ * matching the remote store. A foreign holder's pid says nothing here, so time
+ * is the only honest signal - the price is that a crashed foreign holder blocks
+ * this target for up to a day, which is strictly better than two pipelines
+ * writing one archive root.
+ */
+const FOREIGN_LOCK_TTL_MS = 24 * 60 * 60 * 1000;
+
 /** Throw unless `name` is a valid snapshot name (the codec form). */
 function assertSnapshotName(name: string): void {
     if (parseSnapshotName(name) === null) {
         throw new SnapshotStoreError(`invalid snapshot name "${sanitize(name)}"`);
     }
+}
+
+/**
+ * Whether any entry under `dir` has a link count above 1 - i.e. writing to it
+ * would also write to whatever else shares that inode (a `--link-dest`ed
+ * snapshot). Depth-first with an early exit on the first hit, so the common
+ * "this partial is linked" answer costs a handful of syscalls. Unreadable
+ * entries answer true: unknown is not the same as safe.
+ *
+ * ponytail: a full walk in the (rare) all-clear case. Fine - it happens once
+ * per run and only when a partial survived. If it ever shows up in a profile,
+ * the upgrade path is `find -links +1 -print -quit`.
+ */
+async function hasMultiplyLinkedEntry(dir: string): Promise<boolean> {
+    let children;
+    try {
+        children = await readdir(dir, { withFileTypes: true });
+    } catch {
+        return true;
+    }
+    for (const child of children) {
+        const path = join(dir, child.name);
+        if (child.isDirectory()) {
+            if (await hasMultiplyLinkedEntry(path)) {
+                return true;
+            }
+            continue;
+        }
+        try {
+            if ((await lstat(path)).nlink > 1) {
+                return true;
+            }
+        } catch {
+            return true;
+        }
+    }
+    return false;
 }
 
 /** Narrow an unknown error to its errno code, or null. */
@@ -90,7 +137,9 @@ class LocalLockBackend implements LockBackend {
      * Staleness judgement: a non-directory lock path (planted symlink), an
      * unreadable/unparseable meta, a dead pid, or a live pid whose start time
      * mismatches the recorded one (recycled pid) are all stale. A live pid
-     * with a matching (or unverifiable) start time is live contention.
+     * with a matching (or unverifiable) start time is live contention. A lock
+     * whose meta names a DIFFERENT host never reaches the pid checks at all -
+     * see the foreign-holder branch.
      */
     async inspect(): Promise<LockInspection> {
         const stale = (detail: string): LockInspection => ({ stale: true, pid: null, hostname: null, detail });
@@ -120,6 +169,24 @@ class LocalLockBackend implements LockBackend {
         if (!Number.isInteger(meta.pid) || meta.pid <= 0) {
             return unparseable(stats.mtimeMs, "unparseable lock meta");
         }
+        const holderHost = typeof meta.hostname === "string" ? sanitize(meta.hostname) : null;
+        // A pid probe only proves something about the LOCAL process table. On a
+        // shared archive (NFS/SMB, or two containers sharing a volume with
+        // separate pid namespaces) another host's LIVE pid is very likely dead
+        // or recycled here, and declaring its lock stale removes it - after
+        // which claimPartial reaps that host's in-flight (or finished-but-
+        // unpromoted) snapshot. A foreign holder is therefore judged on time
+        // alone, with the same 24 h TTL the remote backend uses.
+        if (holderHost !== null && holderHost !== hostname()) {
+            const created = Date.parse(typeof meta.createdAt === "string" ? meta.createdAt : "");
+            const ageMs = Date.now() - (Number.isNaN(created) ? stats.mtimeMs : created);
+            const detail = `held by pid ${meta.pid} on another host (${holderHost})`;
+            // Math.abs: a future-dated meta (the holder's clock is wrong) must
+            // not make the TTL unreachable and the lock permanent.
+            return Math.abs(ageMs) > FOREIGN_LOCK_TTL_MS
+                ? stale(`${detail}, past the 24h TTL`)
+                : { stale: false, pid: meta.pid, hostname: holderHost, detail };
+        }
         if (!isPidAlive(meta.pid)) {
             return stale(`holder pid ${meta.pid} is dead`);
         }
@@ -130,7 +197,6 @@ class LocalLockBackend implements LockBackend {
         if (live !== null && live !== meta.pidStartTime) {
             return stale(`pid ${meta.pid} was recycled`);
         }
-        const holderHost = typeof meta.hostname === "string" ? sanitize(meta.hostname) : null;
         return {
             stale: false,
             pid: meta.pid,
@@ -185,6 +251,17 @@ export class LocalSnapshotStore implements SnapshotStore {
      * delete all but the newest `.partial`, and rename that survivor to
      * `<newName>.partial` for this run to resume into. Names failing the
      * snapshot regex family are never touched.
+     *
+     * A survivor that contains ANY multiply-linked entry is discarded instead
+     * of resumed (security invariant 7: a snapshot is immutable once promoted).
+     * `--link-dest` hardlinks unchanged files into the previous snapshot, so
+     * resuming into such a partial lets rsync's attribute-only update path
+     * (same size and mtime, different mode or uid) `chmod`/`chown` THROUGH the
+     * link and mutate the already-promoted snapshot. Discarding fails safe and
+     * is nearly free: a fresh transfer re-links the unchanged files from
+     * `--link-dest` locally and only re-sends the delta. A first-ever partial
+     * (no previous snapshot, so no links) still resumes - the case where a
+     * resume actually saves a large transfer.
      */
     async claimPartial(newName: string): Promise<{ resumed: boolean }> {
         assertSnapshotName(newName);
@@ -199,6 +276,11 @@ export class LocalSnapshotStore implements SnapshotStore {
         }
         const keep = partials.at(-1);
         if (keep === undefined) {
+            return { resumed: false };
+        }
+        if (await hasMultiplyLinkedEntry(join(this.root, keep))) {
+            this.log.warn("discarding a resumable partial that hardlinks into a promoted snapshot", { partial: keep });
+            await rm(join(this.root, keep), { recursive: true, force: true });
             return { resumed: false };
         }
         const claimed = `${newName}.partial`;
@@ -233,7 +315,10 @@ export class LocalSnapshotStore implements SnapshotStore {
     /**
      * Two-phase delete: rename to `<name>.deleting`, then recursive rm (a
      * crash in between leaves an invisible `.deleting` swept next run).
-     * Refuses non-complete names and the newest complete snapshot.
+     * Refuses non-complete names and the newest complete snapshot - where
+     * "newest" means the newest GENUINELY dated one (see `newestUndeletable`),
+     * so a future-dated name planted next to real history stays prunable
+     * instead of bricking the target forever.
      */
     async remove(name: string): Promise<void> {
         assertSnapshotName(name);
@@ -241,7 +326,7 @@ export class LocalSnapshotStore implements SnapshotStore {
         if (!complete.includes(name)) {
             throw new SnapshotStoreError(`${name} is not a complete snapshot`);
         }
-        if (complete.at(-1) === name) {
+        if (newestUndeletable(complete, this.now()) === name) {
             throw new SnapshotStoreError(`refusing to delete the newest complete snapshot ${name}`);
         }
         const deleting = join(this.root, `${name}.deleting`);
@@ -257,6 +342,20 @@ export class LocalSnapshotStore implements SnapshotStore {
         } catch (error) {
             throw new SnapshotStoreError(`statfs failed for ${this.root}: ${sanitize(String(error))}`);
         }
+    }
+
+    /**
+     * Free inodes via the same statfs (`ffree`), or null when the filesystem
+     * reports no inode accounting at all (`files === 0`, e.g. APFS/btrfs) - a
+     * dynamic-inode filesystem cannot be exhausted this way, so the guard's
+     * inode half is skipped rather than fed a meaningless zero.
+     */
+    async freeInodes(): Promise<number | null> {
+        const stats = await statfs(this.root).catch(() => null);
+        if (stats === null || stats.files === 0) {
+            return null;
+        }
+        return stats.ffree;
     }
 
     /** Run `fn` under the store-root lock (structural release; spec section 6). */

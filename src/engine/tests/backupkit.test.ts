@@ -9,7 +9,7 @@
 import { exec } from "../../exec/exec.js";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -196,6 +196,110 @@ describe("Backupkit", () => {
         expect(existsSync(join(fixture.destination, "web", "2026-08-01T000000Z"))).toBe(false);
         expect(existsSync(join(fixture.destination, "web", "2026-08-02T000000Z"))).toBe(false);
         expect(existsSync(join(fixture.destination, "web", "2026-08-03T000000Z"))).toBe(true);
+    });
+
+    // A future-dated complete snapshot - one jail-accepted `mkdir -p --` from a
+    // compromised push source, or one clock-skew event - used to brick the target
+    // for good: it sorted newest, so every run failed clock-skew, and the store
+    // refused to delete its newest snapshot so prune could never clear it.
+    // Recovery needed shell on the archive host. Now `backupkit prune` clears it.
+    it("a future-dated snapshot fails the run, is pruned by prune, and the target then runs again", async () => {
+        const fixture = track(await makeKit({ target: { retention: { keepLast: 2 } } }));
+        await fixture.kit.run({ force: true });
+        // A compromised push source plants a future-dated directory in its own
+        // archive root (the jail accepts the mkdir by design).
+        const planted = join(fixture.destination, "web", "2099-01-01T000000Z");
+        await mkdir(planted, { recursive: true });
+        // The clock-skew guard still fires - a name from the future is
+        // indistinguishable from a backwards clock, and refusing is right.
+        fixture.clock.now = new Date("2026-08-10T12:01:00Z");
+        const blocked = await fixture.kit.run({ force: true });
+        expect(blocked.targets[0].status).toBe("failed");
+        expect(blocked.targets[0].reason).toBe("clock-skew");
+
+        const pruned = await fixture.kit.prune();
+        expect(pruned.targets[0].plan.prune).toEqual(["2099-01-01T000000Z"]);
+        expect(existsSync(planted)).toBe(false);
+
+        fixture.clock.now = new Date("2026-08-10T12:02:00Z");
+        const healed = await fixture.kit.run({ force: true });
+        expect(healed.targets[0].status).toBe("success");
+    });
+
+    it("a future-dated snapshot that is the ONLY snapshot is never pruned away", async () => {
+        const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
+        const planted = join(fixture.destination, "web", "2099-01-01T000000Z");
+        await mkdir(planted, { recursive: true });
+        const report = await fixture.kit.prune();
+        expect(report.targets[0].plan.prune).toEqual([]);
+        expect(existsSync(planted)).toBe(true);
+    });
+
+    // Regression (the -e string had no program name): sshArgs returns ssh
+    // OPTIONS only, so feeding it straight into rsync's -e made rsync try to
+    // exec "-o" - "rsync: [sender] Failed to exec -o: No such file or
+    // directory", exit 14 - and EVERY remote transfer, estimate and restore
+    // failed. The engine is the seam that must supply the binary.
+    it("the rsync -e command the engine builds starts with the ssh binary", async () => {
+        const sshTokens: string[][] = [];
+        const fixture = track(
+            await makeKit({
+                target: {
+                    src: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/data" },
+                },
+                deps: {
+                    probeRemote: async () => "3.2.7",
+                    transfer: async (params) => {
+                        sshTokens.push([...params.spec.sshTokens]);
+                        if (params.spec.dst.kind === "local") {
+                            await mkdir(params.spec.dst.path, { recursive: true });
+                        }
+                        const result = makeTransferResult();
+                        for (const attempt of result.attempts) {
+                            params.attemptLog?.push(attempt);
+                        }
+                        return result;
+                    },
+                },
+            }),
+        );
+        await fixture.kit.run({ force: true });
+        expect(sshTokens).toHaveLength(1);
+        expect(sshTokens[0][0]).toBe("ssh");
+        expect(sshTokens[0].join(" ")).toMatch(/^ssh -o BatchMode=yes/);
+        // And the argv the builder derives from it is a runnable -e command.
+        const dashE = sshTokens[0].join(" ");
+        expect(dashE.startsWith("-")).toBe(false);
+    });
+
+    // A lock nobody releases (a future-dated remote marker, an operator's
+    // forgotten manual run) used to be invisible: LockHeldError escaped the
+    // pipeline, the scheduler logged a warn and continued, and NO report was
+    // written - so `status` kept reporting the last success with 0 failures
+    // while the target had not run for weeks.
+    it("a held destination lock still writes a report, so status stops reading green", async () => {
+        const fixture = track(await makeKit());
+        // Plant a live-looking lock: this process's pid and start time.
+        const lockDir = join(fixture.destination, "web", ".backupkit.lock");
+        await mkdir(lockDir, { recursive: true });
+        const { pidStartTime } = await import("../../snapshots/internal/lock.js");
+        await writeFile(
+            join(lockDir, "meta"),
+            JSON.stringify({
+                pid: process.pid,
+                pidStartTime: await pidStartTime(process.pid),
+                hostname: hostname(),
+                createdAt: fixture.clock.now.toISOString(),
+            }),
+        );
+        await expect(fixture.kit.run({ force: true })).rejects.toThrow(/lock/i);
+        const [row] = await fixture.kit.status();
+        expect(row.lastResult).toBe("skipped");
+        expect(row.lockHeld).toBe(true);
+        const files = await readdir(join(fixture.stateDir, "runs", "web"));
+        expect(files).toHaveLength(1);
+        const persisted = JSON.parse(await readFile(join(fixture.stateDir, "runs", "web", files[0]), "utf8"));
+        expect(persisted.reason).toBe("lock-held");
     });
 
     it("prune: retention off (null) prunes nothing", async () => {

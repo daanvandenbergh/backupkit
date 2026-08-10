@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { ConfigError, RestoreError } from "../../shared/errors.js";
-import { makeExecResult, makeKit, type KitFixture } from "./fakes.js";
+import { makeExecResult, makeKit, makeTarget, type KitFixture } from "./fakes.js";
 
 /** Snapshot fixture names, oldest to newest. */
 const OLD_SNAP = "2026-08-01T000000Z";
@@ -78,6 +78,30 @@ describe("restore", () => {
         ).rejects.toThrow(/inside the archive root/);
     });
 
+    // Invariant 11: restore's rsync talks to the remote as SENDER - the exact
+    // server-to-client-write direction the >= 3.2.5 floor exists for. Every
+    // scheduled transfer gates on the probe; restore used to skip it.
+    it("gates on the remote rsync floor for a push target", async () => {
+        let probes = 0;
+        fixture = await makeKit({
+            target: {
+                dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+            },
+            deps: {
+                probeRemote: async () => {
+                    probes += 1;
+                    throw new Error("rsync 3.1.3 on myserver is below the required floor 3.2.5");
+                },
+            },
+        });
+        await expect(
+            fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.root, "out") }),
+        ).rejects.toThrow(/below the required floor 3\.2\.5/);
+        expect(probes).toBe(1);
+        // Refused before any rsync ran.
+        expect(fixture.execCalls.filter((call) => call.bin === "/fake/rsync")).toEqual([]);
+    });
+
     it("rejects a missing output parent", async () => {
         fixture = await makeKit();
         await seedSnapshots(fixture);
@@ -94,8 +118,53 @@ describe("restore", () => {
         expect(report).toEqual({ target: "web", snapshot: NEW_SNAP, output: out, verified: false });
         const copy = fixture.execCalls.at(-1);
         expect(copy?.bin).toBe("/fake/rsync");
-        expect(copy?.args).toEqual(["-a", "--sparse", "-H", join(fixture.destination, "web", NEW_SNAP) + "/", out]);
+        expect(copy?.args).toEqual([
+            "-a",
+            "--sparse",
+            "-H",
+            "--numeric-ids",
+            "--chmod=ug-s",
+            "--no-devices",
+            "--no-specials",
+            join(fixture.destination, "web", NEW_SNAP) + "/",
+            out,
+        ]);
         expect(copy?.args.some((arg) => arg.includes("--delete"))).toBe(false);
+    });
+
+    // Invariant 12: `-a` implies -p and -D, so an unhardened restore recreates a
+    // setuid-root binary or a /dev/mem node that a compromised push source placed
+    // in its own archive - and the output is deliberately forced OUTSIDE every
+    // archive root, so the nosuid/nodev mount covering the archive cannot cover
+    // it. Restore hardens exactly like ingest, on the copy AND the verify pass.
+    it("hardens like ingest: --chmod=ug-s, --numeric-ids and no device/special files", async () => {
+        fixture = await makeKit();
+        await seedSnapshots(fixture);
+        await fixture.kit.restore({
+            target: "web",
+            snapshot: "latest",
+            output: join(fixture.root, "out"),
+            verify: true,
+        });
+        expect(fixture.execCalls).toHaveLength(2);
+        for (const call of fixture.execCalls) {
+            expect(call.args).toContain("--chmod=ug-s");
+            expect(call.args).toContain("--numeric-ids");
+            expect(call.args).toContain("--no-devices");
+            expect(call.args).toContain("--no-specials");
+        }
+    });
+
+    it("honours preserveDevices: an opted-in target keeps device nodes but still strips setuid", async () => {
+        fixture = await makeKit({
+            target: { rsync: { ...makeTarget().rsync, preserveDevices: true } },
+        });
+        await seedSnapshots(fixture);
+        await fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.root, "out") });
+        const copy = fixture.execCalls.at(-1);
+        expect(copy?.args).toContain("--chmod=ug-s");
+        expect(copy?.args).not.toContain("--no-devices");
+        expect(copy?.args).not.toContain("--no-specials");
     });
 
     it("restores a named snapshot", async () => {

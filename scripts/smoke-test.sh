@@ -32,13 +32,20 @@
 #   SCRATCH_DIR                a directory this script may create files under
 #
 # Safety: every config.jsonc, ed25519 key, and passphrase this script uses
-# is generated fresh under SCRATCH_DIR and removed on exit (trap EXIT). It
-# never reads or writes /etc, the operator's real backupkit config, or the
-# operator's real SSH keys. The only things it asks the OPERATOR to do by
-# hand on a remote host are the things that must legitimately live there:
-# appending a line to that host's own ~/.ssh/authorized_keys and installing
-# the backupkit-remote jail script - this script prints the exact text and
-# waits.
+# is generated fresh under SCRATCH_DIR and removed on exit (trap EXIT),
+# together with the two throwaway directories it creates on the remote hosts.
+# It never reads or writes /etc, the operator's real backupkit config, or the
+# operator's real SSH keys.
+#
+# What it CANNOT undo: the three things it asks the OPERATOR to install by
+# hand on a remote host - the pull key line in the source host's
+# authorized_keys (comment "backupkit-smoke-pull"), the push jail line in the
+# archive host's authorized_keys (comment "backupkit-smoke-push"), and
+# /usr/local/bin/backupkit-remote on the archive host. Those are the things
+# that must legitimately live there, so this script only prints the exact text
+# and waits - it has no way to revoke them afterwards. The summary at the end
+# of every run prints the exact revocation commands; RUN THEM, or the run
+# leaves live SSH trust behind.
 #
 # Exit status: 0 when every step passed, nonzero otherwise. A summary table
 # is always printed, even when a step fails - a failed step is recorded and
@@ -210,6 +217,41 @@ run_step() {
     fi
 }
 
+# The remote-side trust this script asked the operator to install by hand.
+# cleanup() cannot remove it (it lives in another user's authorized_keys and
+# under /usr/local/bin, installed with sudo), so the run ends by printing the
+# exact commands that revoke it. Printed unconditionally: a step that failed
+# may still have installed its key before failing.
+print_manual_cleanup() {
+    # One drop-the-tagged-line command, with TAG substituted per host below.
+    # shellcheck disable=SC2016  # printed for the operator to paste - expanded there, not here
+    local ak='f=~/.ssh/authorized_keys; { grep -v TAG "$f" || true; } >"$f.new" && mv "$f.new" "$f" && chmod 600 "$f"'
+    log ""
+    log "-------- MANUAL CLEANUP (this script cannot do it for you) --------"
+    log "If you got as far as installing them, these outlive the run:"
+    log ""
+    log "1. the pull key in ~/.ssh/authorized_keys of $SRC_USER on $SRC_HOST"
+    log "   (the line whose key comment is 'backupkit-smoke-pull'):"
+    log "     ssh -p $SRC_PORT $SRC_USER@$SRC_HOST '${ak/TAG/backupkit-smoke-pull}'"
+    log ""
+    log "2. the push jail line in ~/.ssh/authorized_keys of $DST_USER on $DST_HOST"
+    log "   (the line whose key comment is 'backupkit-smoke-push'):"
+    log "     ssh -p $DST_PORT $DST_USER@$DST_HOST '${ak/TAG/backupkit-smoke-push}'"
+    log ""
+    log "3. /usr/local/bin/backupkit-remote on $DST_HOST is STILL INSTALLED (you put it"
+    log "   there with sudo). Keep it if that host is a real archive server; otherwise:"
+    log "     ssh -p $DST_PORT $DST_USER@$DST_HOST 'sudo rm -f /usr/local/bin/backupkit-remote'"
+    log ""
+    log "Verify 1 and 2 - both must print 0:"
+    log "     ssh -p $SRC_PORT $SRC_USER@$SRC_HOST 'grep -c backupkit-smoke-pull ~/.ssh/authorized_keys || true'"
+    log "     ssh -p $DST_PORT $DST_USER@$DST_HOST 'grep -c backupkit-smoke-push ~/.ssh/authorized_keys || true'"
+    log ""
+    log "Step 1 connected with StrictHostKeyChecking=accept-new, so your own"
+    log "known_hosts (~/.ssh/known_hosts) may have gained these hosts: remove with"
+    log "'ssh-keygen -R $SRC_HOST' / 'ssh-keygen -R $DST_HOST' if you do not want them."
+    log "-------------------------------------------------------------------"
+}
+
 print_summary() {
     log ""
     log "==================== smoke test summary ===================="
@@ -223,6 +265,7 @@ print_summary() {
     else
         log "ONE OR MORE STEPS FAILED - do not ship on this result"
     fi
+    print_manual_cleanup
 }
 
 # ---------------------------------------------------------------------------
@@ -449,13 +492,40 @@ step1_verify_hosts() {
 # step 2: passphrase-protected key end to end via `backupkit check`
 # ---------------------------------------------------------------------------
 
+# The authorized_keys restriction prefix for the pull key. A pull needs no pty
+# and no forwarding, so `restrict` costs nothing, and `from=` pins the key to
+# this machine's address as the SOURCE host sees it (asked over the operator's
+# own ssh session, which step 1 already proved works).
+#
+# ponytail: deliberately no `command=` forced command on the pull side. The
+# only robust one is rsync's own rrsync helper, and it refuses any
+# SSH_ORIGINAL_COMMAND that is not `rsync --server ...` - which would kill
+# backupkit's remote rsync floor probe (`rsync --version`, rsync/rsync.ts),
+# failing every check and run made with this key. Hand-pinning
+# `command="rsync --server --sender -<flags> . <dir>"` is no better: the flag
+# string varies with the target's options. Upgrade path: if the jail script
+# ever learns a read-only `--sender` mode, force that command here.
+pull_key_prefix() {
+    local addr
+    addr=$(ssh -o BatchMode=yes -o ConnectTimeout=8 -p "$SRC_PORT" "$SRC_USER@$SRC_HOST" \
+        'set -- $SSH_CLIENT; printf "%s" "${1:-}"' 2>/dev/null) || addr=""
+    if [ -n "$addr" ]; then
+        printf 'restrict,from="%s"' "$addr"
+    else
+        printf 'restrict,from="<this machine, as %s sees it - FILL THIS IN>"' "$SRC_HOST"
+    fi
+}
+
 step2_passphrase_key() {
-    log "append this public key to ~/.ssh/authorized_keys for $SRC_USER on $SRC_HOST"
-    log "(a dedicated read-only account is recommended for a pull source):"
+    log "append this EXACT line to ~/.ssh/authorized_keys for $SRC_USER on $SRC_HOST"
+    log "(the restriction prefix is part of the line - never install the bare key;"
+    log " 'restrict' needs OpenSSH >= 7.2, on an older sshd replace it with"
+    log " no-pty,no-agent-forwarding,no-port-forwarding,no-X11-forwarding)."
+    log "A dedicated read-only account is still recommended for a pull source:"
     log ""
-    cat "$KEY_PULL.pub"
+    log "$(pull_key_prefix) $(cat "$KEY_PULL.pub")"
     log ""
-    ask_enter "add the key above on $SRC_HOST, then continue" || return 1
+    ask_enter "add the line above on $SRC_HOST, then continue" || return 1
 
     log "running: backupkit check"
     log "(expects the passphrase to be primed unattended via the file: askpass path - no TTY prompt)"

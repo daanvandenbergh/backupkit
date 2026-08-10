@@ -19,7 +19,16 @@ const STATS_OUT = [
 
 /** Build one ExecResult with success defaults. */
 function res(overrides?: Partial<ExecResult>): ExecResult {
-    return { exitCode: 0, signal: null, stdout: STATS_OUT, stderr: "", timedOut: false, durationMs: 41, ...overrides };
+    return {
+        exitCode: 0,
+        signal: null,
+        stdout: STATS_OUT,
+        stderr: "",
+        timedOut: false,
+        durationMs: 41,
+        truncated: false,
+        ...overrides,
+    };
 }
 
 /** A queued fake exec: call n gets results[n] (last repeats); records every call. */
@@ -248,6 +257,23 @@ describe("runTransfer: retry wiring", () => {
         const tail = outcome.ok?.attempts[0].stderrTail ?? "";
         expect(tail).not.toMatch(/[\n\x1b]/);
         expect(tail).toContain("line1line2");
+    });
+
+    it("a control-char flood cannot blank the stderr tail or hide a permanent needle", async () => {
+        // Sanitizing AFTER slicing let a hostile remote pad 4 KiB of NULs past the
+        // 2 KiB window: the recorded tail came out "" in every run report and the
+        // host-key-changed needle fell outside the classification window, so a
+        // possible MITM was retried as a transient blip.
+        const stderr = "rsync: REMOTE HOST IDENTIFICATION HAS CHANGED\n" + "\x00".repeat(4096);
+        const { fn, calls } = queuedExec([res({ exitCode: 255, stdout: "", stderr })]);
+        const { log } = captureLogger();
+        const attemptLog: TransferAttempt[] = [];
+        const outcome = await settle(
+            runTransfer({ rsyncBin: "/bin/rsync", spec: localSpec(), retryAttempts: 5, log, execFn: fn, attemptLog }),
+        );
+        expect(attemptLog[0].stderrTail).toContain("REMOTE HOST IDENTIFICATION HAS CHANGED");
+        expect(calls).toHaveLength(1);
+        expect(outcome.err).toMatchObject({ code: "transfer", exitCode: 255, retriable: false });
     });
 });
 

@@ -112,9 +112,41 @@ describe("local store lock (mkdir + meta)", () => {
         const child = await exec(process.execPath, ["-e", "console.log(process.pid)"], { timeoutMs: 10_000 });
         const deadPid = Number(child.stdout.trim());
         expect(Number.isInteger(deadPid)).toBe(true);
-        await plantLock({ pid: deadPid, pidStartTime: "gone", hostname: "h", createdAt: new Date().toISOString() });
+        await plantLock({
+            pid: deadPid,
+            pidStartTime: "gone",
+            hostname: hostname(),
+            createdAt: new Date().toISOString(),
+        });
         await expect(store.withLock(async () => "took over")).resolves.toBe("took over");
         expect(existsSync(lockPath)).toBe(false);
+    });
+
+    // A pid probe proves nothing about ANOTHER host's process table. On a shared
+    // archive (NFS/SMB, or two containers with separate pid namespaces) this host
+    // sees the other's live pid as dead-or-recycled; stealing that lock then lets
+    // claimPartial reap the other host's in-flight snapshot.
+    it("never steals a lock held by another host, even when the recorded pid looks dead here", async () => {
+        const child = await exec(process.execPath, ["-e", "console.log(process.pid)"], { timeoutMs: 10_000 });
+        await plantLock({
+            pid: Number(child.stdout.trim()),
+            pidStartTime: "gone",
+            hostname: `${hostname()}-other`,
+            createdAt: new Date().toISOString(),
+        });
+        await expect(store.withLock(async () => "took over")).rejects.toBeInstanceOf(LockHeldError);
+        expect(existsSync(lockPath)).toBe(true);
+    });
+
+    it("a foreign lock past the 24h TTL is stale, and so is one dated in the future", async () => {
+        for (const createdAt of [
+            new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(),
+            new Date(Date.now() + 25 * 60 * 60 * 1000).toISOString(),
+        ]) {
+            await rm(lockPath, { recursive: true, force: true });
+            await plantLock({ pid: process.pid, pidStartTime: null, hostname: `${hostname()}-other`, createdAt });
+            await expect(store.withLock(async () => "took over")).resolves.toBe("took over");
+        }
     });
 
     it("takes over a stale lock whose live pid has a mismatched start time (recycled pid)", async () => {

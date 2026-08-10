@@ -56,6 +56,18 @@ export interface TargetRunReport {
     skippedFiles: string[];
     /** Sanitized error message when the run did not succeed cleanly, or null. */
     error: string | null;
+    /**
+     * Set when the content-collapse tripwire fired: this snapshot holds far
+     * fewer files than the previous run's, so the snapshot was promoted but
+     * RETENTION WAS SKIPPED (no snapshot was pruned this run). Absent or null
+     * when it did not fire. Optional so older persisted reports still parse.
+     */
+    contentCollapse?: {
+        /** File count of the previous run that completed a transfer. */
+        previousFiles: number;
+        /** File count of this run. */
+        files: number;
+    } | null;
 }
 
 /** The summary `run()` returns: one invocation over its due (or forced) targets. */

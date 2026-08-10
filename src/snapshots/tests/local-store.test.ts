@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -110,6 +110,39 @@ describe("LocalSnapshotStore", () => {
         it("rejects an invalid new name", async () => {
             await expect(store.claimPartial("../evil")).rejects.toBeInstanceOf(SnapshotStoreError);
         });
+
+        // Regression: `--link-dest` hardlinks unchanged files into the previous
+        // snapshot, so resuming into a surviving partial lets rsync's
+        // attribute-only update path (same size and mtime, different mode or
+        // uid) chmod/chown THROUGH the link and mutate an already-promoted -
+        // immutable - snapshot. Verified with the real argv: the promoted
+        // snapshot's mode went from -rw-r--r-- to -rw-rw-rw-.
+        it("discards a partial that hardlinks into a promoted snapshot instead of resuming into it", async () => {
+            await makeDir(OLD);
+            await makeDir(`${MID}.partial`);
+            await rm(join(root, `${MID}.partial`, "file.txt"));
+            await link(join(root, OLD, "file.txt"), join(root, `${MID}.partial`, "file.txt"));
+            await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: false });
+            // The partial is gone; the promoted snapshot it linked into is untouched.
+            expect((await readdir(root)).sort()).toEqual([OLD]);
+            expect((await stat(join(root, OLD, "file.txt"))).nlink).toBe(1);
+        });
+
+        it("still resumes a link-free partial (the first-ever transfer, where a resume actually pays)", async () => {
+            await makeDir(`${MID}.partial`);
+            await mkdir(join(root, `${MID}.partial`, "nested"), { recursive: true });
+            await writeFile(join(root, `${MID}.partial`, "nested", "deep.txt"), "x");
+            await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: true });
+            expect((await readdir(root)).sort()).toEqual([`${NEW}.partial`]);
+        });
+
+        it("discards a partial whose hardlink sits in a nested directory", async () => {
+            await makeDir(OLD);
+            await makeDir(`${MID}.partial`);
+            await mkdir(join(root, `${MID}.partial`, "nested"), { recursive: true });
+            await link(join(root, OLD, "file.txt"), join(root, `${MID}.partial`, "nested", "file.txt"));
+            await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: false });
+        });
     });
 
     describe("promote", () => {
@@ -191,6 +224,61 @@ describe("LocalSnapshotStore", () => {
         it("wraps a statfs failure in SnapshotStoreError", async () => {
             const missing = new LocalSnapshotStore(join(tmp, "does", "not", "exist"), log);
             await expect(missing.freeBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
+    });
+
+    describe("freeInodes", () => {
+        it("reports statfs ffree, or null on a filesystem without inode accounting", async () => {
+            await mkdir(root, { recursive: true });
+            const inodes = await store.freeInodes();
+            // ffree drifts between calls, so the shape is what matters: a positive
+            // count on an inode-accounting filesystem, null when there is none.
+            if ((await statfs(root)).files === 0) {
+                expect(inodes).toBeNull();
+            } else {
+                expect(inodes).toBeGreaterThan(0);
+            }
+        });
+
+        it("is null (never a guess) when statfs fails", async () => {
+            const missing = new LocalSnapshotStore(join(tmp, "does", "not", "exist"), log);
+            await expect(missing.freeInodes()).resolves.toBeNull();
+        });
+    });
+
+    // A future-dated complete snapshot - one `mkdir` from a jailed writer, or a
+    // single clock-skew event - used to be UNDELETABLE: it sorted newest, so the
+    // store refused it unconditionally, every run failed clock-skew and recovery
+    // needed shell on the archive host. It stays protected only while it is the
+    // ONLY snapshot (it may hold the only copy of the data).
+    describe("future-dated snapshots", () => {
+        /** A snapshot name far enough ahead of the fixed clock to be implausible. */
+        const FUTURE = "2099-01-01T000000Z";
+
+        /** A store whose clock is fixed just after NEW. */
+        function clockedStore(): LocalSnapshotStore {
+            return new LocalSnapshotStore(root, log, () => new Date("2026-08-10T04:00:00Z"));
+        }
+
+        it("lists a future-dated name (so retention and prune can see it)", async () => {
+            await makeDir(OLD);
+            await makeDir(FUTURE);
+            await expect(clockedStore().listComplete()).resolves.toEqual([OLD, FUTURE]);
+        });
+
+        it("is deletable while genuine history exists, and the newest genuine one is not", async () => {
+            await makeDir(OLD);
+            await makeDir(NEW);
+            await makeDir(FUTURE);
+            const clocked = clockedStore();
+            await expect(clocked.remove(NEW)).rejects.toThrow(/refusing to delete the newest/);
+            await clocked.remove(FUTURE);
+            expect((await readdir(root)).sort()).toEqual([OLD, NEW]);
+        });
+
+        it("is protected when it is the only snapshot - never lose the last copy", async () => {
+            await makeDir(FUTURE);
+            await expect(clockedStore().remove(FUTURE)).rejects.toThrow(/refusing to delete the newest/);
         });
     });
 });

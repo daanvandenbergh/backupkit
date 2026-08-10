@@ -9,6 +9,7 @@
 import { dirname } from "node:path";
 
 import type { ResolvedConfig } from "../../../config/types.js";
+import { ConfigError } from "../../../shared/errors.js";
 
 /** Where the systemd unit is installed. */
 export const SYSTEMD_UNIT_PATH = "/etc/systemd/system/backupkit.service";
@@ -34,14 +35,37 @@ export const MACOS_LOG_FILES: readonly string[] = [
 /** The newsyslog rotation line: rotate at 10 MiB, keep 5, compressed. */
 export const NEWSYSLOG_CONF = "/var/log/backupkit/*.log  root:wheel  640  5  10240  *  J\n";
 
-/** The daemon's runtime directory when running as root (the unit's User=root default). */
-const ROOT_RUNTIME_DIR = "/run/backupkit";
+/**
+ * The runtime-directory NAME under /run, for `RuntimeDirectory=`. systemd
+ * creates `/run/backupkit` before ExecStart, grants it to the sandbox, and
+ * removes it on stop - which is the only way the grant survives a reboot,
+ * because /run is a tmpfs. Naming it in `ReadWritePaths=` instead is fatal:
+ * systemd resolves that list BEFORE ExecStart, so the first boot after install
+ * fails namespace setup (status 226/NAMESPACE) and `Restart=on-failure` with
+ * `StartLimitIntervalSec=0` retries forever without ever marking the unit
+ * failed. Must stay in lockstep with the engine's `/run/backupkit` runtimeDir
+ * default (engine/backupkit.ts) - the daemon puts its agent socket there.
+ */
+const RUNTIME_DIR_NAME = "backupkit";
 
 /**
- * Quote one token for a systemd ExecStart line: double-quoted with backslash
- * and quote escapes, and `%` doubled (systemd specifier escape).
+ * Quote one token for a systemd unit line: double-quoted with backslash and
+ * quote escapes, and `%` doubled (systemd specifier escape).
+ *
+ * A NUL or newline is REFUSED rather than escaped: systemd's unit grammar is
+ * line-based and has no escape for a newline inside a value, so a token
+ * carrying one would end the directive and let the rest of the value become an
+ * arbitrary further directive (`ExecStartPre=...`) in a root unit. Every
+ * config-derived path is already filtered by the validator's `expectPath`, and
+ * `resolveConfigPath` filters the one value that reaches here from argv - this
+ * throw holds the invariant at the sink, where no future caller can miss it.
  */
 export function systemdQuote(token: string): string {
+    if (/[\0\n\r]/.test(token)) {
+        throw new ConfigError(
+            `cannot write a service unit for a value containing a NUL or newline character: ${JSON.stringify(token)}`,
+        );
+    }
     return `"${token.replaceAll("\\", "\\\\").replaceAll('"', '\\"').replaceAll("%", "%%")}"`;
 }
 
@@ -51,32 +75,60 @@ export function hasAliasRemote(config: ResolvedConfig): boolean {
 }
 
 /**
- * The unit's ReadWritePaths: every local destination root, the stateDir, the
- * root runtime dir, the config directory, and - when `logging.file` is
- * configured - its directory. Deduplicated, config order.
+ * The unit's ReadWritePaths entries: every local destination root, the
+ * stateDir, the config directory, each explicit remote's identityFile and
+ * knownHostsFile directory, and - when `logging.file` is configured - its
+ * directory. Deduplicated, config order. `/run/backupkit` is deliberately
+ * absent: `RuntimeDirectory=` owns it (see `RUNTIME_DIR_NAME`).
  *
  * This set must cover EVERY path the daemon writes: `ProtectSystem=strict`
  * makes the rest of the filesystem read-only, so a missing member is not a
  * hardening gap but a crash loop (`Restart=on-failure` with
  * `StartLimitIntervalSec=0` retries forever and never marks the unit failed).
- * The logging.file directory is the one that is easy to forget, because the
- * writer lives in the engine, not here - see `logDirOf`.
+ * Two members are easy to forget because their writers live in other modules:
+ * the logging.file directory (the engine writes it - see `logDirOf`) and the
+ * two ssh directories - the daemon CREATES a missing known_hosts file
+ * (ssh/permissions.ts) and writes the `.pub` sidecar next to the private key
+ * (ssh/agent.ts). A configured `knownHostsFile` outside the config dir crash-
+ * loops the unit; a key under /root/.ssh is EROFS under `ProtectHome=read-only`
+ * and silently fails only that remote's targets.
+ *
+ * Entries install does not create itself carry systemd's `-` prefix, so a path
+ * that does not exist yet is IGNORED at namespace setup instead of being fatal:
+ * the daemon's own preflight then reports it ("destination root ... does not
+ * exist; create it first") instead of systemd crash-looping on 226/NAMESPACE.
+ * stateDir, the config dir, and the log dir are unprefixed because install
+ * guarantees they exist (`writeUnits`).
  */
 export function readWritePathsOf(config: ResolvedConfig): string[] {
-    const paths = new Set<string>();
+    const entries: string[] = [];
+    const seen = new Set<string>();
+    /** Append one path once, `-`-prefixed when install does not guarantee it exists. */
+    const add = (path: string, mayBeAbsent: boolean): void => {
+        if (seen.has(path)) {
+            return;
+        }
+        seen.add(path);
+        entries.push(mayBeAbsent ? `-${path}` : path);
+    };
     for (const target of config.targets) {
         if (target.dst.kind === "local") {
-            paths.add(target.dst.path);
+            add(target.dst.path, true);
         }
     }
-    paths.add(config.stateDir);
-    paths.add(ROOT_RUNTIME_DIR);
-    paths.add(dirname(config.configPath));
+    add(config.stateDir, false);
+    add(dirname(config.configPath), false);
+    for (const remote of Object.values(config.remotes)) {
+        if (remote.kind === "explicit") {
+            add(dirname(remote.identityFile), true);
+            add(dirname(remote.knownHostsFile), true);
+        }
+    }
     const logDir = logDirOf(config);
     if (logDir !== null) {
-        paths.add(logDir);
+        add(logDir, false);
     }
-    return [...paths];
+    return entries;
 }
 
 /**
@@ -126,6 +178,8 @@ export function systemdUnit(options: SystemdUnitOptions): string {
         "RestartSec=15",
         "KillSignal=SIGTERM",
         "TimeoutStopSec=30",
+        `RuntimeDirectory=${RUNTIME_DIR_NAME}`,
+        "RuntimeDirectoryMode=0700",
         "NoNewPrivileges=true",
         "PrivateTmp=true",
         "ProtectSystem=strict",
@@ -135,9 +189,22 @@ export function systemdUnit(options: SystemdUnitOptions): string {
         "ProtectHome=read-only",
         ...(options.aliasRemote ? ["ReadOnlyPaths=/root/.ssh"] : []),
         "ProtectKernelModules=true",
+        "ProtectKernelTunables=true",
+        "ProtectKernelLogs=true",
         "ProtectControlGroups=true",
+        "ProtectClock=true",
         "RestrictNamespaces=true",
+        "RestrictRealtime=true",
+        // ssh and rsync need AF_INET/AF_INET6 (transport), AF_UNIX (the agent
+        // socket, NSS), and AF_NETLINK - glibc's getaddrinfo probes the local
+        // address families over netlink, so omitting it degrades name
+        // resolution on some hosts. Everything else (AF_PACKET, raw sockets)
+        // is denied.
+        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK",
         "LockPersonality=true",
+        // SystemCallArchitectures=native first: without it SystemCallFilter is
+        // bypassable through a secondary syscall ABI (32-bit on x86-64).
+        "SystemCallArchitectures=native",
         "SystemCallFilter=@system-service",
         "",
         "[Install]",

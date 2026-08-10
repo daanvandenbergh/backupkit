@@ -93,7 +93,125 @@ describe("backupkit-remote jail script", () => {
         });
     });
 
+    describe("rm -rf is narrower than every other verb (the delete-component policy)", () => {
+        // The Critical: `rm -rf` used to share check_component with mkdir/mv/find/df,
+        // so a compromised push client could erase a target's ENTIRE archive
+        // history with one permitted command. check_delete_component now pins the
+        // FINAL component to the only three shapes the client ever removes.
+        it.each([
+            ["a bare target directory (the Critical)", () => `${jailRoot}/web`],
+            ["a COMPLETE snapshot", () => `${jailRoot}/web/${BASE}`],
+            ["a complete snapshot under a nested target", () => `${jailRoot}/my-target.01/${SNAP}`],
+            ["the lock's snapshot-named marker", () => `${jailRoot}/web/.backupkit.lock/${SNAP}`],
+        ])("rejects rm -rf of %s", async (_label, build) => {
+            const path = build();
+            await mkdir(path, { recursive: true });
+            await expectRejected(quoted(["rm", "-rf", "--", path]));
+            expect(existsSync(path)).toBe(true);
+        });
+
+        it.each([
+            ["<snap>.partial", () => `${jailRoot}/web/${SNAP}.partial`],
+            ["<snap>.deleting", () => `${jailRoot}/web/${SNAP}.deleting`],
+            [".backupkit.lock", () => `${jailRoot}/web/.backupkit.lock`],
+        ])("accepts rm -rf of %s (prune and lock release break without it)", async (_label, build) => {
+            const path = build();
+            await mkdir(path, { recursive: true });
+            const result = await jail(quoted(["rm", "-rf", "--", path]));
+            expect(result.stderr).not.toContain("backupkit-remote: rejected");
+            expect(result.exitCode).toBe(0);
+            expect(existsSync(path)).toBe(false);
+        });
+
+        it("the broader policy the other verbs need is untouched", async () => {
+            const target = `${jailRoot}/web`;
+            const lock = `${target}/.backupkit.lock`;
+            await mkdir(`${target}/${BASE}`, { recursive: true });
+            const shapes: string[][] = [
+                // A bare target dir and a lock marker: mkdir must still accept both.
+                ["mkdir", "-p", "--", target],
+                ["mkdir", "--", lock],
+                ["mkdir", "-p", "--", `${lock}/${SNAP}`],
+                // Both mv forms: promote a .partial, and retire a COMPLETE snapshot.
+                ["mv", "--", `${target}/${BASE}`, `${target}/${BASE}.deleting`],
+                ["mv", "--", `${target}/${BASE}.deleting`, `${target}/${SNAP}.partial`],
+                // find and df name a bare target dir.
+                ["find", target, "-maxdepth", "1", "-mindepth", "1", "-print0"],
+                ["df", "-Pk", "--", target],
+            ];
+            for (const argv of shapes) {
+                const result = await jail(quoted(argv));
+                expect({ argv, stderr: result.stderr, exit: result.exitCode }).toEqual({
+                    argv,
+                    stderr: "",
+                    exit: 0,
+                });
+            }
+        });
+    });
+
     describe("allowed rsync forms (fake rsync records the argv)", () => {
+        it("permits the REAL captured rsync argv, whose --link-dest is space-separated", async () => {
+            // Captured off the wire from rsync 3.4.x: the value arrives as its own
+            // token, not `--link-dest=...`. Accepting only the `=` form made every
+            // real incremental push fail with a bare "rejected".
+            const dest = `${jailRoot}/web/${SNAP}.partial`;
+            const cmd =
+                `rsync --server -lHtprSe.iLsfxCIvu --timeout=600 --delete --force --partial ` +
+                `--numeric-ids --link-dest ../${BASE} --info=STATS2 . ${dest}`;
+            const result = await jail(cmd);
+            expect(result.stderr).not.toContain("backupkit-remote: rejected");
+            expect(result.exitCode).toBe(0);
+            const calls = await fake.calls();
+            expect(calls[0].argv).toEqual([
+                "--server",
+                "-lHtprSe.iLsfxCIvu",
+                "--timeout=600",
+                "--delete",
+                "--force",
+                "--partial",
+                "--numeric-ids",
+                "--link-dest",
+                `../${BASE}`,
+                "--info=STATS2",
+                ".",
+                dest,
+            ]);
+        });
+
+        it.each([
+            ["the = form", () => `--link-dest=../${BASE}`],
+            ["the space-separated form", () => `--link-dest ../${BASE}`],
+        ])("permits %s of --link-dest", async (_label, build) => {
+            const cmd = `rsync --server -logDtpre.iLsfxC ${build()} . ${jailRoot}/web/${SNAP}.partial`;
+            expect((await jail(cmd)).exitCode).toBe(0);
+        });
+
+        it.each([
+            ["a non-snapshot sibling", "../evil"],
+            ["an absolute path", "/etc"],
+            ["the bare cwd", "."],
+            ["a deeper traversal", "../../etc"],
+        ])("rejects the space-separated --link-dest %s, and it never reaches rsync", async (_label, value) => {
+            await expectRejected(`rsync --server -logDtpre.iLsfxC --link-dest ${value} . ${jailRoot}/web/${SNAP}.partial`);
+            expect(await fake.calls()).toEqual([]);
+        });
+
+        it("the consumed --link-dest value can never be mistaken for the path operand", async () => {
+            // The value token is eaten inside the --link-dest branch; a command
+            // whose ONLY trailing path is that value has no operand at all.
+            await expectRejected(`rsync --server -logDtpre.iLsfxC --link-dest ../${BASE} .`);
+            expect(await fake.calls()).toEqual([]);
+        });
+
+        it.each([
+            ["--rsync-path=/bin/sh still runs a client-chosen binary", "--rsync-path=/bin/sh -a"],
+            ["a short bundle containing L still follows symlinks out", "-logDtpreL.iLsfxC"],
+        ])("regression: %s", async (_label, opts) => {
+            await expectRejected(`rsync --server ${opts} . ${jailRoot}/web/${SNAP}.partial`);
+            expect(await fake.calls()).toEqual([]);
+        });
+
         it("permits the quoted and unquoted version probe", async () => {
             expect((await jail("'rsync' '--version'")).exitCode).toBe(0);
             expect((await jail("rsync --version")).exitCode).toBe(0);

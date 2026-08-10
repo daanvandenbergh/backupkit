@@ -10,6 +10,9 @@
 # so the app owns the base path - both next.config (routes/assets/next.js links) AND the hero <img> read
 # the same value, which is what makes raw /assets hero paths resolve under a project subpath.
 #
+# Every `uses:` is pinned to a full commit SHA with its tag in the trailing comment - a mutable
+# tag can be retargeted at new code. Bump both together (`git ls-remote --tags <repo url>`).
+#
 # If your Next app is NOT at the repo root (e.g. it lives in `web/`), uncomment the
 # `defaults.run.working-directory` block below and set the path, and change the
 # upload `path:` to `<subdir>/out`.
@@ -21,11 +24,10 @@ on:
         branches: [main]
     workflow_dispatch:
 
-# Least-privilege token: only what deploy-pages needs.
-permissions:
-    contents: read
-    pages: write
-    id-token: write
+# Permissions are granted PER JOB below, never workflow-wide: a workflow-scope `id-token: write`
+# would also hand ACTIONS_ID_TOKEN_REQUEST_URL/_TOKEN to the build job, where `npm ci` runs
+# third-party lifecycle scripts - any one of them could then mint an OIDC token asserting this
+# repo's identity. Only the deploy job (GitHub-owned actions only) gets OIDC.
 
 # One deploy at a time; let an in-flight run finish rather than cancelling it.
 concurrency:
@@ -35,15 +37,22 @@ concurrency:
 jobs:
     build:
         runs-on: ubuntu-latest
+        # No id-token here - this job runs `npm ci` (third-party lifecycle scripts) and
+        # `next build`. `pages: write` is needed only by the Configure Pages step's
+        # `enablement: true` (it calls the Pages API to create the site on a fresh repo); enable
+        # Pages by hand once and set `enablement: false` to drop it to `contents: read` alone.
+        permissions:
+            contents: read
+            pages: write
         defaults:
             run:
                 working-directory: site   # the Next app lives in site/ (repo root is the library)
         steps:
             - name: Checkout
-              uses: actions/checkout@v7
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
             - name: Set up Node
-              uses: actions/setup-node@v7
+              uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
               with:
                   # Next.js 16 requires Node >= 20.9; 22 is the current LTS.
                   node-version: 22
@@ -60,7 +69,7 @@ jobs:
             # enable Pages once by hand (Settings -> Pages -> Source: "GitHub Actions") and this is a no-op.
             - name: Configure Pages
               id: pages
-              uses: actions/configure-pages@v6
+              uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
               with:
                   enablement: true
 
@@ -74,17 +83,21 @@ jobs:
               run: npx --no-install next build
 
             - name: Upload artifact
-              uses: actions/upload-pages-artifact@v5
+              uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
               with:
                   path: site/out
 
     deploy:
         needs: build
         runs-on: ubuntu-latest
+        # The documented minimum for deploy-pages, and the only job that gets OIDC.
+        permissions:
+            pages: write
+            id-token: write
         environment:
             name: github-pages
             url: ${{ steps.deployment.outputs.page_url }}
         steps:
             - name: Deploy to GitHub Pages
               id: deployment
-              uses: actions/deploy-pages@v5
+              uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

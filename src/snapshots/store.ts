@@ -34,6 +34,13 @@ export interface SnapshotStore {
     /** Free bytes on the archive filesystem (statfs locally, `df -Pk --` remotely). */
     freeBytes(): Promise<number>;
     /**
+     * Free inodes on the archive filesystem, or null when this store cannot
+     * know (the remote store's `df -Pk --` reports no inode columns and the
+     * jail's command grammar is fixed). Null means "skip the inode half of the
+     * disk guard" - never "plenty free".
+     */
+    freeInodes(): Promise<number | null>;
+    /**
      * Acquire the per-destination-root lock, run `fn`, release in `finally` -
      * leaking a lock is unrepresentable. Throws `LockHeldError` on live
      * contention without running `fn`.

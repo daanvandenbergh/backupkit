@@ -40,6 +40,15 @@ export type SshContext = "unattended" | "interactive";
  * injected `-o` options win over any ssh_config setting by OpenSSH's own
  * precedence rules, so the no-hang and host-key guarantees survive a lax
  * user config.
+ *
+ * The baseline also pins the forwarding options OFF for BOTH remote kinds and
+ * for the rsync `-e` transport that reuses these tokens. ssh reads
+ * ~/.ssh/config for every remote kind, so a `Host * / ForwardAgent yes` line
+ * would forward backupkit's own agent - which holds the archive private key,
+ * added with no lifetime and no confirmation - into whatever host backupkit
+ * dials, including a possibly compromised pull source. ForwardAgent=no,
+ * ForwardX11=no and ForwardX11Trusted=no override that config by ssh's
+ * first-value-wins precedence, and backupkit needs none of the three.
  */
 export function sshArgs(remote: ResolvedRemote, context: SshContext): string[] {
     const strict = context === "interactive" ? "accept-new" : "yes";
@@ -49,6 +58,9 @@ export function sshArgs(remote: ResolvedRemote, context: SshContext): string[] {
         "-o", "ServerAliveInterval=15",
         "-o", "ServerAliveCountMax=4",
         "-o", `StrictHostKeyChecking=${strict}`,
+        "-o", "ForwardAgent=no",
+        "-o", "ForwardX11=no",
+        "-o", "ForwardX11Trusted=no",
     ];
     if (remote.kind === "alias") {
         return [...baseline, "-o", "LogLevel=ERROR"];

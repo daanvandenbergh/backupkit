@@ -46,6 +46,21 @@ describe("bare invocation and global flags", () => {
             expect(h.err[0]).toContain(name);
         }
     });
+
+    // The dispatch table is a plain object literal, so `COMMANDS["toString"]`
+    // is an INHERITED function: an `=== undefined` guard waved it through and
+    // CALLED it with (rest, deps). Against the real bin, `backupkit toString`
+    // exited 1 with an unhandled ERR_INVALID_ARG_TYPE rejection instead of the
+    // usage exit 64; `constructor` returned [] and "succeeded".
+    it.each([["toString"], ["constructor"], ["valueOf"], ["hasOwnProperty"], ["__proto__"], ["isPrototypeOf"]])(
+        "treats the inherited Object.prototype member %s as an unknown command",
+        async (name) => {
+            const h = fakeDeps();
+            expect(await main([name], h.deps)).toBe(64);
+            expect(h.err[0]).toContain(`error usage: unknown command "${name}"`);
+            expect(h.engine.calls).toEqual([]);
+        },
+    );
 });
 
 describe("per-command --help", () => {

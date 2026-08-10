@@ -5,7 +5,16 @@ import { clearRemoteVersionCache, probeLocalRsync, probeRemoteRsync, type ExecFn
 
 /** Build one ExecResult with success defaults. */
 function res(overrides?: Partial<ExecResult>): ExecResult {
-    return { exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 5, ...overrides };
+    return {
+        exitCode: 0,
+        signal: null,
+        stdout: "",
+        stderr: "",
+        timedOut: false,
+        durationMs: 5,
+        truncated: false,
+        ...overrides,
+    };
 }
 
 /** A silent logger (retry warns go nowhere). */

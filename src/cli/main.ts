@@ -140,7 +140,12 @@ export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promi
             deps.stdout(deps.version);
             return 0;
         }
-        const command = COMMANDS[first];
+        // Object.hasOwn, never a truthiness/undefined test: COMMANDS is a plain
+        // object literal, so `COMMANDS["toString"]` is an INHERITED function and
+        // an `=== undefined` guard would wave it straight through to be called
+        // with (rest, deps) - dispatch failing open on every Object.prototype
+        // member instead of the usage error.
+        const command = Object.hasOwn(COMMANDS, first) ? COMMANDS[first] : undefined;
         if (command === undefined) {
             throw new UsageError(
                 `unknown command "${first}" (valid: ${Object.keys(COMMANDS).join(", ")})`,

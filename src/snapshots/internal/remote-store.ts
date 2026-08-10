@@ -17,6 +17,7 @@ import { sanitize } from "../../shared/sanitize.js";
 import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
 import { formatSnapshotName, isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
+import { newestUndeletable } from "../types.js";
 import { withLockScope, type LockBackend, type LockInspection } from "./lock.js";
 
 /** Name of the lock directory inside a store root. */
@@ -100,7 +101,8 @@ class RemoteLockBackend implements LockBackend {
 
     /**
      * TTL staleness: list the lock directory and parse its snapshot-named
-     * marker; older than 24 h means stale, an unlistable lock means stale. A
+     * marker; more than 24 h from now in EITHER direction means stale, an
+     * unlistable lock means stale. A
      * lock with NO parseable marker is treated as held, NOT stale: acquisition
      * is two round-trips (mkdir the lock, then mkdir the marker), so a
      * markerless lock is almost always one a contender caught mid-acquire, and
@@ -128,8 +130,14 @@ class RemoteLockBackend implements LockBackend {
             if (created === null) {
                 continue;
             }
+            // Math.abs, not a bare age: a marker dated in the FUTURE yields a
+            // negative age, which no `> TTL` test can ever satisfy - the lock
+            // would be reported held forever. A jailed writer can plant exactly
+            // that with one `mkdir -p -- <lock>/2099-01-01T000000Z`, and so can
+            // an honest holder whose clock is wrong when it is SIGKILLed. A
+            // marker the client's clock could not have written is stale.
             const ageMs = this.now().getTime() - created.getTime();
-            if (ageMs > LOCK_TTL_MS) {
+            if (Math.abs(ageMs) > LOCK_TTL_MS) {
                 return stale(`created ${name}, past the 24h TTL`);
             }
             return { stale: false, pid: null, hostname: null, detail: `created ${name}` };
@@ -257,7 +265,20 @@ export class RemoteSnapshotStore implements SnapshotStore {
         return { resumed: true };
     }
 
-    /** Atomic `mv -- <name>.partial <name>` (pure rename); the destination must not pre-exist. */
+    /**
+     * `mv -- <name>.partial <name>` (pure rename), then a post-check that the
+     * rename REPLACED rather than NESTED.
+     *
+     * Unlike `fs.rename` (which fails ENOTEMPTY), POSIX `mv A B` with B an
+     * existing directory moves A INSIDE B: if `<name>` appears between the
+     * listing above and the `mv`, the finished snapshot silently lands at
+     * `<name>/<name>.partial`, `mv` exits 0 and the pipeline reports success on
+     * an archive that no longer holds the snapshot where it says it does. The
+     * check-then-mv window cannot be closed from this side (the jail's command
+     * grammar is fixed - no `mv -T`, no `[ -e ]`), so detection is the client's
+     * job: one extra `find` inside the promoted directory turns a silent
+     * corruption into a loud failure with the partial still on disk.
+     */
     async promote(name: string): Promise<void> {
         assertSnapshotName(name);
         const entries = await this.listEntries();
@@ -267,16 +288,32 @@ export class RemoteSnapshotStore implements SnapshotStore {
         if (!entries.includes(`${name}.partial`)) {
             throw new SnapshotStoreError(`no partial snapshot ${name}.partial to promote`);
         }
-        await this.run(
-            ["mv", "--", posix.join(this.root, `${name}.partial`), posix.join(this.root, name)],
-            "promote",
-            NO_RETRY,
+        const final = posix.join(this.root, name);
+        await this.run(["mv", "--", posix.join(this.root, `${name}.partial`), final], "promote", NO_RETRY);
+        const inside = await this.run(
+            ["find", final, "-maxdepth", "1", "-mindepth", "1", "-print0"],
+            "promote verification",
         );
+        const nested = inside.stdout
+            .split("\0")
+            .some((entry) => entry !== "" && entry.slice(entry.lastIndexOf("/") + 1) === `${name}.partial`);
+        if (nested) {
+            throw new SnapshotStoreError(
+                `promote of ${name} nested instead of renaming: ${name} already existed on the remote, so the snapshot now sits at ${name}/${name}.partial - not promoted`,
+            );
+        }
     }
 
     /**
      * Two-phase delete: `mv --` to `<name>.deleting`, then `rm -rf --`.
-     * Refuses non-complete names and the newest complete snapshot.
+     * Refuses non-complete names and the newest complete snapshot - where
+     * "newest" means the newest GENUINELY dated one (see `newestUndeletable`),
+     * so a future-dated name a jailed writer planted stays prunable instead of
+     * bricking the target forever.
+     *
+     * Phase 1 needs no nesting post-check (unlike `promote`): if `mv` nests
+     * `<name>` into a pre-existing `<name>.deleting`, phase 2's `rm -rf` still
+     * removes it, which is exactly what this method was asked to do.
      */
     async remove(name: string): Promise<void> {
         assertSnapshotName(name);
@@ -284,7 +321,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
         if (!complete.includes(name)) {
             throw new SnapshotStoreError(`${name} is not a complete snapshot`);
         }
-        if (complete.at(-1) === name) {
+        if (newestUndeletable(complete, this.now()) === name) {
             throw new SnapshotStoreError(`refusing to delete the newest complete snapshot ${name}`);
         }
         const deleting = posix.join(this.root, `${name}.deleting`);
@@ -317,10 +354,24 @@ export class RemoteSnapshotStore implements SnapshotStore {
             throw malformed;
         }
         const available = tokens[pctIndex - 1];
-        if (!/^[0-9]+$/.test(available)) {
+        // The digit test alone has no length bound: a hostile `df` answering 400
+        // digits parses to Infinity, and `Infinity * 1024 >= anything` makes the
+        // disk guard pass unconditionally. The safe-integer bound is the check.
+        const kib = Number(available);
+        if (!/^[0-9]+$/.test(available) || !Number.isSafeInteger(kib * 1024)) {
             throw malformed;
         }
-        return Number(available) * 1024;
+        return kib * 1024;
+    }
+
+    /**
+     * Free inodes: always null for a push store. The jailed surface answers
+     * `df -Pk --`, whose POSIX output has no inode columns, and the jail's
+     * command grammar is an exact string match - a client cannot ask for
+     * `df -Pi`. The disk guard skips its inode half rather than guess.
+     */
+    async freeInodes(): Promise<number | null> {
+        return null;
     }
 
     /** Run `fn` under the store-root lock (structural release; spec section 6). */

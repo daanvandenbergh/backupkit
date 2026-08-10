@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import type { Logger } from "../../shared/logger.js";
 import { formatSnapshotName } from "../../shared/snapshot-name.js";
-import type { RunStatus, TargetRunReport } from "../types.js";
+import type { RunStats, RunStatus, TargetRunReport } from "../types.js";
 
 /** Reports kept per target - an order of magnitude more than the backoff derivation consumes. */
 export const REPORTS_KEPT = 50;
@@ -101,6 +101,20 @@ export async function readTargetReports(stateDir: string, target: string, log: L
         reports.push(parsed);
     }
     return reports;
+}
+
+/**
+ * Stats of the newest report that completed a transfer (reports newest first,
+ * as `readTargetReports` returns them), or null when no such run is on record.
+ * The baseline the content-collapse tripwire compares this run against.
+ */
+export function newestStats(reports: readonly TargetRunReport[]): RunStats | null {
+    for (const report of reports) {
+        if (report.stats !== null && report.stats !== undefined) {
+            return report.stats;
+        }
+    }
+    return null;
 }
 
 /** Backoff bookkeeping derived from one target's reports. */

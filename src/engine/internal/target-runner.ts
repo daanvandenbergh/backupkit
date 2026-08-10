@@ -20,6 +20,7 @@ import type { Endpoint } from "../../shared/types.js";
 import { buildArgs, type TransferSpec, type dryRunStats, type runTransfer, type TransferAttempt } from "../../rsync/rsync.js";
 import { planRetention } from "../../retention/retention.js";
 import type { SnapshotStore } from "../../snapshots/store.js";
+import { splitFutureSnapshots } from "../../snapshots/types.js";
 import { evaluateDiskGuard } from "./disk-guard.js";
 import { runIdFor } from "./reports.js";
 import type { RunStats, TargetRunReport } from "../types.js";
@@ -51,6 +52,12 @@ export interface TargetRunnerDeps {
     totalBytes: () => Promise<number | null>;
     /** Sticky disk-low state shared across runs, for one-log-per-transition semantics. */
     diskLowTargets: Set<string>;
+    /**
+     * Stats of this target's newest run that completed a transfer, or null when
+     * there is no such run on record - the baseline for the content-collapse
+     * tripwire. Called at most once per run, after the transfer.
+     */
+    previousStats: () => Promise<RunStats | null>;
 }
 
 /** Per-run options. */
@@ -98,6 +105,45 @@ function specFor(target: ResolvedTarget, snapName: string, linkDestBase: string 
 }
 
 /**
+ * Content-collapse tripwire threshold: a new snapshot whose file count is below
+ * this fraction of the previous run's is treated as a collapse.
+ *
+ * Why it exists: every transfer runs `--delete --force`, so a compromised source
+ * that presents an empty (or selectively emptied) tree on each scheduled run
+ * promotes empty snapshots, and retention - which selects purely on names and
+ * counts - then ages the real history out bucket by bucket. That is the one way
+ * a source can destroy its own archive despite the jail, and it contradicts the
+ * README's promise that a compromised source cannot corrupt the archive.
+ *
+ * ponytail: one flat halving, file count only, no per-target knob. rsync's
+ * `--info=stats2` reports the transferred delta but never the tree's total size,
+ * so bytes are not a usable signal here - the file count is. A halving is well
+ * clear of normal churn; if a project legitimately halves its file count it
+ * loses one prune cycle and `backupkit prune` clears the backlog.
+ */
+const COLLAPSE_FRACTION = 0.5;
+
+/**
+ * The collapse detail when `current` holds fewer than COLLAPSE_FRACTION of
+ * `previous`'s files, else null. Missing stats on either side (a first run, or
+ * an rsync whose stats block did not parse) never trip the wire - the tripwire
+ * only ever skips a prune, so a false negative costs one retention cycle while a
+ * false positive would cost disk.
+ */
+function collapseAgainst(
+    previous: RunStats | null,
+    current: RunStats | null,
+): { previousFiles: number; files: number } | null {
+    if (previous === null || current === null || previous.totalFiles <= 0) {
+        return null;
+    }
+    if (current.totalFiles >= Math.ceil(previous.totalFiles * COLLAPSE_FRACTION)) {
+        return null;
+    }
+    return { previousFiles: previous.totalFiles, files: current.totalFiles };
+}
+
+/**
  * A verify-pass itemize line that indicates a content or existence change:
  * transfers (`>`/`<`), creations/changes (`c`), hardlink changes (`h`), and
  * deletions (`*deleting`). Attribute-only lines start with `.` and pass.
@@ -123,6 +169,7 @@ export async function runTarget(
     let snapshot: string | null = null;
     let stats: RunStats | null = null;
     let skippedFiles: string[] = [];
+    let contentCollapse: TargetRunReport["contentCollapse"] = null;
 
     /** Assemble the final report from the pipeline outcome. */
     const report = (status: TargetRunReport["status"], reason: string | null, error: string | null): TargetRunReport => ({
@@ -138,6 +185,7 @@ export async function runTarget(
         stats,
         skippedFiles,
         error,
+        contentCollapse,
     });
 
     try {
@@ -165,11 +213,26 @@ export async function runTarget(
                 }
             }
 
-            // Clock-skew guard: the new name must sort strictly after the newest complete name.
+            // Clock-skew guard: the new name must sort strictly after the newest
+            // complete name. It compares against EVERY complete name, including
+            // future-dated ones: a name from the future is either a backwards
+            // clock (in which case refusing is exactly right - the run would
+            // otherwise write a snapshot that sorts before existing history) or
+            // something a jailed writer planted, and the two are
+            // indistinguishable from here. The escape hatch for the planted case
+            // is `backupkit prune`, which CAN now delete a future-dated name (see
+            // `newestUndeletable`); auto-ignoring it would mean auto-deleting real
+            // snapshots on any machine whose clock jumps backwards.
             if (newest !== null && snapName <= newest) {
+                const { future } = splitFutureSnapshots(complete, start);
                 deps.log.error("clock skew: new snapshot name would not sort after the newest complete snapshot", {
                     newName: snapName,
                     newest,
+                    hint:
+                        future.length === 0
+                            ? "check this host's clock"
+                            : "check this host's clock; if it is correct these future-dated names are not ours - `backupkit prune` removes them",
+                    futureDated: future.slice(0, 10).map(sanitize).join(", "),
                 });
                 return report("failed", "clock-skew", `new snapshot ${snapName} would sort <= newest complete ${newest}`);
             }
@@ -209,7 +272,12 @@ export async function runTarget(
                 }
                 const decision = evaluateDiskGuard({
                     deltaBytes: estimatedDelta,
+                    // The dry-run's transferred-file count = the files that need
+                    // a NEW inode (unchanged files are hardlinked from
+                    // --link-dest and need none).
+                    newFiles: estimated.filesTransferred,
                     freeBytes: await deps.store.freeBytes(),
+                    freeInodes: await deps.store.freeInodes(),
                     totalBytes,
                     minFree: target.minFree,
                 });
@@ -220,12 +288,20 @@ export async function runTarget(
                             requiredBytes: decision.requiredBytes,
                             freeBytes: decision.freeBytes,
                             floorBytes: decision.floorBytes,
+                            requiredInodes: decision.requiredInodes ?? "unknown",
+                            freeInodes: decision.freeInodes ?? "unknown",
                         });
                     }
+                    const inodeShortfall =
+                        decision.freeInodes !== null &&
+                        decision.requiredInodes !== null &&
+                        decision.freeInodes < decision.requiredInodes;
                     return report(
                         "skipped",
                         "disk-low",
-                        `need ${decision.requiredBytes} bytes plus a ${decision.floorBytes}-byte floor, only ${decision.freeBytes} free`,
+                        inodeShortfall
+                            ? `need ${decision.requiredInodes} free inodes, only ${decision.freeInodes} available`
+                            : `need ${decision.requiredBytes} bytes plus a ${decision.floorBytes}-byte floor, only ${decision.freeBytes} free`,
                     );
                 }
                 if (deps.diskLowTargets.delete(target.name)) {
@@ -290,14 +366,34 @@ export async function runTarget(
             await deps.store.promote(snapName);
             deps.log.info("snapshot promoted", { snapshot: snapName, status: result.status });
 
-            // Retention after every successful promote (floors live in planRetention + store.remove).
+            // Content-collapse tripwire (see COLLAPSE_FRACTION): a source that
+            // presents an empty or selectively-emptied tree gets its snapshot
+            // promoted (the data is already transferred and refusing to promote
+            // would throw it away) but retention is NOT run, so the older
+            // snapshots that still hold the real history cannot be aged out.
+            const previous = await deps.previousStats();
+            contentCollapse = collapseAgainst(previous, stats);
+            if (contentCollapse !== null) {
+                deps.log.error("content collapse: this snapshot holds far fewer files than the previous run - retention skipped", {
+                    previousFiles: contentCollapse.previousFiles,
+                    files: contentCollapse.files,
+                    hint: "verify the source, then run `backupkit prune` once you are satisfied the shrink is real",
+                });
+            }
+
+            // Retention after every successful promote. The floor against
+            // deleting everything is NOT here: it is the store's newest-complete
+            // guard (`newestUndeletable`) plus the tripwire above - planRetention
+            // always claims a "newest", so a "keep is empty" check would be dead
+            // code.
             let retentionError: string | null = null;
-            if (target.retention !== null) {
+            if (target.retention !== null && contentCollapse === null) {
                 try {
+                    // No future-dated handling here: a future-dated name always
+                    // trips the clock-skew guard above, so this path is only ever
+                    // reached with a plausibly-dated archive. `backupkit prune` is
+                    // the verb that clears a planted name.
                     const plan = planRetention(await deps.store.listComplete(), target.retention, deps.now());
-                    if (plan.keep.length === 0 && plan.prune.length > 0) {
-                        throw new Error("retention plan would remove all snapshots, refusing");
-                    }
                     for (const name of [...plan.prune].reverse()) {
                         await deps.store.remove(name);
                         deps.log.info("pruned snapshot", { snapshot: name });

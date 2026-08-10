@@ -1,4 +1,5 @@
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { lstat, mkdir, readFile, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Logger } from "../../shared/logger.js";
@@ -227,6 +228,36 @@ describe("ssh agent lifecycle (fake binaries)", () => {
         ]);
         expect(await readFile(pubPath, "utf8")).toBe(pub);
         expect(((await stat(pubPath)).mode & 0o777)).toBe(0o644);
+    });
+
+    it("a DANGLING symlink at <key>.pub never gets followed: no victim file, an actionable per-remote failure", async () => {
+        // fileExists() probes with stat, which follows symlinks, so a broken
+        // symlink reads as "absent" - and a plain writeFile would then create
+        // whatever it points at, with backupkit's uid (root for the daemon).
+        // O_EXCL (flag: "wx") makes the kernel refuse instead.
+        const victim = join(fake.dir, "victim-authorized_keys");
+        await symlink(victim, pubPath);
+        const { failures } = await loadKeys([explicitRemote(keyPath, null)], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }],
+            "ssh-keygen": [{ exit: 0, stdout: "ssh-ed25519 PWNED c\n" }],
+        }));
+        expect(failures.get("example")).toMatch(/appeared while backupkit was generating it/);
+        expect(existsSync(victim)).toBe(false);
+        expect((await lstat(pubPath)).isSymbolicLink()).toBe(true);
+        // The key was never added on the strength of a sidecar we did not write.
+        const addCalls = (await fake.calls()).filter((c) => c.bin === "ssh-add" && c.argv[0] !== "-l");
+        expect(addCalls).toEqual([]);
+    });
+
+    it("a symlink at <key>.pub pointing at an EXISTING file is left alone (never truncated)", async () => {
+        const other = join(fake.dir, "other-file");
+        await writeFile(other, "PRECIOUS\n", { mode: 0o644 });
+        await symlink(other, pubPath);
+        await loadKeys([explicitRemote(keyPath, null)], deps({
+            "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
+            "ssh-keygen": [{ exit: 0, stdout: "256 SHA256:IIII c (ED25519)\n" }, { exit: 0, stdout: "x\n" }],
+        }));
+        expect(await readFile(other, "utf8")).toBe("PRECIOUS\n");
     });
 
     it("encrypted key with a missing .pub fails unattended, pointing at backupkit check", async () => {

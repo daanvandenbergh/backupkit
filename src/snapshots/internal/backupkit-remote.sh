@@ -15,7 +15,10 @@
 #     `df -Pk --`, and `rsync --version`, where every path operand is under
 #     <jailRoot>/ and every leaf component is a snapshot name
 #     ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z), its .partial/.deleting form,
-#     .backupkit.lock, or a target-name-charset component.
+#     .backupkit.lock, or a target-name-charset component. `rm -rf` is narrower
+#     still: its FINAL component must be `<snap>.partial`, `<snap>.deleting`,
+#     or `.backupkit.lock` - never a bare target directory or a complete
+#     snapshot, so no single permitted command can erase an archive's history.
 #
 # Everything else exits 1. There is no eval anywhere: validated operands are
 # exec'd directly, so no shell ever re-parses attacker-controlled text.
@@ -80,6 +83,24 @@ check_component() {
     [ ${#comp} -le 64 ]
 }
 
+# True when FINAL component $1 is a leaf the client legitimately `rm -rf`s:
+# `<snap>.partial`, `<snap>.deleting`, or `.backupkit.lock` (the only three
+# shapes remote-store.ts ever removes). A bare target-name component or a
+# COMPLETE snapshot name is deliberately NOT accepted here: check_component
+# permits both, so sharing it with the `rm -rf` verb would let a compromised
+# push client delete a target's entire archive history in one command.
+check_delete_component() {
+    dcomp=$1
+    if [ "$dcomp" = ".backupkit.lock" ]; then
+        return 0
+    fi
+    case $dcomp in
+        *.partial) is_snap "${dcomp%.partial}" && return 0 ;;
+        *.deleting) is_snap "${dcomp%.deleting}" && return 0 ;;
+    esac
+    return 1
+}
+
 # True when NO existing prefix component of the (already string-validated,
 # under-$ROOT) path operand $1 is a symlink. The string checks only bound the
 # LITERAL path; this bounds the RESOLVED path. Walk from $ROOT down, appending
@@ -110,10 +131,15 @@ check_no_symlink_prefix() {
 }
 
 # True when lifecycle path operand $1 is strictly under $ROOT with every
-# leaf component permitted by check_component AND no existing prefix is a
-# symlink (the resolved path stays under $ROOT).
+# component permitted AND no existing prefix is a symlink (the resolved path
+# stays under $ROOT). $2 selects the FINAL component's policy: empty (the
+# default, used by mkdir/mv/find/df, which legitimately name a bare target
+# directory or a complete snapshot) applies check_component; "delete" (used by
+# `rm -rf` only) applies the far narrower check_delete_component. Prefix
+# components always use check_component.
 check_lifecycle_path() {
     lpath=$1
+    lmode=$2
     case $lpath in
         *\'* | *\\*) return 1 ;;
     esac
@@ -133,7 +159,11 @@ check_lifecycle_path() {
                 lrest=
                 ;;
         esac
-        check_component "$lcomp" || return 1
+        if [ -z "$lrest" ] && [ "$lmode" = delete ]; then
+            check_delete_component "$lcomp" || return 1
+        else
+            check_component "$lcomp" || return 1
+        fi
     done
     check_no_symlink_prefix "$lpath"
 }
@@ -183,10 +213,12 @@ check_rsync_path() {
 #     part must be flag letters only.
 #   - Symlink-following, command-exec (--rsync-path/--rsh/-e/--daemon), batch
 #     replay, and out-of-jail path-valued long options are rejected outright.
-#   - The ONE path-valued option our client legitimately sends,
-#     --link-dest=../<snapshotName>, is allowed and stays inside the jail by
-#     construction; any other long option is a benign flag confined to the
-#     bounded path operand, but still may carry no absolute path or ".." value.
+#   - The ONE path-valued option our client legitimately sends, --link-dest
+#     with a ../<snapshotName> value - in BOTH the `=` form and the
+#     space-separated two-token form real rsync sends - is allowed and stays
+#     inside the jail by construction; any other long option is a benign flag
+#     confined to the bounded path operand, but still may carry no absolute
+#     path or ".." value.
 validate_rsync() {
     [ "$1" = "rsync" ] || return 1
     [ "$2" = "--server" ] || return 1
@@ -210,6 +242,19 @@ validate_rsync() {
                 linkdest=${1#--link-dest=}
                 case $linkdest in
                     ../*) is_snap "${linkdest#../}" || return 1 ;;
+                    *) return 1 ;;
+                esac
+                ;;
+            # The SPACE-separated form real rsync actually sends over the wire
+            # (3.4.x: `--link-dest ../<snap>`). Same validation as the `=` form.
+            # The value token is consumed HERE and the loop's own shift steps
+            # past it, so it can never be re-parsed as an option nor counted as
+            # the path operand.
+            --link-dest)
+                shift
+                [ $# -gt 0 ] || return 1
+                case $1 in
+                    ../*) is_snap "${1#../}" || return 1 ;;
                     *) return 1 ;;
                 esac
                 ;;
@@ -290,7 +335,7 @@ case $CMD in
         P=${CMD#"'rm' '-rf' '--' '"}
         P=${P%"'"}
         case $P in *\'*) fail ;; esac
-        check_lifecycle_path "$P" || fail
+        check_lifecycle_path "$P" delete || fail
         exec rm -rf -- "$P"
         ;;
     "'df' '-Pk' '--' '"*"'")

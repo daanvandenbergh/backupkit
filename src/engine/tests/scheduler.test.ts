@@ -150,25 +150,33 @@ describe("Scheduler loop (fake timers)", () => {
         targets: ReturnType<typeof makeTarget>[];
         newest?: Record<string, string | null>;
         outcome?: (target: string) => TargetRunReport;
-    }): { scheduler: Scheduler; runs: string[]; tracker: BackoffTracker } {
+        listNewest?: (target: ReturnType<typeof makeTarget>) => Promise<string | null>;
+    }): { scheduler: Scheduler; runs: string[]; tracker: BackoffTracker; recorded: TargetRunReport[] } {
         const { log } = captureLogger("error");
         const tracker = new BackoffTracker(log);
         const runs: string[] = [];
+        const recorded: TargetRunReport[] = [];
         const scheduler = new Scheduler({
             targets: params.targets,
             log,
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: async (target) => params.newest?.[target.name] ?? null,
+            listNewest: params.listNewest ?? (async (target) => params.newest?.[target.name] ?? null),
             runTarget: async (target) => {
                 runs.push(target.name);
                 const result = params.outcome?.(target.name) ?? report(target.name, "success", "2026-08-10T120000Z");
                 tracker.record(target.name, result.status, new Date());
                 return result;
             },
+            // Mirrors the engine's wiring: persist the report, then feed backoff.
+            recordOutcome: async (target, status, reason, error) => {
+                const persisted = { ...report(target.name, status, null), reason, error };
+                recorded.push(persisted);
+                tracker.record(target.name, status, new Date(persisted.finishedAt));
+            },
         });
-        return { scheduler, runs, tracker };
+        return { scheduler, runs, tracker, recorded };
     }
 
     it("first tick runs due targets sequentially in config order; a fulfilled window does not rerun", async () => {
@@ -256,6 +264,7 @@ describe("Scheduler loop (fake timers)", () => {
             runTarget: async () => {
                 throw new LockHeldError("another backupkit holds it");
             },
+            recordOutcome: async () => undefined,
         });
         const loop = scheduler.start();
         await vi.advanceTimersByTimeAsync(0);
@@ -288,6 +297,7 @@ describe("Scheduler loop (fake timers)", () => {
                 runs.push("web");
                 return { ...report("web", "skipped", null), reason: "window" };
             },
+            recordOutcome: async () => undefined,
         });
         const loop = scheduler.start();
         await vi.advanceTimersByTimeAsync(0);
@@ -304,6 +314,57 @@ describe("Scheduler loop (fake timers)", () => {
         expect(listCalls).toBe(2);
         scheduler.stop();
         await loop;
+    });
+
+    // Regression: the due check's listing is an ssh round-trip for a push
+    // target, so archive host down / key revoked / jail script renamed all land
+    // in its catch - which logged a warn and continued BEFORE runTarget, so no
+    // report was ever written. consecutiveFailures stayed 0, backoff never
+    // engaged, and `status` kept reporting the last success while nothing ran.
+    it("a failing due check is recorded as a failed run and climbs the failure count", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { scheduler, runs, tracker, recorded } = makeLoop({
+            targets: [target],
+            listNewest: async () => {
+                throw new Error("ssh: connect to host archive port 22: Connection refused");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runs).toEqual([]);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].status).toBe("failed");
+        expect(recorded[0].reason).toBe("due-check-failed");
+        expect(recorded[0].error).toContain("Connection refused");
+        expect(tracker.failuresFor("web")).toBe(1);
+        // And the failure now delays the retry instead of hammering every tick.
+        expect(tracker.untilFor("web")).not.toBeNull();
+        scheduler.stop();
+        await loop;
+    });
+
+    it("a failing report write never ends the daemon loop", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { log } = captureLogger("error");
+        const tracker = new BackoffTracker(log);
+        const scheduler = new Scheduler({
+            targets: [target],
+            log,
+            now: () => new Date(),
+            tickMs: 30_000,
+            backoff: tracker,
+            listNewest: async () => {
+                throw new Error("archive unreachable");
+            },
+            runTarget: async () => report("web", "success", null),
+            recordOutcome: async () => {
+                throw new Error("state dir is read-only");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        scheduler.stop();
+        await expect(loop).resolves.toBeUndefined();
     });
 
     it("stop() ends the loop promptly", async () => {

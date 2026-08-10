@@ -8,6 +8,7 @@
  */
 
 import { mkdir as fsMkdir, stat as fsStat, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { SshError } from "../shared/errors.js";
 import type { ResolvedRemote } from "../shared/types.js";
 
@@ -70,6 +71,8 @@ export interface PermissionPreflightInput {
     localDestinationRoots: readonly string[];
     /** Every configured remote; explicit-only rows are skipped for alias remotes. */
     remotes: readonly ResolvedRemote[];
+    /** Resolved `logging.file` path, or null when file logging is off. Checked with its directory. */
+    loggingFile: string | null;
 }
 
 /** Render permission bits as a three-digit octal string for messages. */
@@ -117,6 +120,45 @@ function checkNotGroupOtherWritable(path: string, label: string, info: FileStatI
 }
 
 /**
+ * Check that the directory CONTAINING `path` exists, is a directory, and is
+ * not group/other-writable. A file's own mode says nothing about who may
+ * UNLINK it: a writable parent lets any local user swap backupkit's config,
+ * key, known_hosts, or `.pub` sidecar for one of their own, mode 0600 and all.
+ * `label` names the checked file, so the message reads
+ * "<label> directory <parent> is group/other-writable ...".
+ */
+async function checkParentDir(path: string, label: string, deps: PermissionDeps): Promise<void> {
+    const parent = dirname(path);
+    const info = await deps.stat(parent);
+    if (info === null) {
+        throw new SshError(`${label} directory ${parent} does not exist`);
+    }
+    if (info.kind !== "directory") {
+        throw new SshError(`${label} directory ${parent} is not a directory`);
+    }
+    checkNotGroupOtherWritable(parent, `${label} directory`, info, null);
+}
+
+/**
+ * Check the `logging.file` path the daemon appends to (as root, following
+ * symlinks, with the process umask): its directory must exist and not be
+ * group/other-writable, and when the file already exists it must be a regular
+ * file, not group/other-writable, owned by the effective uid or root. The file
+ * is never created here - logging owns that.
+ */
+async function checkLoggingFile(path: string, deps: PermissionDeps): Promise<void> {
+    await checkParentDir(path, "log file", deps);
+    const info = await deps.stat(path);
+    if (info === null) {
+        return;
+    }
+    if (info.kind !== "file") {
+        throw new SshError(`log file ${path} is not a regular file`);
+    }
+    checkNotGroupOtherWritable(path, "log file", info, deps.euid);
+}
+
+/**
  * Ensure a backupkit-private directory (runtimeDir/stateDir) exists at 0700
  * owned by the effective uid, creating it 0700 when absent.
  */
@@ -141,12 +183,20 @@ async function ensurePrivateDir(path: string, label: string, deps: PermissionDep
  * Run the full permission preflight matrix (spec section 4), failing hard on
  * the first violation. Always checked: the config file (not group/other-
  * writable, owner euid or root), runtimeDir and stateDir (0700, owner euid,
- * created so when absent), and every local destination root (exists, not
- * group/other-writable). Per EXPLICIT remote only: the private key and any
- * `file:` passphrase file (0600-class, owner euid or root), the `.pub`
- * sidecar when present (not group/other-writable), and the dedicated
- * known_hosts file (not group/other-writable; created 0600 when absent).
- * Alias remotes contribute no rows of their own.
+ * created so when absent), every local destination root (exists, not
+ * group/other-writable), and `logging.file` when configured. Per EXPLICIT
+ * remote only: the private key and any `file:` passphrase file (0600-class,
+ * owner euid or root), the `.pub` sidecar when present (not group/other-
+ * writable, owner euid or root - the engine prints its content as the archive
+ * server's authorized_keys line, so a foreign-owned sidecar installs a foreign
+ * key), and the dedicated known_hosts file (not group/other-writable, owner
+ * euid or root - a foreign-owned known_hosts pins a host key of the attacker's
+ * choosing and StrictHostKeyChecking=yes then accepts the MITM silently;
+ * created 0600 when absent). Alias remotes contribute no rows of their own.
+ *
+ * Every one of those files is ALSO checked through its containing directory
+ * (`checkParentDir`): a group/other-writable parent makes the file's own mode
+ * irrelevant, since an attacker can simply unlink it and put their own there.
  */
 export async function checkFilePermissions(
     input: PermissionPreflightInput,
@@ -157,9 +207,16 @@ export async function checkFilePermissions(
         throw new SshError(`config file ${input.configPath} does not exist`);
     }
     checkNotGroupOtherWritable(input.configPath, "config file", configInfo, deps.euid);
+    await checkParentDir(input.configPath, "config file", deps);
 
+    await checkParentDir(input.runtimeDir, "runtime dir", deps);
     await ensurePrivateDir(input.runtimeDir, "runtime dir", deps);
+    await checkParentDir(input.stateDir, "state dir", deps);
     await ensurePrivateDir(input.stateDir, "state dir", deps);
+
+    if (input.loggingFile !== null) {
+        await checkLoggingFile(input.loggingFile, deps);
+    }
 
     for (const root of input.localDestinationRoots) {
         const info = await deps.stat(root);
@@ -180,18 +237,21 @@ export async function checkFilePermissions(
         if (!checkedPaths.has(remote.identityFile)) {
             checkedPaths.add(remote.identityFile);
             await checkPrivateFile(remote.identityFile, "private key", deps);
+            await checkParentDir(remote.identityFile, "private key", deps);
             const pubPath = `${remote.identityFile}.pub`;
             const pubInfo = await deps.stat(pubPath);
             if (pubInfo !== null) {
-                checkNotGroupOtherWritable(pubPath, "public key", pubInfo, null);
+                checkNotGroupOtherWritable(pubPath, "public key", pubInfo, deps.euid);
             }
         }
         if (remote.passphrase !== null && remote.passphrase.kind === "file" && !checkedPaths.has(remote.passphrase.value)) {
             checkedPaths.add(remote.passphrase.value);
             await checkPrivateFile(remote.passphrase.value, "passphrase file", deps);
+            await checkParentDir(remote.passphrase.value, "passphrase file", deps);
         }
         if (!checkedPaths.has(remote.knownHostsFile)) {
             checkedPaths.add(remote.knownHostsFile);
+            await checkParentDir(remote.knownHostsFile, "known_hosts", deps);
             const info = await deps.stat(remote.knownHostsFile);
             if (info === null) {
                 await deps.createFile(remote.knownHostsFile, 0o600);
@@ -199,7 +259,7 @@ export async function checkFilePermissions(
                 if (info.kind !== "file") {
                     throw new SshError(`known_hosts ${remote.knownHostsFile} exists but is not a regular file`);
                 }
-                checkNotGroupOtherWritable(remote.knownHostsFile, "known_hosts", info, null);
+                checkNotGroupOtherWritable(remote.knownHostsFile, "known_hosts", info, deps.euid);
             }
         }
     }
