@@ -2,9 +2,12 @@
  * The rsync engine: `runTransfer` (the retry loop around one snapshot
  * transfer), `dryRunStats` (delta estimation for the disk guard), and the
  * local/remote version probes (hard floor rsync >= 3.2.5, openrsync refused).
- * All spawning goes through exec/; ssh identity arrives as prebuilt data
- * (`sshTokens` on the TransferSpec, an injected runner for remote probes) so
- * this module never imports ssh/.
+ * All spawning goes through exec/; ssh identity and connections arrive as
+ * prebuilt DATA (`sshTokens` on the TransferSpec, an injected runner for remote
+ * probes), so this module never reaches ssh/ to make a connection. The one
+ * import it does take on ssh/ is the pure stderr classifier
+ * (`internal/classify.ts` -> `ssh/classify.ts`), because which stderr text
+ * means "permanently failed" must have exactly one owner.
  */
 
 import { exec, type ExecOptions, type ExecResult } from "../exec/exec.js";

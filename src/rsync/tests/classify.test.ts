@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isPermanentSshStderr } from "../../ssh/classify.js";
 import { classifyExit, type ExitClass } from "../internal/classify.js";
 
 /** One row of the exit-code matrix: input exit + stderr tail, expected classification. */
@@ -74,5 +75,26 @@ describe("classifyExit: the 255 x stderr cross-table", () => {
 
     it("permanent patterns only apply to exit 255, not to transient rsync exits", () => {
         expect(classifyExit(10, "Permission denied (publickey).").retriable).toBe(true);
+    });
+
+    // These substrings used to be duplicated here AND in ssh/classify.ts. Two
+    // copies agreeing today is not the same as one source: adding a fourth
+    // permanent class to the owner would leave a transfer's exit 255 retrying
+    // it for the target's whole attempt budget while runRemote gave up at once.
+    // ssh/classify.ts is now the single owner; this pins the two in agreement.
+    it("agrees with ssh/classify.ts on every tail - one owner for what 'permanent' means", () => {
+        const tails = [
+            ...permanentTails,
+            "",
+            "Connection reset by peer",
+            "permission denied lowercase does not match",
+            "Host key verification failed.",
+        ];
+        for (const tail of tails) {
+            expect({ tail, permanent: classifyExit(255, tail).retriable === false }).toEqual({
+                tail,
+                permanent: isPermanentSshStderr(tail),
+            });
+        }
     });
 });

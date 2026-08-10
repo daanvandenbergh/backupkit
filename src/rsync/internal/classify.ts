@@ -3,28 +3,30 @@
  * `classifyExit(exitCode, stderrTail)` decides promote vs retry vs fail and
  * sets the `retriable` flag the retry loop reads. Exit 255 (ssh transport) is
  * transient unless the sanitized stderr tail matches one of the three fixed
- * permanent ssh patterns from spec section 4.
+ * permanent ssh patterns, which `ssh/classify.ts` owns for the whole codebase
+ * (spec section 4).
  */
 
+import { matchPermanentSshPattern, type PermanentSshPattern } from "../../ssh/classify.js";
+
 /**
- * The three fixed substrings that mark an ssh transport failure permanent
- * (auth failure, host-key verification failure, host-key change). These
- * mirror ssh/classify.ts's `isPermanentSshStderr` exactly - spec section 4
- * defines them once for both modules.
- * ponytail: inlined because rsync/ is built in parallel with ssh/ and takes
- * no import on it; converge on ssh/classify.ts in the engine phase if wanted.
+ * The message this classifier reports per permanent ssh failure class. The
+ * PATTERNS themselves are deliberately NOT restated here:
+ * `matchPermanentSshPattern` is the one place that owns which stderr text means
+ * what. A second copy of the substrings would silently disagree the day a
+ * fourth class is added - `runRemote` would stop retrying it while a transfer's
+ * exit 255 kept retrying it for the target's whole attempt budget (up to ten
+ * attempts with 15 s-300 s backoff).
+ *
+ * This is a type-level dependency too: adding a `PermanentSshPattern` variant
+ * without a message here fails `npm run typecheck`, so the two cannot drift.
  */
-const PERMANENT_SSH_PATTERNS: readonly { substring: string; message: string }[] = [
-    { substring: "Permission denied (", message: "ssh authentication failed (exit 255) - permanent, not retried" },
-    {
-        substring: "Host key verification failed",
-        message: "ssh host key verification failed (exit 255) - permanent; pin the host key via \"backupkit check\"",
-    },
-    {
-        substring: "REMOTE HOST IDENTIFICATION HAS CHANGED",
-        message: "remote host key changed (exit 255) - permanent, possible MITM; a human must fix known_hosts",
-    },
-];
+const PERMANENT_SSH_MESSAGE: Record<PermanentSshPattern, string> = {
+    "auth-failure": "ssh authentication failed (exit 255) - permanent, not retried",
+    "host-key-verification":
+        'ssh host key verification failed (exit 255) - permanent; pin the host key via "backupkit check"',
+    "host-key-changed": "remote host key changed (exit 255) - permanent, possible MITM; a human must fix known_hosts",
+};
 
 /** rsync exit codes that are transient by the spec table: 10 socket I/O, 12 protocol stream, 30/35 timeouts. */
 const TRANSIENT_EXIT_CODES = new Set([10, 12, 30, 35]);
@@ -82,10 +84,9 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
         return row("transient", true, false, `transient rsync failure (exit ${exitCode})`);
     }
     if (exitCode === 255) {
-        for (const pattern of PERMANENT_SSH_PATTERNS) {
-            if (stderrTail.includes(pattern.substring)) {
-                return row("fatal", false, false, pattern.message);
-            }
+        const pattern = matchPermanentSshPattern(stderrTail);
+        if (pattern !== null) {
+            return row("fatal", false, false, PERMANENT_SSH_MESSAGE[pattern]);
         }
         return row("transient", true, false, "ssh transport error (exit 255)");
     }
