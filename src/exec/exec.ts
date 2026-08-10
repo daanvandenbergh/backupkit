@@ -31,6 +31,14 @@ export interface ExecOptions {
     stdio?: "pipe" | "inherit";
     /** Child working directory. Default: this process's cwd. */
     cwd?: string;
+    /**
+     * Abort signal for graceful engine shutdown: on abort the child gets
+     * SIGTERM, then SIGKILL 10 s later if it lingers. A signal that is
+     * already aborted kills the child right after spawn. The result still
+     * resolves normally (with the terminating signal) - abort is not an
+     * error at this layer; the caller's classifier judges the outcome.
+     */
+    signal?: AbortSignal;
 }
 
 /** Outcome of one process execution. */
@@ -87,6 +95,7 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
         let timedOut = false;
         let termTimer: NodeJS.Timeout | null = null;
         let killTimer: NodeJS.Timeout | null = null;
+        let abortKillTimer: NodeJS.Timeout | null = null;
 
         if (options.timeoutMs !== undefined) {
             termTimer = setTimeout(() => {
@@ -95,6 +104,28 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
                 killTimer = setTimeout(() => child.kill("SIGKILL"), 2000);
             }, options.timeoutMs);
         }
+
+        /** SIGTERM the child now; escalate to SIGKILL after 10 s if it lingers. */
+        const onAbort = (): void => {
+            child.kill("SIGTERM");
+            abortKillTimer = setTimeout(() => child.kill("SIGKILL"), 10_000);
+        };
+        const signal = options.signal;
+        if (signal !== undefined) {
+            if (signal.aborted) {
+                onAbort();
+            } else {
+                signal.addEventListener("abort", onAbort, { once: true });
+            }
+        }
+
+        /** Clear every pending timer and detach the abort listener. */
+        const cleanup = (): void => {
+            if (termTimer !== null) clearTimeout(termTimer);
+            if (killTimer !== null) clearTimeout(killTimer);
+            if (abortKillTimer !== null) clearTimeout(abortKillTimer);
+            signal?.removeEventListener("abort", onAbort);
+        };
 
         child.stdout?.setEncoding("utf8");
         child.stdout?.on("data", (chunk: string) => {
@@ -106,15 +137,13 @@ export function exec(bin: string, args: readonly string[], options: ExecOptions 
         });
 
         child.on("error", (error) => {
-            if (termTimer !== null) clearTimeout(termTimer);
-            if (killTimer !== null) clearTimeout(killTimer);
+            cleanup();
             reject(error);
         });
 
-        child.on("close", (exitCode, signal) => {
-            if (termTimer !== null) clearTimeout(termTimer);
-            if (killTimer !== null) clearTimeout(killTimer);
-            resolve({ exitCode, signal, stdout, stderr, timedOut, durationMs: Date.now() - start });
+        child.on("close", (exitCode, exitSignal) => {
+            cleanup();
+            resolve({ exitCode, signal: exitSignal, stdout, stderr, timedOut, durationMs: Date.now() - start });
         });
     });
 }

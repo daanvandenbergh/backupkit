@@ -18,11 +18,26 @@ Requires `rsync` and `ssh` on both hosts.
 
 ## Usage
 
+Write a `config.jsonc` (remotes, targets, schedules, retention), then drive the
+engine through the `Backupkit` class:
+
 ```ts
-import {} from "@daanvandenbergh/backupkit";
+import { Backupkit } from "@daanvandenbergh/backupkit";
+
+const kit = Backupkit.fromConfig(); // or Backupkit.fromConfig("/etc/backupkit/config.jsonc")
+
+await kit.check();                       // readiness: binaries, keys, hosts, jail lines
+await kit.run();                         // one pass over every due target
+await kit.start();                       // foreground scheduler loop (stop() ends it)
+
+const rows = await kit.status();         // last run, next due, failures, lock state
+const snaps = await kit.listSnapshots(); // complete snapshots, oldest first
+await kit.prune({ dryRun: true });       // retention plan without deleting
+await kit.restore({ target: "web", snapshot: "latest", output: "/tmp/restored" });
 ```
 
-_Nothing is exported yet - this is the initial scaffold._
+Requires rsync >= 3.2.5 on both ends (macOS ships openrsync - `brew install rsync`).
+The `backupkit` CLI ships in a later phase; the library surface above is stable.
 
 ## Development
 
