@@ -95,7 +95,12 @@ const LOG_LEVELS = ["error", "warn", "info", "debug"] as const;
 /** The six retention rule keys. */
 const RETENTION_KEYS = ["keepLast", "keepHourly", "keepDaily", "keepWeekly", "keepMonthly", "keepYearly"] as const;
 
-/** Normalize a validated absolute path: collapse duplicate slashes and strip a trailing slash. */
+/**
+ * Normalize a validated absolute path: collapse duplicate slashes and strip a
+ * trailing slash. This is the ONE normal form every path in a ResolvedConfig
+ * is in - see `expectPath`, which applies it to every path it returns, and
+ * `checkSnapshotRoots`, which relies on it for prefix comparison.
+ */
 function normalizePath(value: string): string {
     const collapsed = value.replace(/\/{2,}/g, "/");
     return collapsed.length > 1 ? collapsed.replace(/\/$/, "") : collapsed;
@@ -170,9 +175,23 @@ class Validator {
 
     /**
      * Require an absolute path with the universal path rules: no `~`, no NUL
-     * or newline, absolute. With `noWhitespaceQuotes` (paths that enter
-     * rsync's -e string or a remote command) whitespace and quote characters
-     * are also rejected.
+     * or newline, absolute, and no `.` or `..` component. With
+     * `noWhitespaceQuotes` (paths that enter rsync's -e string or a remote
+     * command) whitespace and quote characters are also rejected. The RETURNED
+     * value is normalized (duplicate slashes collapsed, trailing slash
+     * stripped).
+     *
+     * Normalizing HERE, once, is load-bearing rather than cosmetic. A target's
+     * `destination` reaches the push jail twice by two different routes: the
+     * literal string is baked into the `authorized_keys` forced command as
+     * `$ROOT`, while every path operand sent to that jail is built with
+     * `posix.join`, which normalizes. The jail compares them as literal string
+     * prefixes, so any non-normal form ("/srv/backups//archive") makes every
+     * remote command fail the prefix test and be rejected - after the config
+     * validated and `check` reported OK. A `..` component is worse: the jail
+     * refuses to start at all, so even the version probe is rejected. Both
+     * cases are unrepresentable once every path leaves this function in the
+     * same normal form the operands are built in.
      */
     private expectPath(node: JsoncNode, path: string, noWhitespaceQuotes: boolean): string {
         const value = this.expectString(node, path);
@@ -188,7 +207,11 @@ class Validator {
         if (noWhitespaceQuotes && /[\s'"]/.test(value)) {
             this.fail(node, path, "path may not contain whitespace or quote characters");
         }
-        return value;
+        const normalized = normalizePath(value);
+        if (normalized.split("/").some((component) => component === "." || component === "..")) {
+            this.fail(node, path, 'path may not contain a "." or ".." component - write the resolved absolute path');
+        }
+        return normalized;
     }
 
     /** Require a record key to match the shared name charset. */

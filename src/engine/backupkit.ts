@@ -212,7 +212,7 @@ export class Backupkit {
     /** Memoized local rsync probe. */
     private rsyncProbe: Promise<{ bin: string; version: string }> | null = null;
 
-    /** Memoized remote rsync probes per connection identity (failures clear the memo so a fixed host re-probes next run). */
+    /** Memoized remote rsync probes per connection identity + probed binary (failures clear the memo so a fixed host re-probes next run). */
     private readonly remoteProbes = new Map<string, Promise<string>>();
 
     /** Per-remote key-priming failures from preflight: remote name -> actionable message. Targets on these remotes fail individually. */
@@ -466,14 +466,21 @@ export class Backupkit {
     }
 
     /**
-     * The probed remote rsync version for a target's remote, memoized per
-     * connection identity so the floor costs one ssh round-trip per host per
-     * process (invariant 11 on the transfer path). A failed probe clears the
-     * memo, so a fixed or upgraded host is re-probed on its next run.
+     * The probed remote rsync version for a target's remote, memoized so the
+     * floor costs one ssh round-trip per host+binary per process (invariant 11
+     * on the transfer path). A failed probe clears the memo, so a fixed or
+     * upgraded host is re-probed on its next run.
+     *
+     * The memo key includes `rsync.remoteRsyncBin`, because that is a
+     * per-TARGET setting: two targets may share one remote while pointing
+     * `--rsync-path` at different binaries, and a host-only key would let one
+     * target's probe stand in for the other's - leaving a binary the transfer
+     * really uses never checked against the floor.
      */
     private remoteRsyncFor(target: ResolvedTarget, remote: ResolvedRemote): Promise<string> {
         const identity = remoteIdentity(remote);
-        let probe = this.remoteProbes.get(identity);
+        const key = `${identity}\0${target.rsync.remoteRsyncBin ?? ""}`;
+        let probe = this.remoteProbes.get(key);
         if (probe === undefined) {
             probe = this.deps.probeRemote({
                 identity,
@@ -487,8 +494,8 @@ export class Backupkit {
                 remoteRsyncBin: target.rsync.remoteRsyncBin,
                 log: this.log.with({ remote: remote.name }),
             });
-            this.remoteProbes.set(identity, probe);
-            probe.catch(() => this.remoteProbes.delete(identity));
+            this.remoteProbes.set(key, probe);
+            probe.catch(() => this.remoteProbes.delete(key));
         }
         return probe;
     }
@@ -916,30 +923,45 @@ export class Backupkit {
             if (remote.kind === "alias") {
                 row.resolved = await resolveAlias(remote, { sshBin: this.sshBin() });
             }
-            // The first target on this remote that overrides the remote rsync binary decides the probe path.
-            const remoteRsyncBin =
-                this.config.targets.find((t) => remoteOf(t)?.name === remote.name && t.rsync.remoteRsyncBin !== null)
-                    ?.rsync.remoteRsyncBin ?? null;
+            // EVERY distinct remote rsync binary in play on this remote is
+            // probed, not just the first override: `remoteRsyncBin` is a
+            // per-target setting, so two targets on one host can use different
+            // binaries, and checking one of them would leave the other's floor
+            // (invariant 11) unverified until a transfer used it. The row
+            // reports the first accepted version; any failure is an error.
+            const binsInUse = [
+                ...new Set(
+                    this.config.targets
+                        .filter((t) => remoteOf(t)?.name === remote.name)
+                        .map((t) => t.rsync.remoteRsyncBin),
+                ),
+            ];
+            const remoteRsyncBins = binsInUse.length === 0 ? [null] : binsInUse;
             // Invariant 5: accept-new (TOFU pinning) only while a human watches a
             // real TTY; any non-TTY check() pins strictly like every unattended path.
             const context: SshContext = this.isInteractive() ? "interactive" : "unattended";
-            try {
-                row.rsyncVersion = await this.deps.probeRemote({
-                    identity: remoteIdentity(remote),
-                    runRemote: (argv) =>
-                        runRemote(remote, argv, {
-                            sshBin: this.sshBin(),
-                            context,
-                            authSock: this.authSockFor(remote),
-                            log: this.log.with({ remote: remote.name }),
-                        }),
-                    remoteRsyncBin,
-                    log: this.log.with({ remote: remote.name }),
-                });
-                row.reachable = true;
-            } catch (error) {
-                row.error = sanitize(error instanceof Error ? error.message : String(error));
-                errors.push(`remote ${remote.name}: ${row.error}`);
+            for (const remoteRsyncBin of remoteRsyncBins) {
+                try {
+                    const version = await this.deps.probeRemote({
+                        identity: remoteIdentity(remote),
+                        runRemote: (argv) =>
+                            runRemote(remote, argv, {
+                                sshBin: this.sshBin(),
+                                context,
+                                authSock: this.authSockFor(remote),
+                                log: this.log.with({ remote: remote.name }),
+                            }),
+                        remoteRsyncBin,
+                        log: this.log.with({ remote: remote.name }),
+                    });
+                    row.rsyncVersion = row.rsyncVersion ?? version;
+                    row.reachable = true;
+                } catch (error) {
+                    const message = sanitize(error instanceof Error ? error.message : String(error));
+                    row.error = row.error ?? message;
+                    row.reachable = false;
+                    errors.push(`remote ${remote.name}: ${message}`);
+                }
             }
             remoteChecks.push(row);
         }

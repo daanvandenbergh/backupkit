@@ -1,3 +1,4 @@
+import { posix } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ConfigError } from "../../shared/errors.js";
 import { parseJsonc } from "../internal/jsonc.js";
@@ -601,6 +602,38 @@ describe("cross-field rules", () => {
             }),
             "targets.db.destination",
             "snapshot root /srv/backups/web/db collides with targets.web's snapshot root /srv/backups/web",
+        );
+    });
+
+    // The push jail bakes the LITERAL destination into the authorized_keys
+    // forced command as $ROOT, while every operand sent to that jail is built
+    // with posix.join (which normalizes) - and the jail compares them as string
+    // prefixes. A non-normal destination therefore validates, prints a
+    // plausible jail line, and then has every remote command rejected. Paths
+    // must leave validation in exactly the form the operands are built in.
+    it("returns every path in one normal form, so the jail root and the store operands cannot diverge", () => {
+        const validated = validate(
+            base({
+                targets: { web: { ...TARGET, source: "/var//www/", destination: "/srv/backups//archive/" } },
+                top: { stateDir: "/var//lib/backupkit/" },
+            }),
+        );
+        expect(validated.targets[0].target.destination).toBe("/srv/backups/archive");
+        expect(validated.targets[0].target.source).toBe("/var/www");
+        expect(validated.stateDir).toBe("/var/lib/backupkit");
+        // The jail's own prefix rule, applied to the resolved pair.
+        const root = validated.targets[0].target.destination;
+        expect(posix.join(root, "web").startsWith(`${root}/`)).toBe(true);
+    });
+
+    it.each([
+        ["/srv/./backups", "."],
+        ["/srv/x/../backups", ".."],
+    ])("rejects %s: a %s component makes the push jail reject every command", (destination) => {
+        expectFail(
+            base({ targets: { web: { ...TARGET, destination } } }),
+            "targets.web.destination",
+            'may not contain a "." or ".." component',
         );
     });
 

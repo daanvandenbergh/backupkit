@@ -152,6 +152,38 @@ describe("probeRemoteRsync", () => {
         expect(runner.calls).toHaveLength(1);
     });
 
+    // remoteRsyncBin is per TARGET, not per remote: two targets can share one
+    // host and point --rsync-path at different binaries. A host-only cache key
+    // would let the first target's result stand in for the second's, so a
+    // binary the transfer really uses would never meet the 3.2.5 floor.
+    it("probes each binary on one host separately, and refuses an old one the other host entry accepted", async () => {
+        const runner = fakeRunner([res({ stdout: GOOD_BANNER }), res({ stdout: OLD_BANNER })]);
+        const identity = "backup@h:22";
+        const modern = await settle(
+            probeRemoteRsync({ identity, runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+        );
+        expect(modern.ok).toBe("3.2.7");
+        const legacy = await settle(
+            probeRemoteRsync({
+                identity,
+                runRemote: runner.run,
+                remoteRsyncBin: "/opt/legacy/bin/rsync",
+                log: silentLog,
+            }),
+        );
+        expect(runner.calls).toHaveLength(2);
+        expect(runner.calls[1][0]).toBe("/opt/legacy/bin/rsync");
+        expect(String((legacy.err as Error).message)).toContain("below the required floor 3.2.5");
+    });
+
+    it("still caches per host+binary: the same pair never re-probes", async () => {
+        const runner = fakeRunner([res({ stdout: GOOD_BANNER })]);
+        const params = { identity: "backup@h:22", runRemote: runner.run, remoteRsyncBin: "/opt/x/rsync", log: silentLog };
+        await settle(probeRemoteRsync(params));
+        expect((await settle(probeRemoteRsync(params))).ok).toBe("3.2.7");
+        expect(runner.calls).toHaveLength(1);
+    });
+
     it("probes distinct identities separately", async () => {
         const runner = fakeRunner([res({ stdout: GOOD_BANNER })]);
         await settle(probeRemoteRsync({ identity: "a", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }));

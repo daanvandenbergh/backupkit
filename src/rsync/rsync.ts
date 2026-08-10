@@ -108,8 +108,21 @@ export async function probeLocalRsync(
     refuse(`no rsync binary found (tried: ${candidates.join(", ")}) - ${LOCAL_FIX}`);
 }
 
-/** Successful remote probes per connection identity, so each host is probed once per process. */
+/**
+ * Successful remote probes, so each host+binary pair is probed once per
+ * process. The key is `<identity>\0<remoteRsyncBin>`, NOT the identity alone:
+ * `remoteRsyncBin` is a per-TARGET setting, so two targets may legitimately
+ * share one host while pointing `--rsync-path` at different binaries. Keying
+ * on the host alone would let the first target's result stand in for the
+ * second's, leaving a binary that the transfer really uses never checked
+ * against the version floor.
+ */
 const remoteVersionCache = new Map<string, Promise<string>>();
+
+/** The cache key for one probe: the connection identity plus the binary being probed. */
+function probeCacheKey(identity: string, remoteRsyncBin: string | null): string {
+    return `${identity}\0${remoteRsyncBin ?? ""}`;
+}
 
 /** Drop every cached remote probe result (tests, and nothing else, need this). */
 export function clearRemoteVersionCache(): void {
@@ -134,7 +147,8 @@ export function probeRemoteRsync(params: {
     /** Logger for the retry helper's per-attempt warns. */
     log: Logger;
 }): Promise<string> {
-    const cached = remoteVersionCache.get(params.identity);
+    const key = probeCacheKey(params.identity, params.remoteRsyncBin);
+    const cached = remoteVersionCache.get(key);
     if (cached !== undefined) {
         return cached;
     }
@@ -161,8 +175,8 @@ export function probeRemoteRsync(params: {
         params.log,
         `rsync version probe ${params.identity}`,
     );
-    remoteVersionCache.set(params.identity, probe);
-    probe.catch(() => remoteVersionCache.delete(params.identity));
+    remoteVersionCache.set(key, probe);
+    probe.catch(() => remoteVersionCache.delete(key));
     return probe;
 }
 

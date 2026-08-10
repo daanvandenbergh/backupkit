@@ -510,6 +510,51 @@ describe("Backupkit", () => {
         expect(transferCount).toBe(2);
     });
 
+    // rsync.remoteRsyncBin is per TARGET, so two targets can share one remote
+    // while pointing --rsync-path at different binaries. Memoizing the probe on
+    // the connection identity alone let the first target's result stand in for
+    // the second's, and the second's binary - the one its transfer actually
+    // uses - was never checked against the floor (invariant 11).
+    it("probes each remoteRsyncBin on a shared remote: an old binary is refused even after a modern sibling passed", async () => {
+        const remote: ResolvedRemote = { kind: "alias", name: "srv", alias: "myserver" };
+        const probed: (string | null)[] = [];
+        const fixture = track(
+            await makeKit({
+                target: { name: "modern", src: { kind: "remote", remote, path: "/srv/data" } },
+                // A sibling target on the SAME remote, pinned to an old binary.
+                // Its gate fails before the pipeline, so its archive stays empty.
+                extraTargets: (destination) => [
+                    makeTarget({
+                        name: "legacy",
+                        destination,
+                        src: { kind: "remote", remote, path: "/srv/data" },
+                        dst: { kind: "local", path: destination },
+                        rsync: { ...makeTarget().rsync, remoteRsyncBin: "/opt/legacy/bin/rsync" },
+                    }),
+                ],
+                deps: {
+                    probeRemote: async (params) => {
+                        probed.push(params.remoteRsyncBin);
+                        if (params.remoteRsyncBin === "/opt/legacy/bin/rsync") {
+                            throw new Error("rsync 3.1.3 on myserver is below the required floor 3.2.5");
+                        }
+                        return "3.2.7";
+                    },
+                },
+            }),
+        );
+
+        const report = await fixture.kit.run({ force: true });
+        expect(report.targets.map((row) => [row.target, row.status])).toEqual([
+            ["modern", "success"],
+            ["legacy", "failed"],
+        ]);
+        expect(report.targets[1].reason).toBe("remote-unavailable");
+        expect(report.targets[1].error).toContain("below the required floor 3.2.5");
+        // Both binaries were probed - the shared host did not mask the second.
+        expect(probed).toEqual([null, "/opt/legacy/bin/rsync"]);
+    });
+
     it("an un-primeable key fails only that remote's targets: preflight succeeds, siblings run, check reports it", async () => {
         // Regression: one prompt key with no TTY used to reject preflight and
         // crash-loop the daemon, taking every healthy target down with it.

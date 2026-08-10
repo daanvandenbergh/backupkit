@@ -113,7 +113,7 @@ Each target is keyed by name; the key becomes the snapshot subdirectory and the 
 | `rsync` | object | `{}` | Per-target rsync tuning (below) |
 | `enabled` | boolean | `true` | `false` = configured but never scheduled |
 
-All path fields are absolute (`~` is rejected), contain no NUL or newline, and must not start with `-`. `minFree` is `"N%"` (0-50) or an absolute binary size like `"10G"` / `"500M"`.
+All path fields are absolute (`~` is rejected), contain no NUL or newline, and must not start with `-`. They must also carry no `.` or `..` component - write the resolved path. Every path is normalized on load (duplicate slashes collapsed, a trailing slash stripped), so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination. This matters for push targets: the destination is baked verbatim into the archive host's forced command as the jail root, and the jail compares it against each incoming path as a literal prefix, so a non-normal form would be rejected on every operation. `minFree` is `"N%"` (0-50) or an absolute binary size like `"10G"` / `"500M"`.
 
 ### Schedules
 

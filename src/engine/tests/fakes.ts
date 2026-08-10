@@ -221,8 +221,12 @@ export async function makeKit(params: {
     target?: Partial<ResolvedTarget>;
     /** Engine seam overrides. */
     deps?: Partial<BackupkitDeps>;
-    /** Extra targets appended after the default one. */
-    extraTargets?: ResolvedTarget[];
+    /**
+     * Extra targets appended after the default one, built from the fixture's
+     * archive root (a sibling target needs a real, permission-clean local
+     * destination - preflight refuses a destination root that does not exist).
+     */
+    extraTargets?: (destination: string) => ResolvedTarget[];
 } = {}): Promise<KitFixture> {
     const root = await mkdtemp(join(tmpdir(), "backupkit-engine-"));
     const configPath = join(root, "config.jsonc");
@@ -240,7 +244,11 @@ export async function makeKit(params: {
         dst: { kind: "local", path: destination },
         ...params.target,
     });
-    const config = makeConfig({ configPath, stateDir, targets: [target, ...(params.extraTargets ?? [])] });
+    const config = makeConfig({
+        configPath,
+        stateDir,
+        targets: [target, ...(params.extraTargets?.(destination) ?? [])],
+    });
     const clock = { now: new Date("2026-08-10T12:00:00Z") };
     const execCalls: RecordedExec[] = [];
     const kit = new Backupkit(config, {
