@@ -464,6 +464,44 @@ describe("openStore", () => {
             );
         });
 
+        // The unit's TimeoutStopSec is 30 s, but a store command waits up to
+        // runRemote's 60 s timeout and then retries - so without the signal a
+        // stop against an unresponsive archive host is SIGKILLed mid-lock,
+        // leaving a remote lock only the 24 h TTL clears.
+        it("aborts an in-flight store command when the shutdown signal fires", async () => {
+            const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+            const controller = new AbortController();
+            const store = openStore(
+                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } },
+                {
+                    log,
+                    ssh: {
+                        sshBin,
+                        context: "unattended",
+                        authSock: null,
+                        // The fake ssh sleeps far past any stop budget.
+                        env: fake.env({ ssh: [{ exit: 0, sleepMs: 60_000 }] }),
+                        retryPolicy: { attempts: 3, baseDelayMs: 1, capMs: 2 },
+                        signal: controller.signal,
+                    },
+                },
+            );
+            const started = Date.now();
+            const pending = store.listComplete().then(
+                () => null,
+                (error: unknown) => error,
+            );
+            // Let the child spawn, then stop.
+            await new Promise((resolve) => setTimeout(resolve, 200));
+            controller.abort();
+            const error = await pending;
+            // exec/ SIGTERMs the child, so ssh dies on a signal and runRemote
+            // reports it - and the abort stops it retrying that as a blip.
+            expect(String((error as Error).message)).toContain("was killed by signal");
+            // Bounded by the child's death, not by the 60 s sleep or the retries.
+            expect(Date.now() - started).toBeLessThan(15_000);
+        });
+
         // The end-to-end shape of the wedge: a transport blip on the lock
         // mkdir must NOT put a second mkdir on the wire, because the first one
         // may already have created the lock on the remote. One attempt, one

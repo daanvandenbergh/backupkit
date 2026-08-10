@@ -208,6 +208,38 @@ describe("withTransientRetry", () => {
         expect(warns).toHaveLength(1);
     });
 
+    // A stop must not be held up by a backoff it already knows is pointless:
+    // the transfer policy's cap is 300 s, far past any service unit's stop
+    // timeout, and the abort check used to happen only at the TOP of the next
+    // attempt - i.e. after the full sleep.
+    it("an abort mid-backoff wakes the sleep immediately and starts no further attempt", async () => {
+        const { logger, warns } = warnCapture();
+        const { op, calls } = flaky(Infinity);
+        const controller = new AbortController();
+        const promise = withTransientRetry(op, transferRetryPolicy(5), logger, "t", controller.signal);
+        promise.catch(() => {});
+        // Sitting in the 15 s backoff after attempt 1.
+        await vi.advanceTimersByTimeAsync(100);
+        expect(calls()).toBe(1);
+        expect(warns).toHaveLength(1);
+
+        controller.abort();
+        await expect(promise).rejects.toThrow("blip 1");
+        expect(calls()).toBe(1);
+    });
+
+    it("an already-aborted signal rethrows the first failure without sleeping", async () => {
+        const { logger, warns } = warnCapture();
+        const { op, calls } = flaky(Infinity);
+        const controller = new AbortController();
+        controller.abort();
+        await expect(
+            withTransientRetry(op, transferRetryPolicy(5), logger, "t", controller.signal),
+        ).rejects.toThrow("blip 1");
+        expect(calls()).toBe(1);
+        expect(warns).toHaveLength(0);
+    });
+
     it("applies jitter from Math.random to the actual sleep", async () => {
         vi.spyOn(Math, "random").mockReturnValue(0);
         const { logger, warns } = warnCapture();

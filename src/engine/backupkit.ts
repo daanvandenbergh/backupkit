@@ -357,8 +357,13 @@ export class Backupkit {
         return sock === null ? undefined : { ...minimalEnv(), SSH_AUTH_SOCK: sock };
     }
 
-    /** Open the snapshot store for a target in the given ssh context. */
-    private storeFor(target: ResolvedTarget, context: SshContext): SnapshotStore {
+    /**
+     * Open the snapshot store for a target in the given ssh context. `signal`
+     * is the graceful-shutdown signal: passing it makes the store's remote
+     * commands abortable, which is what keeps a stop inside the unit's
+     * `TimeoutStopSec` even when the archive host has gone unresponsive.
+     */
+    private storeFor(target: ResolvedTarget, context: SshContext, signal?: AbortSignal): SnapshotStore {
         const log = this.log.with({ target: target.name });
         return openStore(
             { name: target.name, dst: target.dst },
@@ -371,6 +376,7 @@ export class Backupkit {
                               sshBin: this.sshBin(),
                               context,
                               authSock: this.authSockFor(target.dst.remote),
+                              signal,
                           }
                         : undefined,
             },
@@ -566,7 +572,7 @@ export class Backupkit {
             const { bin } = await this.localRsync();
             const remote = remoteOf(target);
             const deps: TargetRunnerDeps = {
-                store: this.storeFor(target, "unattended"),
+                store: this.storeFor(target, "unattended", options.signal),
                 log: this.log.with({ target: target.name }),
                 now: this.deps.now,
                 rsyncBin: bin,

@@ -47,6 +47,8 @@ sudo backupkit service start
 
 Any lifecycle verb run without an installed unit prints `service not installed - run: backupkit service install` and exits 1. On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`. `service status` is the one verb that needs no root: it prepends a `service: active (pid 1234)` or `service: not installed` header to the ordinary `status` table, and never errors just because the unit is absent.
 
+**The unit follows your config.** Parts of it are derived from the config - most importantly `ReadWritePaths`, which lists every path the daemon may write: each local destination root, the `stateDir`, the config directory, and the `logging.file` directory. Under `ProtectSystem=strict` the rest of the filesystem is read-only, so a unit written before you added a target would leave the daemon unable to write the new archive at all. You do not have to remember this: `start` and `restart` re-derive the unit from the current config, and if it differs they rewrite it, print `config changed since install - refreshed the service unit`, and reload (on macOS a changed plist is reloaded with `bootout` + `bootstrap`, since `kickstart` would re-exec the cached one). Adding a target is therefore just an edit plus `sudo backupkit service restart`.
+
 ```bash
 sudo backupkit service restart
 backupkit service status        # no root needed

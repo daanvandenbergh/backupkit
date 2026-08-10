@@ -56,9 +56,34 @@ export function computeRetryDelayMs(attempt: number, policy: RetryPolicy, random
     return Math.round(base * (0.8 + 0.4 * random));
 }
 
-/** Resolve after `ms` milliseconds (plain setTimeout; fake-timer friendly). */
-function sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+/** Whether the shutdown signal (if any) has fired. A function so each call re-reads it after an await. */
+function isAborted(signal: AbortSignal | undefined): boolean {
+    return signal !== undefined && signal.aborted;
+}
+
+/**
+ * Resolve after `ms` milliseconds, or as soon as `signal` aborts (plain
+ * setTimeout; fake-timer friendly). The early wake matters on the shutdown
+ * path: the transfer policy's backoff reaches 300 s, far past the service
+ * unit's `TimeoutStopSec`, and a graceful stop must not sit in a sleep it
+ * already knows is pointless.
+ */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted === true) {
+        return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+        }, ms);
+        /** Wake immediately on abort. */
+        function onAbort(): void {
+            clearTimeout(timer);
+            resolve();
+        }
+        signal?.addEventListener("abort", onAbort, { once: true });
+    });
 }
 
 /**
@@ -68,12 +93,18 @@ function sleep(ms: number): Promise<void> {
  * everything else rethrows immediately. Each retried attempt logs one warn
  * naming the label, attempt number, and delay. Pure timers - no fs, no
  * child_process.
+ *
+ * `signal` is the graceful-shutdown signal: once aborted, no further attempt
+ * starts and any pending backoff wakes immediately. Without it a stop could be
+ * held up by a sleep of up to the policy cap (300 s on the transfer policy),
+ * which no service unit's stop timeout tolerates.
  */
 export async function withTransientRetry<T>(
     op: () => Promise<T>,
     policy: RetryPolicy,
     log: Logger,
     label: string,
+    signal?: AbortSignal,
 ): Promise<T> {
     for (let attempt = 1; ; attempt += 1) {
         try {
@@ -81,13 +112,19 @@ export async function withTransientRetry<T>(
         } catch (error) {
             const retriable =
                 typeof error === "object" && error !== null && (error as { retriable?: unknown }).retriable === true;
-            if (!retriable || attempt >= policy.attempts) {
+            if (!retriable || attempt >= policy.attempts || isAborted(signal)) {
                 throw error;
             }
             const next = attempt + 1;
             const delayMs = computeRetryDelayMs(next, policy, Math.random());
             log.warn(`${label}: transient failure, retrying`, { attempt: next, of: policy.attempts, delayMs });
-            await sleep(delayMs);
+            await sleep(delayMs, signal);
+            // Aborted while waiting: the backoff woke early precisely so this
+            // check happens now rather than after the full delay. Rethrow the
+            // failure that caused the wait - no further attempt starts.
+            if (isAborted(signal)) {
+                throw error;
+            }
         }
     }
 }

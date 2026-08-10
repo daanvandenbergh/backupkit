@@ -94,6 +94,14 @@ export interface RunRemoteOptions {
     env?: Record<string, string>;
     /** Retry policy override for tests ONLY - production callers always use the control policy. */
     retryPolicy?: RetryPolicy;
+    /**
+     * Graceful-shutdown signal. On abort the ssh child is SIGTERMed (then
+     * SIGKILLed by exec/ if it lingers), no further retry attempt starts, and
+     * any pending backoff wakes immediately - so a stop is bounded by the
+     * child's own death, not by this call's 60 s timeout times its attempts.
+     * The service unit's `TimeoutStopSec` is unmeetable without this.
+     */
+    signal?: AbortSignal;
 }
 
 /**
@@ -161,6 +169,7 @@ export async function runRemote(
             const result = await exec(options.sshBin, fullArgs, {
                 env,
                 timeoutMs: options.timeoutMs ?? 60_000,
+                signal: options.signal,
             });
             if (result.timedOut) {
                 throw new SshError(`ssh ${dest} timed out after ${options.timeoutMs ?? 60_000}ms`, {
@@ -183,6 +192,7 @@ export async function runRemote(
         policy,
         options.log,
         `ssh ${remote.name}`,
+        options.signal,
     );
 }
 

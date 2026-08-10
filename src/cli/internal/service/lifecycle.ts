@@ -7,6 +7,7 @@
  * exact next command. install/uninstall/start/stop/restart require root.
  */
 
+import type { ResolvedConfig } from "../../../config/types.js";
 import type { CliDeps } from "../context.js";
 import { parseFlags, UsageError } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -66,35 +67,81 @@ async function action(deps: CliDeps, bin: string, args: string[]): Promise<numbe
     return 0;
 }
 
-/** Write the unit definition (+ enable on systemd, + newsyslog conf on macOS). Idempotent: rewrite + reload. */
-async function install(deps: CliDeps, configArg?: string): Promise<number> {
-    const { config } = deps.loadContext(configArg);
+/**
+ * Write every file the unit definition consists of, from the CURRENT config,
+ * and report whether that changed anything on disk.
+ *
+ * The unit is a mirror of config-derived facts - `ReadWritePaths` (every local
+ * destination root, the stateDir, the config dir, the logging.file dir) and the
+ * alias `ReadOnlyPaths` grant. `ProtectSystem=strict` turns a stale mirror into
+ * a hard failure rather than a hardening gap: a destination added after install
+ * is read-only to the daemon, so its every run fails with EROFS and points at
+ * the filesystem instead of at the stale unit. Every lifecycle verb that starts
+ * the daemon therefore re-derives this first - see `syncUnits`.
+ */
+function writeUnits(deps: CliDeps, config: ResolvedConfig): boolean {
     // A configured logging.file needs its directory to exist before the daemon
     // writes its first line - on Linux it is also a ReadWritePaths member.
     const logDir = logDirOf(config);
     if (logDir !== null) {
         deps.files.mkdir(logDir, 0o750);
     }
+    const desired: [string, string][] =
+        deps.platform === "darwin"
+            ? [
+                  [
+                      LAUNCHD_PLIST_PATH,
+                      launchdPlist({ nodeBin: deps.nodeBin, cliPath: deps.cliPath, configPath: config.configPath }),
+                  ],
+                  [NEWSYSLOG_CONF_PATH, NEWSYSLOG_CONF],
+              ]
+            : [
+                  [
+                      SYSTEMD_UNIT_PATH,
+                      systemdUnit({
+                          nodeBin: deps.nodeBin,
+                          cliPath: deps.cliPath,
+                          configPath: config.configPath,
+                          readWritePaths: readWritePathsOf(config),
+                          aliasRemote: hasAliasRemote(config),
+                      }),
+                  ],
+              ];
     if (deps.platform === "darwin") {
         deps.files.mkdir(MACOS_LOG_DIR, 0o750);
-        deps.files.write(
-            LAUNCHD_PLIST_PATH,
-            launchdPlist({ nodeBin: deps.nodeBin, cliPath: deps.cliPath, configPath: config.configPath }),
-            0o644,
-        );
-        deps.files.write(NEWSYSLOG_CONF_PATH, NEWSYSLOG_CONF, 0o644);
-    } else {
-        deps.files.write(
-            SYSTEMD_UNIT_PATH,
-            systemdUnit({
-                nodeBin: deps.nodeBin,
-                cliPath: deps.cliPath,
-                configPath: config.configPath,
-                readWritePaths: readWritePathsOf(config),
-                aliasRemote: hasAliasRemote(config),
-            }),
-            0o644,
-        );
+    }
+    let changed = false;
+    for (const [path, content] of desired) {
+        const current = deps.files.exists(path) ? deps.files.read(path) : null;
+        if (current !== content) {
+            changed = true;
+        }
+        deps.files.write(path, content, 0o644);
+    }
+    return changed;
+}
+
+/**
+ * Re-derive the installed unit from the current config before starting the
+ * daemon, so a config change since `install` cannot leave the daemon running
+ * under a unit that denies it its own archive roots or log file. Returns the
+ * platform reload's exit code (0 when nothing changed - the common case, which
+ * costs one file read and no subprocess).
+ */
+async function syncUnits(deps: CliDeps, configArg: string | undefined): Promise<number> {
+    const { config } = deps.loadContext(configArg);
+    if (!writeUnits(deps, config)) {
+        return 0;
+    }
+    deps.stdout("config changed since install - refreshed the service unit");
+    return deps.platform === "darwin" ? 0 : action(deps, "systemctl", ["daemon-reload"]);
+}
+
+/** Write the unit definition (+ enable on systemd, + newsyslog conf on macOS). Idempotent: rewrite + reload. */
+async function install(deps: CliDeps, configArg?: string): Promise<number> {
+    const { config } = deps.loadContext(configArg);
+    writeUnits(deps, config);
+    if (deps.platform !== "darwin") {
         for (const args of [["daemon-reload"], ["enable", "backupkit"]]) {
             const code = await action(deps, "systemctl", args);
             if (code !== 0) {
@@ -130,11 +177,15 @@ async function uninstall(deps: CliDeps): Promise<number> {
     return 0;
 }
 
-/** Start the installed unit; "already running" is a success. */
-async function start(deps: CliDeps): Promise<number> {
+/** Start the installed unit; "already running" is a success. The unit is re-derived from the config first. */
+async function start(deps: CliDeps, configArg?: string): Promise<number> {
     if (!isInstalled(deps)) {
         deps.stderr(NOT_INSTALLED);
         return 1;
+    }
+    const synced = await syncUnits(deps, configArg);
+    if (synced !== 0) {
+        return synced;
     }
     if (deps.platform === "darwin") {
         if (await launchdLoaded(deps)) {
@@ -186,21 +237,48 @@ async function stop(deps: CliDeps): Promise<number> {
     return code;
 }
 
-/** Restart the installed unit (kickstart -k on macOS; a stopped macOS job is simply started). */
-async function restart(deps: CliDeps): Promise<number> {
+/**
+ * Restart the installed unit (kickstart -k on macOS; a stopped macOS job is
+ * simply started). The unit is re-derived from the config first - and on macOS
+ * a CHANGED plist is reloaded with bootout+bootstrap, because launchd caches
+ * the plist it bootstrapped and `kickstart -k` would re-exec the old one.
+ */
+async function restart(deps: CliDeps, configArg?: string): Promise<number> {
     if (!isInstalled(deps)) {
         deps.stderr(NOT_INSTALLED);
         return 1;
     }
+    const { config } = deps.loadContext(configArg);
+    const changed = writeUnits(deps, config);
+    if (changed) {
+        deps.stdout("config changed since install - refreshed the service unit");
+    }
     if (deps.platform === "darwin") {
         if (!(await launchdLoaded(deps))) {
-            return start(deps);
+            return start(deps, configArg);
+        }
+        if (changed) {
+            const out = await action(deps, "launchctl", ["bootout", `system/${LAUNCHD_LABEL}`]);
+            if (out !== 0) {
+                return out;
+            }
+            const code = await action(deps, "launchctl", ["bootstrap", "system", LAUNCHD_PLIST_PATH]);
+            if (code === 0) {
+                deps.stdout("restarted");
+            }
+            return code;
         }
         const code = await action(deps, "launchctl", ["kickstart", "-k", `system/${LAUNCHD_LABEL}`]);
         if (code === 0) {
             deps.stdout("restarted");
         }
         return code;
+    }
+    if (changed) {
+        const reload = await action(deps, "systemctl", ["daemon-reload"]);
+        if (reload !== 0) {
+            return reload;
+        }
     }
     const code = await action(deps, "systemctl", ["restart", "backupkit"]);
     if (code === 0) {
@@ -264,11 +342,11 @@ export async function serviceCommand(argv: string[], deps: CliDeps): Promise<num
         case "uninstall":
             return uninstall(deps);
         case "start":
-            return start(deps);
+            return start(deps, configArg);
         case "stop":
             return stop(deps);
         case "restart":
-            return restart(deps);
+            return restart(deps, configArg);
         case "status":
             return status(deps, configArg);
     }

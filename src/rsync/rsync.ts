@@ -299,6 +299,10 @@ export async function runTransfer(params: {
         transferRetryPolicy(params.retryAttempts),
         params.log,
         "transfer",
+        // Without this a stop lands in a backoff sleep of up to the 300 s cap,
+        // long past any service unit's stop timeout, before the next attempt's
+        // aborted-check would even run.
+        params.signal,
     );
 }
 

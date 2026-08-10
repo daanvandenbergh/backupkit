@@ -66,6 +66,14 @@ export interface StoreSshOptions {
     env?: Record<string, string>;
     /** Retry policy override for tests ONLY - production callers always use the control policy. */
     retryPolicy?: RetryPolicy;
+    /**
+     * Graceful-shutdown signal for every remote command this store issues. The
+     * pipeline threads its rsync children's signal here too, so a stop is
+     * bounded on the store path (list, claim, promote, prune, lock) and not
+     * only on the transfer - otherwise the store alone can outlast the service
+     * unit's stop timeout and be SIGKILLed mid-lock.
+     */
+    signal?: AbortSignal;
 }
 
 /** Everything `openStore` needs beyond the target itself. */
@@ -107,6 +115,7 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
                 authSock: ssh.authSock,
                 env: ssh.env,
                 retryPolicy: callOptions?.retryPolicy ?? ssh.retryPolicy,
+                signal: ssh.signal,
                 log: deps.log,
             }),
         deps.log,

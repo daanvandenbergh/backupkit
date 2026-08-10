@@ -9,13 +9,48 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { ResolvedConfig } from "../../config/types.js";
 import { main } from "../main.js";
 import {
+    hasAliasRemote,
     LAUNCHD_PLIST_PATH,
+    launchdPlist,
+    NEWSYSLOG_CONF,
     NEWSYSLOG_CONF_PATH,
+    readWritePathsOf,
     SYSTEMD_UNIT_PATH,
+    systemdUnit,
 } from "../internal/service/units.js";
 import { fakeDeps, makeConfig, makeExecResult, makeTarget } from "./fakes.js";
+
+/** The default fixture config `fakeDeps` hands out. */
+function defaultConfig(): ResolvedConfig {
+    return makeConfig({
+        configPath: "/etc/backupkit/config.jsonc",
+        stateDir: "/var/lib/backupkit",
+        targets: [makeTarget()],
+    });
+}
+
+/**
+ * The files an UP-TO-DATE install would have left on disk for `config`. Seeding
+ * these (rather than a placeholder string) is what makes a lifecycle test
+ * exercise the no-drift path: every verb that starts the daemon re-derives the
+ * unit from the config and refreshes it when it differs.
+ */
+function installedFiles(platform: string, config: ResolvedConfig = defaultConfig()): Record<string, string> {
+    const base = { nodeBin: "/usr/bin/node", cliPath: "/opt/backupkit/dist/cli/main.js", configPath: config.configPath };
+    if (platform === "darwin") {
+        return { [LAUNCHD_PLIST_PATH]: launchdPlist(base), [NEWSYSLOG_CONF_PATH]: NEWSYSLOG_CONF };
+    }
+    return {
+        [SYSTEMD_UNIT_PATH]: systemdUnit({
+            ...base,
+            readWritePaths: readWritePathsOf(config),
+            aliasRemote: hasAliasRemote(config),
+        }),
+    };
+}
 
 describe("verb parsing and root requirement", () => {
     it("rejects a missing or unknown verb with exit 64 listing the verbs", async () => {
@@ -88,7 +123,7 @@ describe("Linux lifecycle", () => {
         ["restart", "active", ["systemctl", "restart", "backupkit"], "restarted"],
     ])("%s drives systemctl and reports", async (verb, activeState, expectedArgv, message) => {
         const h = fakeDeps({
-            files: { [SYSTEMD_UNIT_PATH]: "unit" },
+            files: installedFiles("linux"),
             execResults: [
                 {
                     match: (bin, args) => bin === "systemctl" && args[0] === "is-active",
@@ -103,7 +138,7 @@ describe("Linux lifecycle", () => {
 
     it("start on a running unit and stop on a stopped one are idempotent successes", async () => {
         const running = fakeDeps({
-            files: { [SYSTEMD_UNIT_PATH]: "unit" },
+            files: installedFiles("linux"),
             execResults: [{ match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "active\n" }) }],
         });
         expect(await main(["service", "start"], running.deps)).toBe(0);
@@ -111,11 +146,57 @@ describe("Linux lifecycle", () => {
         expect(running.execCalls.map((call) => call.args[0])).not.toContain("start");
 
         const stopped = fakeDeps({
-            files: { [SYSTEMD_UNIT_PATH]: "unit" },
+            files: installedFiles("linux"),
             execResults: [{ match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "inactive\n", exitCode: 3 }) }],
         });
         expect(await main(["service", "stop"], stopped.deps)).toBe(0);
         expect(stopped.out).toEqual(["already stopped"]);
+    });
+
+    // The unit mirrors config-derived facts (ReadWritePaths above all), and
+    // only `install` used to refresh it. Adding a target after install and
+    // running the documented `service restart` left the daemon sandboxed away
+    // from the new archive root: every run failed EROFS, blaming the filesystem
+    // rather than the stale unit. Any verb that starts the daemon re-derives it.
+    it.each([
+        ["start", "inactive", 3],
+        ["restart", "active", 0],
+    ])("%s refreshes a unit that no longer matches the config", async (verb, activeState, activeExit) => {
+        const config = defaultConfig();
+        config.targets = [
+            makeTarget(),
+            makeTarget({ name: "db", destination: "/mnt/archive", dst: { kind: "local", path: "/mnt/archive" } }),
+        ];
+        const h = fakeDeps({
+            config,
+            // On disk: the unit as it was installed, BEFORE the "db" target existed.
+            files: installedFiles("linux", defaultConfig()),
+            execResults: [
+                {
+                    match: (bin, args) => bin === "systemctl" && args[0] === "is-active",
+                    result: makeExecResult({ stdout: `${activeState}\n`, exitCode: activeExit }),
+                },
+            ],
+        });
+        expect(await main(["service", verb], h.deps)).toBe(0);
+        expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"/mnt/archive"');
+        expect(h.out).toContain("config changed since install - refreshed the service unit");
+        expect(h.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual(["systemctl", "daemon-reload"]);
+    });
+
+    it("an up-to-date unit is left alone: no rewrite notice, no daemon-reload", async () => {
+        const h = fakeDeps({
+            files: installedFiles("linux"),
+            execResults: [
+                {
+                    match: (bin, args) => bin === "systemctl" && args[0] === "is-active",
+                    result: makeExecResult({ stdout: "inactive\n", exitCode: 3 }),
+                },
+            ],
+        });
+        expect(await main(["service", "start"], h.deps)).toBe(0);
+        expect(h.out).toEqual(["started"]);
+        expect(h.execCalls.map((call) => call.args[0])).not.toContain("daemon-reload");
     });
 
     it.each([["start"], ["stop"], ["restart"]])("%s without an installed unit exits 1 naming service install", async (verb) => {
@@ -127,7 +208,7 @@ describe("Linux lifecycle", () => {
 
     it("uninstall stops, disables, removes the unit, and reloads; a second uninstall is a no-op success", async () => {
         const h = fakeDeps({
-            files: { [SYSTEMD_UNIT_PATH]: "unit" },
+            files: installedFiles("linux"),
             execResults: [{ match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "active\n" }) }],
         });
         expect(await main(["service", "uninstall"], h.deps)).toBe(0);
@@ -146,7 +227,7 @@ describe("Linux lifecycle", () => {
 
     it("service status merges the unit header with the engine's rows", async () => {
         const h = fakeDeps({
-            files: { [SYSTEMD_UNIT_PATH]: "unit" },
+            files: installedFiles("linux"),
             execResults: [
                 { match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "active\n" }) },
                 { match: (bin, args) => args[0] === "show", result: makeExecResult({ stdout: "1234\n" }) },
@@ -185,7 +266,7 @@ describe("macOS lifecycle", () => {
     });
 
     it("start bootstraps when not loaded and is idempotent when loaded", async () => {
-        const cold = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "plist" }, execResults: [notLoaded()] });
+        const cold = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [notLoaded()] });
         expect(await main(["service", "start"], cold.deps)).toBe(0);
         expect(cold.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual([
             "launchctl",
@@ -195,13 +276,13 @@ describe("macOS lifecycle", () => {
         ]);
         expect(cold.out).toEqual(["started"]);
 
-        const warm = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "plist" }, execResults: [loaded()] });
+        const warm = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "start"], warm.deps)).toBe(0);
         expect(warm.out).toEqual(["already running"]);
     });
 
     it("stop boots out and restart kickstarts", async () => {
-        const stop = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "plist" }, execResults: [loaded()] });
+        const stop = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "stop"], stop.deps)).toBe(0);
         expect(stop.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual([
             "launchctl",
@@ -209,7 +290,7 @@ describe("macOS lifecycle", () => {
             "system/com.daanvandenbergh.backupkit",
         ]);
 
-        const restart = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "plist" }, execResults: [loaded()] });
+        const restart = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "restart"], restart.deps)).toBe(0);
         expect(restart.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual([
             "launchctl",
@@ -231,7 +312,7 @@ describe("macOS lifecycle", () => {
     });
 
     it("status parses the launchd pid", async () => {
-        const h = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "plist" }, execResults: [loaded()] });
+        const h = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "status"], h.deps)).toBe(0);
         expect(h.out[0]).toBe("service: active (pid 4321)");
     });
