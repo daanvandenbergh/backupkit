@@ -1,0 +1,649 @@
+/**
+ * The hand-rolled config validator: walks the JSONC node tree, fails on the
+ * FIRST error with a ConfigError shaped `<file>:<line>: <dotted.path>:
+ * <problem>`, rejects unknown keys at every object level, and enforces the
+ * full cross-field matrix (remote alias-XOR-explicit shape, the schedule
+ * anchor matrix, path rules, grammars). Touches no filesystem - the config
+ * file's text is the only input. Non-fatal findings (unreferenced remotes)
+ * become warnings.
+ */
+
+import { ConfigError } from "../../shared/errors.js";
+import { isValidBwlimit, parseMinFree } from "../../shared/format.js";
+import type {
+    AliasRemoteConfig,
+    ExplicitRemoteConfig,
+    LogLevel,
+    RemoteConfig,
+    RetentionConfig,
+    ScheduleInput,
+    TargetConfig,
+} from "../types.js";
+import type { JsoncArrayNode, JsoncNode, JsoncObjectNode } from "./jsonc.js";
+
+/** One validated remote with its document-order position preserved. */
+export interface ValidatedRemote {
+    /** The remote's key in the `remotes` record. */
+    name: string;
+    /** The validated remote shape. */
+    remote: RemoteConfig;
+}
+
+/** One validated target with its document-order position preserved. */
+export interface ValidatedTarget {
+    /** The target's key in the `targets` record. */
+    name: string;
+    /** The validated target shape. */
+    target: TargetConfig;
+}
+
+/**
+ * Validator output: the config with grammar and cross-field rules enforced,
+ * remotes/targets as document-ordered arrays, defaults NOT yet filled
+ * (that is `defaults.ts`'s job).
+ */
+export interface ValidatedConfig {
+    /** Instance label, if written. */
+    name?: string;
+    /** Remotes in document order. */
+    remotes: ValidatedRemote[];
+    /** Targets in document order (= run order). */
+    targets: ValidatedTarget[];
+    /** Top-level default retention, if written. */
+    retention?: RetentionConfig;
+    /** Run-report root override, if written. */
+    stateDir?: string;
+    /** Logging settings, if written. */
+    logging?: {
+        /** Minimum level to emit, if written. */
+        level?: LogLevel;
+        /** Log file path, if written. */
+        file?: string;
+    };
+    /** Local rsync binary override, if written. */
+    rsyncBin?: string;
+    /** Local ssh binary override, if written. */
+    sshBin?: string;
+    /** Non-fatal findings for the caller to log (e.g. unreferenced remotes). */
+    warnings: string[];
+}
+
+/** Record-key charset for remote and target names. */
+const NAME_REGEX = /^[a-z0-9][a-z0-9._-]*$/;
+
+/** ssh_config alias charset - excludes whitespace, quotes, ':', '@', '/', and a leading '-' by construction. */
+const ALIAS_REGEX = /^[a-z0-9_][a-z0-9._-]*$/i;
+
+/** SSH username charset. */
+const USER_REGEX = /^[a-z_][a-z0-9._-]{0,31}$/i;
+
+/** "HH:MM" 24-hour anchor. */
+const AT_REGEX = /^([01][0-9]|2[0-3]):[0-5][0-9]$/;
+
+/** Passphrase source grammar: "file:/abs/path". */
+const PASSPHRASE_FILE_REGEX = /^file:\/.+/;
+
+/** The seven weekday short names, Monday first. */
+const WEEKDAYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"] as const;
+
+/** The five schedule intervals. */
+const INTERVALS = ["minute", "hour", "day", "week", "month"] as const;
+
+/** The four log levels. */
+const LOG_LEVELS = ["error", "warn", "info", "debug"] as const;
+
+/** The six retention rule keys. */
+const RETENTION_KEYS = ["keepLast", "keepHourly", "keepDaily", "keepWeekly", "keepMonthly", "keepYearly"] as const;
+
+/** Normalize a validated absolute path: collapse duplicate slashes and strip a trailing slash. */
+function normalizePath(value: string): string {
+    const collapsed = value.replace(/\/{2,}/g, "/");
+    return collapsed.length > 1 ? collapsed.replace(/\/$/, "") : collapsed;
+}
+
+/** Stateful single-pass validator bound to one file. */
+class Validator {
+    /** Non-fatal findings accumulated during validation. */
+    readonly warnings: string[] = [];
+
+    /** Bind the validator to the reporting filename. */
+    constructor(private readonly file: string) {}
+
+    /** Throw the fail-first ConfigError: `<file>:<line>: <dotted.path>: <problem>`. */
+    private fail(node: JsoncNode, path: string, problem: string): never {
+        throw new ConfigError(`${this.file}:${node.line}: ${path}: ${problem}`, {
+            file: this.file,
+            line: node.line,
+            path,
+        });
+    }
+
+    /** Require an object node. */
+    private expectObject(node: JsoncNode, path: string): JsoncObjectNode {
+        if (node.kind !== "object") {
+            this.fail(node, path, "expected an object");
+        }
+        return node;
+    }
+
+    /** Require a string node and return its value. */
+    private expectString(node: JsoncNode, path: string): string {
+        if (node.kind !== "string") {
+            this.fail(node, path, "expected a string");
+        }
+        return node.value;
+    }
+
+    /** Require a boolean node and return its value. */
+    private expectBool(node: JsoncNode, path: string): boolean {
+        if (node.kind !== "boolean") {
+            this.fail(node, path, "expected a boolean");
+        }
+        return node.value;
+    }
+
+    /** Require an integer node within [min, max] and return its value. */
+    private expectInt(node: JsoncNode, path: string, min: number, max: number, problem: string): number {
+        if (node.kind !== "number" || !Number.isInteger(node.value) || node.value < min || node.value > max) {
+            this.fail(node, path, problem);
+        }
+        return node.value;
+    }
+
+    /** Require a string node whose value is one of the given options. */
+    private expectEnum<T extends string>(node: JsoncNode, path: string, options: readonly T[]): T {
+        const value = this.expectString(node, path);
+        if (!(options as readonly string[]).includes(value)) {
+            this.fail(node, path, `expected one of ${options.map((option) => `"${option}"`).join(", ")}`);
+        }
+        return value as T;
+    }
+
+    /** Reject any key of `obj` not in the allowed list (first offender, document order). */
+    private rejectUnknownKeys(obj: JsoncObjectNode, path: string, allowed: readonly string[]): void {
+        for (const [key, valueNode] of obj.entries) {
+            if (!allowed.includes(key)) {
+                this.fail(valueNode, path === "" ? key : `${path}.${key}`, `unknown key "${key}"`);
+            }
+        }
+    }
+
+    /**
+     * Require an absolute path with the universal path rules: no `~`, no NUL
+     * or newline, absolute. With `noWhitespaceQuotes` (paths that enter
+     * rsync's -e string or a remote command) whitespace and quote characters
+     * are also rejected.
+     */
+    private expectPath(node: JsoncNode, path: string, noWhitespaceQuotes: boolean): string {
+        const value = this.expectString(node, path);
+        if (value.startsWith("~")) {
+            this.fail(node, path, '"~" is not expanded - use an absolute path');
+        }
+        if (/[\0\n\r]/.test(value)) {
+            this.fail(node, path, "path may not contain NUL or newline characters");
+        }
+        if (!value.startsWith("/")) {
+            this.fail(node, path, "must be an absolute path");
+        }
+        if (noWhitespaceQuotes && /[\s'"]/.test(value)) {
+            this.fail(node, path, "path may not contain whitespace or quote characters");
+        }
+        return value;
+    }
+
+    /** Require a record key to match the shared name charset. */
+    private checkName(node: JsoncNode, path: string, key: string): void {
+        if (!NAME_REGEX.test(key) || key.length > 64) {
+            this.fail(
+                node,
+                path,
+                `invalid name "${key}" - names must match /^[a-z0-9][a-z0-9._-]*$/ and be at most 64 characters`,
+            );
+        }
+    }
+
+    /** Validate one remote object: the alias XOR explicit discriminated shape. */
+    private validateRemote(node: JsoncNode, path: string): RemoteConfig {
+        const obj = this.expectObject(node, path);
+        if (obj.entries.has("alias")) {
+            for (const [key, valueNode] of obj.entries) {
+                if (key !== "alias") {
+                    this.fail(
+                        valueNode,
+                        `${path}.${key}`,
+                        "alias remotes take no other fields - host, user, key, and port come from ssh_config; use an explicit remote for per-field control",
+                    );
+                }
+            }
+            const aliasNode = obj.entries.get("alias")!;
+            const alias = this.expectString(aliasNode, `${path}.alias`);
+            if (!ALIAS_REGEX.test(alias) || alias.length > 64) {
+                this.fail(
+                    aliasNode,
+                    `${path}.alias`,
+                    "invalid alias - must match /^[a-z0-9_][a-z0-9._-]*$/i and be at most 64 characters (no whitespace, quotes, ':', '@', or '/')",
+                );
+            }
+            const remote: AliasRemoteConfig = { alias };
+            return remote;
+        }
+        this.rejectUnknownKeys(obj, path, ["host", "user", "port", "identityFile", "passphrase", "knownHostsFile"]);
+        for (const required of ["host", "user", "identityFile"]) {
+            if (!obj.entries.has(required)) {
+                this.fail(obj, `${path}.${required}`, "required field missing");
+            }
+        }
+        const hostNode = obj.entries.get("host")!;
+        const host = this.expectString(hostNode, `${path}.host`);
+        if (host.length === 0 || /[\s'"@]/.test(host)) {
+            this.fail(hostNode, `${path}.host`, "invalid host - must be non-empty with no whitespace, quotes, or '@'");
+        }
+        const userNode = obj.entries.get("user")!;
+        const user = this.expectString(userNode, `${path}.user`);
+        if (!USER_REGEX.test(user)) {
+            this.fail(userNode, `${path}.user`, "invalid ssh user - must match /^[a-z_][a-z0-9._-]{0,31}$/i");
+        }
+        const remote: ExplicitRemoteConfig = {
+            host,
+            user,
+            identityFile: this.expectPath(obj.entries.get("identityFile")!, `${path}.identityFile`, true),
+        };
+        const portNode = obj.entries.get("port");
+        if (portNode !== undefined) {
+            remote.port = this.expectInt(portNode, `${path}.port`, 1, 65535, "expected an integer between 1 and 65535");
+        }
+        const passphraseNode = obj.entries.get("passphrase");
+        if (passphraseNode !== undefined) {
+            const passphrase = this.expectString(passphraseNode, `${path}.passphrase`);
+            if (passphrase !== "prompt" && !PASSPHRASE_FILE_REGEX.test(passphrase)) {
+                this.fail(
+                    passphraseNode,
+                    `${path}.passphrase`,
+                    'passphrase must be "file:/path" or "prompt" - never the passphrase itself',
+                );
+            }
+            remote.passphrase = passphrase;
+        }
+        const knownHostsNode = obj.entries.get("knownHostsFile");
+        if (knownHostsNode !== undefined) {
+            remote.knownHostsFile = this.expectPath(knownHostsNode, `${path}.knownHostsFile`, true);
+        }
+        return remote;
+    }
+
+    /** Validate a retention rules object (non-empty, non-negative integer counts). */
+    private validateRetention(node: JsoncNode, path: string): RetentionConfig {
+        const obj = this.expectObject(node, path);
+        this.rejectUnknownKeys(obj, path, RETENTION_KEYS);
+        if (obj.entries.size === 0) {
+            this.fail(
+                obj,
+                path,
+                "empty retention {} - omit retention to keep everything forever, or set retention: false on a target",
+            );
+        }
+        const retention: RetentionConfig = {};
+        for (const key of RETENTION_KEYS) {
+            const valueNode = obj.entries.get(key);
+            if (valueNode !== undefined) {
+                retention[key] = this.expectInt(
+                    valueNode,
+                    `${path}.${key}`,
+                    0,
+                    Number.MAX_SAFE_INTEGER,
+                    "expected a non-negative integer",
+                );
+            }
+        }
+        return retention;
+    }
+
+    /** Validate a schedule object against the interval/anchor matrix. */
+    private validateSchedule(node: JsoncNode, path: string): ScheduleInput {
+        const obj = this.expectObject(node, path);
+        this.rejectUnknownKeys(obj, path, ["interval", "intervalCount", "at", "on", "dayOfMonth"]);
+        const intervalNode = obj.entries.get("interval");
+        if (intervalNode === undefined) {
+            this.fail(obj, `${path}.interval`, "required field missing");
+        }
+        const schedule: ScheduleInput = { interval: this.expectEnum(intervalNode, `${path}.interval`, INTERVALS) };
+        const countNode = obj.entries.get("intervalCount");
+        if (countNode !== undefined) {
+            schedule.intervalCount = this.expectInt(
+                countNode,
+                `${path}.intervalCount`,
+                1,
+                Number.MAX_SAFE_INTEGER,
+                "expected a positive integer",
+            );
+        }
+        const atNode = obj.entries.get("at");
+        if (atNode !== undefined) {
+            if (schedule.interval === "minute" || schedule.interval === "hour") {
+                this.fail(atNode, `${path}.at`, '"at" is only valid for intervals "day", "week", and "month"');
+            }
+            const at = this.expectString(atNode, `${path}.at`);
+            if (!AT_REGEX.test(at)) {
+                this.fail(atNode, `${path}.at`, '"at" must be "HH:MM" (24-hour UTC, e.g. "03:00")');
+            }
+            schedule.at = at;
+        }
+        const onNode = obj.entries.get("on");
+        if (onNode !== undefined) {
+            if (schedule.interval !== "week") {
+                this.fail(onNode, `${path}.on`, '"on" is only valid for interval "week"');
+            }
+            schedule.on = this.expectEnum(onNode, `${path}.on`, WEEKDAYS);
+        }
+        const dayNode = obj.entries.get("dayOfMonth");
+        if (dayNode !== undefined) {
+            if (schedule.interval !== "month") {
+                this.fail(dayNode, `${path}.dayOfMonth`, '"dayOfMonth" is only valid for interval "month"');
+            }
+            schedule.dayOfMonth = this.expectInt(
+                dayNode,
+                `${path}.dayOfMonth`,
+                1,
+                28,
+                "expected an integer between 1 and 28",
+            );
+        }
+        return schedule;
+    }
+
+    /** Validate a per-target rsync options object. */
+    private validateRsyncOptions(node: JsoncNode, path: string): TargetConfig["rsync"] {
+        const obj = this.expectObject(node, path);
+        this.rejectUnknownKeys(obj, path, [
+            "compress",
+            "bwlimit",
+            "ioTimeoutSec",
+            "xattrs",
+            "preserveOwnership",
+            "preserveDevices",
+            "remoteRsyncBin",
+            "verify",
+        ]);
+        const options: NonNullable<TargetConfig["rsync"]> = {};
+        for (const key of ["compress", "xattrs", "preserveOwnership", "preserveDevices", "verify"] as const) {
+            const valueNode = obj.entries.get(key);
+            if (valueNode !== undefined) {
+                options[key] = this.expectBool(valueNode, `${path}.${key}`);
+            }
+        }
+        const bwlimitNode = obj.entries.get("bwlimit");
+        if (bwlimitNode !== undefined) {
+            const bwlimit = this.expectString(bwlimitNode, `${path}.bwlimit`);
+            if (!isValidBwlimit(bwlimit)) {
+                this.fail(
+                    bwlimitNode,
+                    `${path}.bwlimit`,
+                    "bwlimit must be a number with an optional K/M/G suffix (a bare number is KiB/s)",
+                );
+            }
+            options.bwlimit = bwlimit;
+        }
+        const timeoutNode = obj.entries.get("ioTimeoutSec");
+        if (timeoutNode !== undefined) {
+            options.ioTimeoutSec = this.expectInt(
+                timeoutNode,
+                `${path}.ioTimeoutSec`,
+                1,
+                Number.MAX_SAFE_INTEGER,
+                "expected a positive integer",
+            );
+        }
+        const remoteRsyncNode = obj.entries.get("remoteRsyncBin");
+        if (remoteRsyncNode !== undefined) {
+            options.remoteRsyncBin = this.expectPath(remoteRsyncNode, `${path}.remoteRsyncBin`, true);
+        }
+        return options;
+    }
+
+    /** Validate an exclude-pattern array. */
+    private validateExclude(node: JsoncNode, path: string): string[] {
+        if (node.kind !== "array") {
+            this.fail(node, path, "expected an array of strings");
+        }
+        const arrayNode: JsoncArrayNode = node;
+        return arrayNode.items.map((item, index) => {
+            const pattern = this.expectString(item, `${path}[${index}]`);
+            if (/[\0\n\r]/.test(pattern)) {
+                this.fail(item, `${path}[${index}]`, "exclude pattern may not contain NUL or newline characters");
+            }
+            return pattern;
+        });
+    }
+
+    /** Validate one target object. */
+    private validateTarget(node: JsoncNode, path: string): TargetConfig {
+        const obj = this.expectObject(node, path);
+        this.rejectUnknownKeys(obj, path, [
+            "direction",
+            "remote",
+            "source",
+            "destination",
+            "exclude",
+            "schedule",
+            "retention",
+            "retry",
+            "minFree",
+            "rsync",
+            "enabled",
+        ]);
+        for (const required of ["direction", "remote", "source", "destination"]) {
+            if (!obj.entries.has(required)) {
+                this.fail(obj, `${path}.${required}`, "required field missing");
+            }
+        }
+        const target: TargetConfig = {
+            direction: this.expectEnum(obj.entries.get("direction")!, `${path}.direction`, ["pull", "push"] as const),
+            remote: this.expectString(obj.entries.get("remote")!, `${path}.remote`),
+            source: this.expectPath(obj.entries.get("source")!, `${path}.source`, false),
+            destination: this.expectPath(obj.entries.get("destination")!, `${path}.destination`, false),
+        };
+        const excludeNode = obj.entries.get("exclude");
+        if (excludeNode !== undefined) {
+            target.exclude = this.validateExclude(excludeNode, `${path}.exclude`);
+        }
+        const scheduleNode = obj.entries.get("schedule");
+        if (scheduleNode !== undefined) {
+            target.schedule = this.validateSchedule(scheduleNode, `${path}.schedule`);
+        }
+        const retentionNode = obj.entries.get("retention");
+        if (retentionNode !== undefined) {
+            if (retentionNode.kind === "boolean" && !retentionNode.value) {
+                target.retention = false;
+            } else if (retentionNode.kind === "boolean") {
+                this.fail(retentionNode, `${path}.retention`, "expected a retention object or false");
+            } else {
+                target.retention = this.validateRetention(retentionNode, `${path}.retention`);
+            }
+        }
+        const retryNode = obj.entries.get("retry");
+        if (retryNode !== undefined) {
+            const retryObj = this.expectObject(retryNode, `${path}.retry`);
+            this.rejectUnknownKeys(retryObj, `${path}.retry`, ["attempts"]);
+            const attemptsNode = retryObj.entries.get("attempts");
+            target.retry = {};
+            if (attemptsNode !== undefined) {
+                target.retry.attempts = this.expectInt(
+                    attemptsNode,
+                    `${path}.retry.attempts`,
+                    1,
+                    10,
+                    "expected an integer between 1 and 10",
+                );
+            }
+        }
+        const minFreeNode = obj.entries.get("minFree");
+        if (minFreeNode !== undefined) {
+            if (minFreeNode.kind === "boolean" && !minFreeNode.value) {
+                target.minFree = false;
+            } else {
+                const minFree = this.expectString(minFreeNode, `${path}.minFree`);
+                if (parseMinFree(minFree) === null) {
+                    this.fail(
+                        minFreeNode,
+                        `${path}.minFree`,
+                        'minFree must be "N%" (0-50) or an absolute size like "10G"/"500M", or false',
+                    );
+                }
+                target.minFree = minFree;
+            }
+        }
+        const rsyncNode = obj.entries.get("rsync");
+        if (rsyncNode !== undefined) {
+            target.rsync = this.validateRsyncOptions(rsyncNode, `${path}.rsync`);
+        }
+        const enabledNode = obj.entries.get("enabled");
+        if (enabledNode !== undefined) {
+            target.enabled = this.expectBool(enabledNode, `${path}.enabled`);
+        }
+        return target;
+    }
+
+    /**
+     * Cross-field rule: no target's snapshot root (`<destination>/<name>`)
+     * may equal or nest inside another target's snapshot root within the same
+     * storage location (local for pull, the target's remote for push).
+     */
+    private checkSnapshotRoots(targets: ValidatedTarget[], nodes: Map<string, JsoncNode>): void {
+        const roots: { name: string; scope: string; root: string }[] = targets.map(({ name, target }) => ({
+            name,
+            scope: target.direction === "pull" ? "local" : `remote:${target.remote}`,
+            root: `${normalizePath(target.destination)}/${name}`,
+        }));
+        for (let i = 0; i < roots.length; i += 1) {
+            for (let j = 0; j < i; j += 1) {
+                const a = roots[j];
+                const b = roots[i];
+                if (a.scope !== b.scope) {
+                    continue;
+                }
+                const nested =
+                    a.root === b.root || a.root.startsWith(`${b.root}/`) || b.root.startsWith(`${a.root}/`);
+                if (nested) {
+                    const node = nodes.get(b.name)!;
+                    this.fail(
+                        node,
+                        `targets.${b.name}.destination`,
+                        `snapshot root ${b.root} collides with targets.${a.name}'s snapshot root ${a.root} - choose a distinct destination`,
+                    );
+                }
+            }
+        }
+    }
+
+    /** Validate the whole document. */
+    validate(root: JsoncNode): ValidatedConfig {
+        const obj = this.expectObject(root, "config");
+        this.rejectUnknownKeys(obj, "", [
+            "name",
+            "remotes",
+            "targets",
+            "retention",
+            "stateDir",
+            "logging",
+            "rsyncBin",
+            "sshBin",
+        ]);
+        const result: ValidatedConfig = { remotes: [], targets: [], warnings: this.warnings };
+
+        const nameNode = obj.entries.get("name");
+        if (nameNode !== undefined) {
+            const name = this.expectString(nameNode, "name");
+            if (name.length === 0 || /[\0\n\r]/.test(name)) {
+                this.fail(nameNode, "name", "must be a non-empty single-line string");
+            }
+            result.name = name;
+        }
+
+        const remotesNode = obj.entries.get("remotes");
+        if (remotesNode === undefined) {
+            this.fail(obj, "remotes", "required field missing");
+        }
+        const remotesObj = this.expectObject(remotesNode, "remotes");
+        if (remotesObj.entries.size === 0) {
+            this.fail(remotesObj, "remotes", "at least one remote is required");
+        }
+        for (const [key, valueNode] of remotesObj.entries) {
+            this.checkName(valueNode, `remotes.${key}`, key);
+            result.remotes.push({ name: key, remote: this.validateRemote(valueNode, `remotes.${key}`) });
+        }
+
+        const targetsNode = obj.entries.get("targets");
+        if (targetsNode === undefined) {
+            this.fail(obj, "targets", "required field missing");
+        }
+        const targetsObj = this.expectObject(targetsNode, "targets");
+        if (targetsObj.entries.size === 0) {
+            this.fail(targetsObj, "targets", "at least one target is required");
+        }
+        const targetNodes = new Map<string, JsoncNode>();
+        for (const [key, valueNode] of targetsObj.entries) {
+            this.checkName(valueNode, `targets.${key}`, key);
+            const target = this.validateTarget(valueNode, `targets.${key}`);
+            const remoteNames = result.remotes.map((entry) => entry.name);
+            if (!remoteNames.includes(target.remote)) {
+                const remoteNode = this.expectObject(valueNode, `targets.${key}`).entries.get("remote")!;
+                this.fail(
+                    remoteNode,
+                    `targets.${key}.remote`,
+                    `unknown remote "${target.remote}" - configured remotes: ${remoteNames.join(", ")}`,
+                );
+            }
+            result.targets.push({ name: key, target });
+            targetNodes.set(key, valueNode);
+        }
+        this.checkSnapshotRoots(result.targets, targetNodes);
+
+        const retentionNode = obj.entries.get("retention");
+        if (retentionNode !== undefined) {
+            result.retention = this.validateRetention(retentionNode, "retention");
+        }
+        const stateDirNode = obj.entries.get("stateDir");
+        if (stateDirNode !== undefined) {
+            result.stateDir = this.expectPath(stateDirNode, "stateDir", false);
+        }
+        const loggingNode = obj.entries.get("logging");
+        if (loggingNode !== undefined) {
+            const loggingObj = this.expectObject(loggingNode, "logging");
+            this.rejectUnknownKeys(loggingObj, "logging", ["level", "file"]);
+            result.logging = {};
+            const levelNode = loggingObj.entries.get("level");
+            if (levelNode !== undefined) {
+                result.logging.level = this.expectEnum(levelNode, "logging.level", LOG_LEVELS);
+            }
+            const fileNode = loggingObj.entries.get("file");
+            if (fileNode !== undefined) {
+                result.logging.file = this.expectPath(fileNode, "logging.file", false);
+            }
+        }
+        const rsyncBinNode = obj.entries.get("rsyncBin");
+        if (rsyncBinNode !== undefined) {
+            result.rsyncBin = this.expectPath(rsyncBinNode, "rsyncBin", true);
+        }
+        const sshBinNode = obj.entries.get("sshBin");
+        if (sshBinNode !== undefined) {
+            result.sshBin = this.expectPath(sshBinNode, "sshBin", true);
+        }
+
+        const referenced = new Set(result.targets.map((entry) => entry.target.remote));
+        for (const { name } of result.remotes) {
+            if (!referenced.has(name)) {
+                this.warnings.push(`remote "${name}" is not referenced by any target`);
+            }
+        }
+        return result;
+    }
+}
+
+/**
+ * Validate a parsed JSONC document as a backupkit config. Fails on the first
+ * violation with a `<file>:<line>: <dotted.path>: <problem>` ConfigError;
+ * collects non-fatal findings as warnings on the returned object.
+ */
+export function validateConfig(root: JsoncNode, file: string): ValidatedConfig {
+    return new Validator(file).validate(root);
+}
