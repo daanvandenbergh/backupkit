@@ -1,0 +1,36 @@
+{
+    "name": "@daanvandenbergh/backupkit",
+    "version": "0.1.0",
+    "description": "Backup toolkit for Node.js/TypeScript projects.",
+    "license": "UNLICENSED",
+    "type": "module",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/index.d.ts",
+            "default": "./dist/index.js"
+        },
+        "./package.json": "./package.json"
+    },
+    "files": [
+        "dist"
+    ],
+    "publishConfig": {
+        "access": "public"
+    },
+    "scripts": {
+        "build": "tsc -p tsconfig.build.json",
+        "test": "vitest run --passWithNoTests",
+        "test:watch": "vitest",
+        "typecheck": "tsc --noEmit",
+        "prepublishOnly": "npm run build",
+        "push-and-publish": "git add -A && git commit -m 'Updates' && npm version patch && npm publish && git push -u origin main"
+    },
+    "devDependencies": {
+        "@daanvandenbergh/claudekit": "^1.0.6",
+        "@types/node": "^22.20.1",
+        "typescript": "^5.6.0",
+        "vitest": "^3.0.0"
+    }
+}
