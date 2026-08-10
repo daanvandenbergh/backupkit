@@ -92,7 +92,9 @@ const fade = (t) => `rgba(${t}, 0)`;
  */
 export const brand = {
     font: { family: "Space Grotesk", url: "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" },
-    badge: "⇄", // push and pull - the two directions a backup can run
+    // The project mark: a sync ring (push/pull) around a stack of snapshots fading into history.
+    // `bare` because the mark is already white - the default white tile would swallow it.
+    badge: { src: new URL("../../../assets/logo/logo.svg", import.meta.url).href, bare: true },
     accent: "24, 108, 150",
     eyebrow: "BACKUPKIT",
     texture: { dots: 0.12, grain: 0.06 },

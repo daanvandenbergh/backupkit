@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-label="backupkit">
+    <title>backupkit</title>
+    <defs>
+        <!-- The brand ramp, same slots as claude/scribekit-hero/readme/hero.settings.js. -->
+        <linearGradient id="bk-tile" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#26B0B2" />
+            <stop offset="55%" stop-color="#186C96" />
+            <stop offset="100%" stop-color="#0E2E5C" />
+        </linearGradient>
+    </defs>
+    <rect width="128" height="128" rx="30" fill="url(#bk-tile)" />
+    <g transform="translate(20 20) scale(0.9167)">
+        <g stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 48a36 36 0 0 1 36-36 39 39 0 0 1 26.96 10.96L84 32" />
+            <path d="M84 12v20H64" />
+            <path d="M84 48a36 36 0 0 1-36 36 39 39 0 0 1-26.96-10.96L12 64" />
+            <path d="M12 84V64h20" />
+        </g>
+        <g fill="#fff">
+            <rect x="34" y="37.5" width="28" height="7" rx="3.5" />
+            <rect x="37.5" y="46" width="21" height="7" rx="3.5" opacity=".78" />
+            <rect x="41" y="54.5" width="14" height="7" rx="3.5" opacity=".55" />
+        </g>
+    </g>
+</svg>
