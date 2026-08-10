@@ -92,17 +92,18 @@ const fade = (t) => `rgba(${t}, 0)`;
  */
 export const brand = {
     font: { family: "Space Grotesk", url: "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" },
-    // The project mark - three rack units - as its app tile. `bare` because the tile carries its
-    // own rounded gradient background; the badge's default white tile would box it twice.
-    badge: { src: new URL("../../../assets/logo/logo-tile.svg", import.meta.url).href, bare: true },
+    // The project mark - three rack units - as its light app tile (white ground, mark on the brand
+    // ramp). `bare` because the tile carries its own rounded background; the badge's default white
+    // tile would box it twice.
+    badge: { src: new URL("../../../assets/logo/logo-tile-light.svg", import.meta.url).href, bare: true },
     accent: "24, 108, 150",
     eyebrow: "BACKUPKIT",
     texture: { dots: 0.12, grain: 0.06 },
-    // The tile shares the hero's own gradient, so it needs a rim and a shadow to sit ON the hero
-    // rather than dissolve into it. The 10px radius tracks the tile SVG's own 23% corner at 44px.
+    // The white tile carries its own contrast against the gradient, so it needs only a shadow to
+    // lift it off the hero. The 10px radius tracks the tile SVG's own 23% corner at 44px.
     css: `
         .badge.bare { height: 44px; border-radius: 10px;
-            box-shadow: 0 6px 18px rgba(6, 26, 48, .38), 0 0 0 1.5px rgba(255, 255, 255, .3); }
+            box-shadow: 0 6px 18px rgba(6, 26, 48, .3); }
         .badge.bare img { border-radius: 10px; }
     `,
 };
