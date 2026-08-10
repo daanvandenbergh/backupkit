@@ -13,6 +13,9 @@
         },
         "./package.json": "./package.json"
     },
+    "bin": {
+        "backupkit": "dist/cli/main.js"
+    },
     "files": [
         "dist"
     ],
@@ -20,7 +23,7 @@
         "access": "public"
     },
     "scripts": {
-        "build": "tsc -p tsconfig.build.json",
+        "build": "tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs');for(const f of ['ssh/internal/askpass.sh','snapshots/internal/backupkit-remote.sh']){fs.mkdirSync('dist/'+require('node:path').dirname(f),{recursive:true});fs.copyFileSync('src/'+f,'dist/'+f);}fs.chmodSync('dist/cli/main.js',0o755)\"",
         "test": "vitest run --passWithNoTests",
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
