@@ -16,6 +16,7 @@ import {
     LAUNCHD_LABEL,
     LAUNCHD_PLIST_PATH,
     launchdPlist,
+    logDirOf,
     MACOS_LOG_DIR,
     NEWSYSLOG_CONF,
     NEWSYSLOG_CONF_PATH,
@@ -68,6 +69,12 @@ async function action(deps: CliDeps, bin: string, args: string[]): Promise<numbe
 /** Write the unit definition (+ enable on systemd, + newsyslog conf on macOS). Idempotent: rewrite + reload. */
 async function install(deps: CliDeps, configArg?: string): Promise<number> {
     const { config } = deps.loadContext(configArg);
+    // A configured logging.file needs its directory to exist before the daemon
+    // writes its first line - on Linux it is also a ReadWritePaths member.
+    const logDir = logDirOf(config);
+    if (logDir !== null) {
+        deps.files.mkdir(logDir, 0o750);
+    }
     if (deps.platform === "darwin") {
         deps.files.mkdir(MACOS_LOG_DIR, 0o750);
         deps.files.write(

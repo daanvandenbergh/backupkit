@@ -78,6 +78,37 @@ export interface BackupkitDeps {
     logger?: Logger;
 }
 
+/**
+ * Build the `logging.file` append sink, made fail-safe: a log line must never
+ * be able to kill the process that emits it. The daemon can lose write access
+ * to its log file for reasons that have nothing to do with backups (a stale
+ * systemd `ReadWritePaths` after the log path moved, a full or remounted
+ * filesystem), and an unguarded `appendFileSync` would throw out of whatever
+ * call site happened to log - including out of the scheduler's own error
+ * handler, ending the daemon. On the first failure the sink reports once on
+ * stderr (which journald/launchd still capture) and disables itself.
+ */
+function fileSinkFor(path: string): (line: string) => void {
+    let live = true;
+    return (line): void => {
+        if (!live) {
+            return;
+        }
+        try {
+            appendFileSync(path, line + "\n");
+        } catch (error) {
+            live = false;
+            // Written straight to stderr, not through the logger: routing this
+            // through Logger would re-enter the sink that just failed.
+            process.stderr.write(
+                `backupkit: logging.file ${path} is not writable (${sanitize(
+                    error instanceof Error ? error.message : String(error),
+                )}) - file logging disabled for this process; stdout/stderr logging continues\n`,
+            );
+        }
+    };
+}
+
 /** The default runtime directory for the given identity (spec section 4). */
 function defaultRuntimeDir(env: Record<string, string | undefined>, euid: number | null, home: string): string {
     if (euid === 0) {
@@ -234,10 +265,7 @@ export class Backupkit {
             new Logger({
                 level: config.logging.level,
                 now: this.deps.now,
-                fileSink:
-                    config.logging.file === null
-                        ? undefined
-                        : (line): void => appendFileSync(config.logging.file as string, line + "\n"),
+                fileSink: config.logging.file === null ? undefined : fileSinkFor(config.logging.file),
             });
         this.backoff = new BackoffTracker(this.log);
         this.runtimeDir =

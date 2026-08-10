@@ -133,6 +133,8 @@ export interface FakeDeps {
     stops: (() => Promise<void>)[];
     /** config args passed to loadContext, in order (undefined entries preserved). */
     loadedWith: (string | undefined)[];
+    /** Every directory creation requested through `files.mkdir`, in order. */
+    mkdirs: { path: string; mode: number | undefined }[];
 }
 
 /** Options for `fakeDeps`. */
@@ -164,6 +166,7 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
         options.config ?? makeConfig({ configPath: "/etc/backupkit/config.jsonc", stateDir: "/var/lib/backupkit", targets: [makeTarget()] });
     const stops: (() => Promise<void>)[] = [];
     const loadedWith: (string | undefined)[] = [];
+    const mkdirs: { path: string; mode: number | undefined }[] = [];
     const deps: CliDeps = {
         stdout: (line) => out.push(line),
         stderr: (line) => err.push(line),
@@ -190,7 +193,9 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
             remove: (path) => {
                 fileMap.delete(path);
             },
-            mkdir: () => undefined,
+            mkdir: (path, mode) => {
+                mkdirs.push({ path, mode });
+            },
         },
         nodeBin: "/usr/bin/node",
         cliPath: "/opt/backupkit/dist/cli/main.js",
@@ -207,7 +212,7 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
             stops.push(stop);
         },
     };
-    return { deps, out, err, execCalls, fileMap, engine, config, stops, loadedWith };
+    return { deps, out, err, execCalls, fileMap, engine, config, stops, loadedWith, mkdirs };
 }
 
 /** A minimal TargetRunReport fixture. */

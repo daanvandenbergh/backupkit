@@ -15,7 +15,7 @@ import {
     NEWSYSLOG_CONF_PATH,
     SYSTEMD_UNIT_PATH,
 } from "../internal/service/units.js";
-import { fakeDeps, makeExecResult } from "./fakes.js";
+import { fakeDeps, makeConfig, makeExecResult, makeTarget } from "./fakes.js";
 
 describe("verb parsing and root requirement", () => {
     it("rejects a missing or unknown verb with exit 64 listing the verbs", async () => {
@@ -57,6 +57,23 @@ describe("Linux lifecycle", () => {
         expect(h.execCalls[0].options?.stdio).toBe("inherit");
         expect(h.out).toEqual(["installed - start it: backupkit service start"]);
         expect(h.fileMap.has(NEWSYSLOG_CONF_PATH)).toBe(false);
+        // No logging.file in the default fixture: nothing extra to create.
+        expect(h.mkdirs).toEqual([]);
+    });
+
+    // Without both halves the daemon crash-loops: ProtectSystem=strict denies
+    // the write, and the very first log line throws out of preflight.
+    it("install grants and creates the logging.file directory", async () => {
+        const config = makeConfig({
+            configPath: "/etc/backupkit/config.jsonc",
+            stateDir: "/var/lib/backupkit",
+            targets: [makeTarget()],
+        });
+        config.logging = { level: "info", file: "/var/log/backupkit/backupkit.log" };
+        const h = fakeDeps({ config });
+        expect(await main(["service", "install"], h.deps)).toBe(0);
+        expect(h.mkdirs).toEqual([{ path: "/var/log/backupkit", mode: 0o750 }]);
+        expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"/var/log/backupkit"');
     });
 
     it("install is idempotent: a second install rewrites and reloads again", async () => {

@@ -26,6 +26,18 @@ export interface RetryPolicy {
 export const CONTROL_RETRY_POLICY: RetryPolicy = { attempts: 3, baseDelayMs: 2000, capMs: 8000 };
 
 /**
+ * The single-attempt policy for remote operations that are NOT idempotent -
+ * the lock-acquire `mkdir` and every `mv` rename. Retrying those is unsafe in a
+ * way retrying a read is not: the transport can fail AFTER the remote command
+ * already succeeded, so a second attempt re-executes a mutation that has
+ * already happened. For the lock `mkdir` that is fatal (the re-sent mkdir hits
+ * EEXIST against the lock this process just won, and a lock with no creation
+ * marker is held forever); for a `mv` it turns a completed rename into a
+ * spurious run failure. The scheduler's next tick is the retry for these.
+ */
+export const NO_RETRY_POLICY: RetryPolicy = { attempts: 1, baseDelayMs: 0, capMs: 0 };
+
+/**
  * The transfer policy for a target's configured attempt count (1-10, default
  * 5): 15 s base doubling to a 300 s cap. The delays are fixed by design -
  * `attempts` is the only knob.

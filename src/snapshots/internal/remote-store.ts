@@ -14,6 +14,7 @@ import type { ExecResult } from "../../exec/exec.js";
 import { SnapshotStoreError } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
+import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
 import { formatSnapshotName, isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
 import { withLockScope, type LockBackend, type LockInspection } from "./lock.js";
@@ -28,8 +29,18 @@ const LOCK_TTL_MS = 24 * 60 * 60 * 1000;
  * The seam to `runRemote`: one remote command argv in, its `ExecResult` out.
  * `openStore` binds the real `runRemote` (remote, ssh options, control retry);
  * tests inject a recorder.
+ *
+ * `options.retryPolicy` overrides the transport retry for ONE call. Every
+ * mutating command below passes {@link NO_RETRY_POLICY} through it - see that
+ * constant for why re-sending a mutation is unsafe.
  */
-export type RemoteRunner = (argv: readonly string[]) => Promise<ExecResult>;
+export type RemoteRunner = (
+    argv: readonly string[],
+    options?: { retryPolicy?: RetryPolicy },
+) => Promise<ExecResult>;
+
+/** Per-call runner options that disable the transport retry (non-idempotent commands). */
+const NO_RETRY = { retryPolicy: NO_RETRY_POLICY } as const;
 
 /** Throw unless `name` is a valid snapshot name (the codec form). */
 function assertSnapshotName(name: string): void {
@@ -40,8 +51,9 @@ function assertSnapshotName(name: string): void {
 
 /**
  * Remote lock primitives over the jailed command surface: plain `mkdir --`
- * (its non-zero exit is the EEXIST contention signal - deliberately never
- * retry-wrapped beyond `runRemote`'s transport retry), a timestamp-named
+ * (its non-zero exit is the EEXIST contention signal - issued with
+ * {@link NO_RETRY_POLICY} so `runRemote`'s transport retry can never re-send a
+ * mkdir that already succeeded on the remote), a timestamp-named
  * marker directory inside the lock (`mkdir -p -- <lock>/<snapshotName>`, the
  * only meta a mkdir/find-only surface can record), `find` to read it back,
  * and a 24 h TTL staleness predicate.
@@ -63,9 +75,15 @@ class RemoteLockBackend implements LockBackend {
         this.now = now;
     }
 
-    /** Plain (non `-p`) `mkdir -- <lock>`: exit 0 = created, anything else = exists. */
+    /**
+     * Plain (non `-p`) `mkdir -- <lock>`: exit 0 = created, anything else =
+     * exists. Never transport-retried: a blip AFTER the remote mkdir succeeded
+     * would re-send it, the second attempt would see EEXIST against this
+     * process's own fresh lock, and the resulting markerless lock is held
+     * forever (see `inspect`). One attempt; the next scheduler tick retries.
+     */
     async tryAcquire(): Promise<boolean> {
-        const result = await this.runner(["mkdir", "--", this.lockPath]);
+        const result = await this.runner(["mkdir", "--", this.lockPath], NO_RETRY);
         return result.exitCode === 0;
     }
 
@@ -155,9 +173,18 @@ export class RemoteSnapshotStore implements SnapshotStore {
         this.now = now;
     }
 
-    /** Run one remote command and throw `SnapshotStoreError` on a non-zero exit. */
-    private async run(argv: readonly string[], what: string): Promise<ExecResult> {
-        const result = await this.runner(argv);
+    /**
+     * Run one remote command and throw `SnapshotStoreError` on a non-zero exit.
+     * `options` forwards a per-call retry override; every rename below passes
+     * {@link NO_RETRY_POLICY} so a transport blip cannot re-send a `mv` that
+     * already renamed on the remote.
+     */
+    private async run(
+        argv: readonly string[],
+        what: string,
+        options?: { retryPolicy?: RetryPolicy },
+    ): Promise<ExecResult> {
+        const result = await this.runner(argv, options);
         if (result.exitCode !== 0) {
             const tail = sanitize(result.stderr).slice(-500);
             throw new SnapshotStoreError(
@@ -224,6 +251,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
             await this.run(
                 ["mv", "--", posix.join(this.root, keep), posix.join(this.root, claimed)],
                 "partial claim",
+                NO_RETRY,
             );
         }
         return { resumed: true };
@@ -242,6 +270,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
         await this.run(
             ["mv", "--", posix.join(this.root, `${name}.partial`), posix.join(this.root, name)],
             "promote",
+            NO_RETRY,
         );
     }
 
@@ -259,7 +288,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
             throw new SnapshotStoreError(`refusing to delete the newest complete snapshot ${name}`);
         }
         const deleting = posix.join(this.root, `${name}.deleting`);
-        await this.run(["mv", "--", posix.join(this.root, name), deleting], "delete phase 1 (rename)");
+        await this.run(["mv", "--", posix.join(this.root, name), deleting], "delete phase 1 (rename)", NO_RETRY);
         await this.run(["rm", "-rf", "--", deleting], "delete phase 2 (recursive rm)");
     }
 

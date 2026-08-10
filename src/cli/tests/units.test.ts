@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import {
     hasAliasRemote,
     launchdPlist,
+    logDirOf,
     MACOS_LOG_FILES,
     NEWSYSLOG_CONF,
     readWritePathsOf,
@@ -95,6 +96,33 @@ describe("readWritePathsOf / hasAliasRemote", () => {
             ],
         });
         expect(readWritePathsOf(config)).toEqual(["/data/archive", "/var/lib/backupkit", "/run/backupkit", "/etc/backupkit"]);
+    });
+
+    // A logging.file outside every other ReadWritePaths member is unwritable
+    // under ProtectSystem=strict, and the daemon's first log line then throws
+    // out of preflight - a crash loop systemd never gives up on
+    // (StartLimitIntervalSec=0). The write-set must include its directory.
+    it("includes the logging.file directory so the sandbox does not block the daemon's own log", () => {
+        const config = makeConfig({
+            configPath: "/etc/backupkit/config.jsonc",
+            stateDir: "/var/lib/backupkit",
+            targets: [makeTarget()],
+        });
+        config.logging = { level: "info", file: "/var/log/backupkit/backupkit.log" };
+        expect(readWritePathsOf(config)).toEqual([
+            "/data/archive",
+            "/var/lib/backupkit",
+            "/run/backupkit",
+            "/etc/backupkit",
+            "/var/log/backupkit",
+        ]);
+        expect(logDirOf(config)).toBe("/var/log/backupkit");
+    });
+
+    it("adds nothing when no log file is configured", () => {
+        const config = makeConfig({ configPath: "/c/config.jsonc", stateDir: "/s", targets: [makeTarget()] });
+        expect(logDirOf(config)).toBeNull();
+        expect(readWritePathsOf(config)).not.toContain(".");
     });
 
     it("detects alias remotes from the resolved remotes record", () => {

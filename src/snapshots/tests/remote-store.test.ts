@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExecResult } from "../../exec/exec.js";
 import { LockHeldError, SnapshotStoreError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
+import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
 import type { ResolvedRemote } from "../../shared/types.js";
 import { FakeBinDir } from "../../ssh/tests/fake-bin.js";
 import { LocalSnapshotStore } from "../internal/local-store.js";
@@ -39,12 +40,15 @@ function findOutput(dir: string, names: string[]): string {
 /** A recording fake runner: `handler` maps each argv to a result override (default success). */
 function fakeRunner(handler: (argv: readonly string[], call: number) => Partial<ExecResult> | undefined = () => ({})) {
     const calls: string[][] = [];
-    const runner: RemoteRunner = async (argv) => {
+    /** The per-call retry override each invocation carried (undefined = the runner's default policy). */
+    const policies: (RetryPolicy | undefined)[] = [];
+    const runner: RemoteRunner = async (argv, options) => {
         const over = handler(argv, calls.length);
         calls.push([...argv]);
+        policies.push(options?.retryPolicy);
         return result(over);
     };
-    return { runner, calls };
+    return { runner, calls, policies };
 }
 
 /** Handler answering `find` on the store root with the given entry names, everything else success. */
@@ -369,6 +373,33 @@ describe("RemoteSnapshotStore", () => {
             await expect(store.withLock(async () => "never")).rejects.toBeInstanceOf(LockHeldError);
         });
 
+        // The wedge this guards: runRemote's transport retry re-sends the whole
+        // ssh command, so a blip AFTER the remote mkdir succeeded would re-send
+        // it, hit EEXIST against this process's own fresh lock, find no marker
+        // (writeMeta never ran) and treat it as held - forever, since a
+        // markerless lock has no TTL. Every mutation must therefore be issued
+        // with NO_RETRY_POLICY; only reads and idempotent commands may retry.
+        it("issues every mutating remote command with NO_RETRY_POLICY, and reads with the default", async () => {
+            const { runner, calls, policies } = fakeRunner(rootListing([OLD, MID, "2026-08-07T000000Z.partial"]));
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await store.withLock(async () => {
+                await store.claimPartial(NEW);
+                await store.remove(OLD);
+            });
+            // mkdir -p (root/marker), find, df and rm -rf are idempotent or
+            // read-only: they keep the control retry. mkdir -- and mv -- do not.
+            const MUTATING = ["mkdir --", "mv --"];
+            const commands = calls.map((argv) => argv.slice(0, 2).join(" "));
+            const unretried = commands.filter((_, index) => policies[index] === NO_RETRY_POLICY);
+            const retried = commands.filter((_, index) => policies[index] === undefined);
+
+            expect(policies.filter((policy) => policy !== undefined && policy !== NO_RETRY_POLICY)).toEqual([]);
+            expect(unretried).toEqual(commands.filter((command) => MUTATING.includes(command)));
+            expect(retried).toEqual(commands.filter((command) => !MUTATING.includes(command)));
+            // Vacuity guard: the run really exercised all three mutations.
+            expect(unretried).toEqual(["mkdir --", "mv --", "mv --"]);
+        });
+
         it("releases the lock when fn throws, and rethrows fn's error", async () => {
             const { runner, calls } = fakeRunner();
             const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
@@ -431,6 +462,39 @@ describe("openStore", () => {
             expect(calls[1].argv.at(-1)).toBe(
                 "'find' '/srv/backups/web' '-maxdepth' '1' '-mindepth' '1' '-print0'",
             );
+        });
+
+        // The end-to-end shape of the wedge: a transport blip on the lock
+        // mkdir must NOT put a second mkdir on the wire, because the first one
+        // may already have created the lock on the remote. One attempt, one
+        // failed run, and the next tick retries against a lock this process can
+        // still distinguish from its own.
+        it("never re-sends the lock mkdir when the transport blips, even with a retrying store policy", async () => {
+            const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+            const store = openStore(
+                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } },
+                {
+                    log,
+                    ssh: {
+                        sshBin,
+                        context: "unattended",
+                        authSock: null,
+                        env: fake.env({
+                            ssh: [
+                                { exit: 0 },
+                                { exit: 255, stderr: "kex_exchange_identification: Connection closed by remote host" },
+                            ],
+                        }),
+                        // A RETRYING store-wide policy: the per-call NO_RETRY on
+                        // the mkdir must win over it.
+                        retryPolicy: { attempts: 3, baseDelayMs: 1, capMs: 1 },
+                    },
+                },
+            );
+            await expect(store.withLock(async () => "never runs")).rejects.toThrow(/ssh myserver failed \(exit 255\)/);
+            const calls = await fake.calls();
+            const commands = calls.map((call) => call.argv.at(-1));
+            expect(commands).toEqual(["'mkdir' '-p' '--' '/srv/backups/web'", "'mkdir' '--' '/srv/backups/web/.backupkit.lock'"]);
         });
     });
 });

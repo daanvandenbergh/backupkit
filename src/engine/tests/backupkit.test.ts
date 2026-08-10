@@ -8,9 +8,10 @@
 
 import { exec } from "../../exec/exec.js";
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Backupkit } from "../backupkit.js";
 import { ConfigError, TransferError } from "../../shared/errors.js";
@@ -633,5 +634,47 @@ describe("Backupkit", () => {
         fixture.clock.now = new Date("2026-08-10T12:06:30Z");
         await fixture.kit.run({ force: true });
         expect(estimateCalls).toBe(3);
+    });
+
+    // An unwritable logging.file must never be fatal. It becomes unwritable for
+    // reasons unrelated to backups - a stale systemd ReadWritePaths after the
+    // log path moved, a full or remounted filesystem - and an unguarded
+    // appendFileSync would throw out of whatever happened to log, including out
+    // of the scheduler's own error handler, ending the daemon.
+    it("an unwritable logging.file disables file logging instead of killing the process", async () => {
+        const root = await mkdtemp(join(tmpdir(), "backupkit-logsink-"));
+        try {
+            const configPath = join(root, "config.jsonc");
+            await writeFile(configPath, "{}\n", { mode: 0o600 });
+            const config = makeConfig({
+                configPath,
+                stateDir: join(root, "state"),
+                targets: [makeTarget()],
+            });
+            // A path whose parent does not exist: appendFileSync throws ENOENT.
+            config.logging = { level: "info", file: join(root, "no-such-dir", "backupkit.log") };
+            config.warnings = ["a config warning, logged from the constructor"];
+
+            const written: string[] = [];
+            const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+                written.push(String(chunk));
+                return true;
+            });
+            try {
+                // Without the guard this constructor throws: the warning is
+                // logged before the constructor returns.
+                const kit = new Backupkit(config, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
+                expect(kit).toBeInstanceOf(Backupkit);
+            } finally {
+                spy.mockRestore();
+            }
+
+            const notice = written.filter((line) => line.includes("logging.file"));
+            expect(notice).toHaveLength(1);
+            expect(notice[0]).toContain("is not writable");
+            expect(notice[0]).toContain("file logging disabled for this process");
+        } finally {
+            await rm(root, { recursive: true, force: true });
+        }
     });
 });

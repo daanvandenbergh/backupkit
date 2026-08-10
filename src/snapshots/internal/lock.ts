@@ -7,7 +7,11 @@
  * (`LockHeldError`) - only the primitives differ (fs vs `runRemote`), injected
  * via `LockBackend`. Release is structural: `withLockScope` releases in
  * `finally`, so leaking a lock is unrepresentable. The lock-acquire mkdir is
- * deliberately never retry-wrapped: EEXIST is its contention signal.
+ * deliberately never retry-wrapped at ANY layer: EEXIST is its contention
+ * signal, so a re-sent mkdir would read this process's own fresh lock as
+ * contention. The local backend gets that for free (one `fs.mkdir` call); the
+ * remote backend enforces it by passing `NO_RETRY_POLICY` through its runner,
+ * because `runRemote`'s transport retry would otherwise re-send the command.
  */
 
 import { readFile } from "node:fs/promises";

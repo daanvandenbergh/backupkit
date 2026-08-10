@@ -97,13 +97,16 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
     const root = posix.join(target.dst.path, target.name);
     return new RemoteSnapshotStore(
         root,
-        (argv) =>
+        // A per-call retryPolicy (the store's NO_RETRY on every mutating
+        // command) always wins over the test-only store-wide override: it is a
+        // correctness requirement, not a knob.
+        (argv, callOptions) =>
             runRemote(remote, argv, {
                 sshBin: ssh.sshBin,
                 context: ssh.context,
                 authSock: ssh.authSock,
                 env: ssh.env,
-                retryPolicy: ssh.retryPolicy,
+                retryPolicy: callOptions?.retryPolicy ?? ssh.retryPolicy,
                 log: deps.log,
             }),
         deps.log,

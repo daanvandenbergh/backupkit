@@ -52,7 +52,15 @@ export function hasAliasRemote(config: ResolvedConfig): boolean {
 
 /**
  * The unit's ReadWritePaths: every local destination root, the stateDir, the
- * root runtime dir, and the config directory - deduplicated, config order.
+ * root runtime dir, the config directory, and - when `logging.file` is
+ * configured - its directory. Deduplicated, config order.
+ *
+ * This set must cover EVERY path the daemon writes: `ProtectSystem=strict`
+ * makes the rest of the filesystem read-only, so a missing member is not a
+ * hardening gap but a crash loop (`Restart=on-failure` with
+ * `StartLimitIntervalSec=0` retries forever and never marks the unit failed).
+ * The logging.file directory is the one that is easy to forget, because the
+ * writer lives in the engine, not here - see `logDirOf`.
  */
 export function readWritePathsOf(config: ResolvedConfig): string[] {
     const paths = new Set<string>();
@@ -64,7 +72,20 @@ export function readWritePathsOf(config: ResolvedConfig): string[] {
     paths.add(config.stateDir);
     paths.add(ROOT_RUNTIME_DIR);
     paths.add(dirname(config.configPath));
+    const logDir = logDirOf(config);
+    if (logDir !== null) {
+        paths.add(logDir);
+    }
     return [...paths];
+}
+
+/**
+ * The directory holding `logging.file`, or null when no log file is
+ * configured. `install` creates it so the daemon's very first line has
+ * somewhere to land; `readWritePathsOf` grants it to the sandbox.
+ */
+export function logDirOf(config: ResolvedConfig): string | null {
+    return config.logging.file === null ? null : dirname(config.logging.file);
 }
 
 /** Inputs for the systemd unit builder. */
