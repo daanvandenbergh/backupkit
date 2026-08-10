@@ -1,0 +1,241 @@
+#!/bin/sh
+# backupkit-remote - the push-mode forced-command jail (spec section 4).
+#
+# Installed on the archive server (e.g. /usr/local/bin/backupkit-remote) and
+# wired into authorized_keys by `backupkit check` as:
+#
+#   restrict,command="/usr/local/bin/backupkit-remote <jailRoot>" ssh-ed25519 AAAA...
+#
+# Reads $SSH_ORIGINAL_COMMAND and permits EXACTLY:
+#   - rsync --server invocations whose single path operand resolves under
+#     <jailRoot>/ (absolute-prefix check, no ".." components), and
+#   - the canonical single-quoted lifecycle argv forms backupkit's remote
+#     store issues: `mkdir -p --`, `mkdir --`,
+#     `find <p> -maxdepth 1 -mindepth 1 -print0`, `mv --`, `rm -rf --`,
+#     `df -Pk --`, and `rsync --version`, where every path operand is under
+#     <jailRoot>/ and every leaf component is a snapshot name
+#     ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z), its .partial/.deleting form,
+#     .backupkit.lock, or a target-name-charset component.
+#
+# Everything else exits 1. There is no eval anywhere: validated operands are
+# exec'd directly, so no shell ever re-parses attacker-controlled text.
+
+set -f
+unset IFS
+
+# Reject the command and exit 1. Never echoes the command back.
+fail() {
+    echo "backupkit-remote: rejected" >&2
+    exit 1
+}
+
+ROOT=$1
+case $ROOT in
+    /*) ;;
+    *) fail ;;
+esac
+ROOT=${ROOT%/}
+[ -n "$ROOT" ] || fail
+case $ROOT in
+    *\'* | *\\* | *..*) fail ;;
+esac
+
+CMD=$SSH_ORIGINAL_COMMAND
+[ -n "$CMD" ] || fail
+NL='
+'
+case $CMD in
+    *"$NL"*) fail ;;
+esac
+
+# True when $1 is a snapshot name (the single codec form).
+is_snap() {
+    case $1 in
+        [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) return 0 ;;
+    esac
+    return 1
+}
+
+# True when leaf component $1 is permitted: the snapshot regex family
+# (including .partial/.deleting forms), .backupkit.lock, or a
+# target-name-charset component ([a-z0-9][a-z0-9._-]*, max 64).
+check_component() {
+    comp=$1
+    [ -n "$comp" ] || return 1
+    if [ "$comp" = ".backupkit.lock" ]; then
+        return 0
+    fi
+    compbase=$comp
+    case $comp in
+        *.partial) compbase=${comp%.partial} ;;
+        *.deleting) compbase=${comp%.deleting} ;;
+    esac
+    if is_snap "$compbase"; then
+        return 0
+    fi
+    case $comp in
+        *[!a-z0-9._-]*) return 1 ;;
+        [!a-z0-9]*) return 1 ;;
+    esac
+    [ ${#comp} -le 64 ]
+}
+
+# True when lifecycle path operand $1 is strictly under $ROOT with every
+# leaf component permitted by check_component.
+check_lifecycle_path() {
+    lpath=$1
+    case $lpath in
+        *\'* | *\\*) return 1 ;;
+    esac
+    case $lpath in
+        "$ROOT"/?*) ;;
+        *) return 1 ;;
+    esac
+    lrest=${lpath#"$ROOT"/}
+    while [ -n "$lrest" ]; do
+        case $lrest in
+            */*)
+                lcomp=${lrest%%/*}
+                lrest=${lrest#*/}
+                ;;
+            *)
+                lcomp=$lrest
+                lrest=
+                ;;
+        esac
+        check_component "$lcomp" || return 1
+    done
+    return 0
+}
+
+# True when rsync path operand $1 is strictly under $ROOT with no ".." or
+# empty components (the rsync destination check: absolute prefix, no escape).
+check_rsync_path() {
+    rpath=${1%/}
+    case $rpath in
+        *\'* | *\\*) return 1 ;;
+    esac
+    case $rpath in
+        "$ROOT"/?*) ;;
+        *) return 1 ;;
+    esac
+    rrest=${rpath#"$ROOT"/}
+    while [ -n "$rrest" ]; do
+        case $rrest in
+            */*)
+                rcomp=${rrest%%/*}
+                rrest=${rrest#*/}
+                ;;
+            *)
+                rcomp=$rrest
+                rrest=
+                ;;
+        esac
+        case $rcomp in
+            "" | ..) return 1 ;;
+        esac
+    done
+    return 0
+}
+
+# Validate an IFS-split "rsync --server ..." argv: option tokens only until
+# the lone ".", then exactly one path operand under the jail root. Option
+# values may never carry an absolute path or a ".." (the one exception is
+# --link-dest=../<snapshotName>, which our client legitimately sends and
+# which stays inside the jail by construction).
+validate_rsync() {
+    [ "$1" = "rsync" ] || return 1
+    [ "$2" = "--server" ] || return 1
+    shift 2
+    while [ $# -gt 0 ]; do
+        if [ "$1" = "." ]; then
+            shift
+            [ $# -eq 1 ] || return 1
+            check_rsync_path "$1"
+            return $?
+        fi
+        case $1 in
+            -*) ;;
+            *) return 1 ;;
+        esac
+        case $1 in
+            *\'* | *\"* | *\`* | *\$* | *\;* | *\\* | *\** | *\[*) return 1 ;;
+        esac
+        case $1 in
+            --link-dest=*)
+                linkdest=${1#--link-dest=}
+                case $linkdest in
+                    ../*) is_snap "${linkdest#../}" || return 1 ;;
+                    *) return 1 ;;
+                esac
+                ;;
+            *=/*) return 1 ;;
+            *..*) return 1 ;;
+        esac
+        shift
+    done
+    return 1
+}
+
+case $CMD in
+    "'rsync' '--version'" | "rsync --version")
+        exec rsync --version
+        ;;
+    "'mkdir' '-p' '--' '"*"'")
+        P=${CMD#"'mkdir' '-p' '--' '"}
+        P=${P%"'"}
+        case $P in *\'*) fail ;; esac
+        check_lifecycle_path "$P" || fail
+        exec mkdir -p -- "$P"
+        ;;
+    "'mkdir' '--' '"*"'")
+        P=${CMD#"'mkdir' '--' '"}
+        P=${P%"'"}
+        case $P in *\'*) fail ;; esac
+        check_lifecycle_path "$P" || fail
+        exec mkdir -- "$P"
+        ;;
+    "'find' '"*"' '-maxdepth' '1' '-mindepth' '1' '-print0'")
+        P=${CMD#"'find' '"}
+        P=${P%"' '-maxdepth' '1' '-mindepth' '1' '-print0'"}
+        case $P in *\'*) fail ;; esac
+        check_lifecycle_path "$P" || fail
+        exec find "$P" -maxdepth 1 -mindepth 1 -print0
+        ;;
+    "'mv' '--' '"*"' '"*"'")
+        REST=${CMD#"'mv' '--' '"}
+        REST=${REST%"'"}
+        A=${REST%%"' '"*}
+        B=${REST#*"' '"}
+        case $A in *\'*) fail ;; esac
+        case $B in *\'*) fail ;; esac
+        check_lifecycle_path "$A" || fail
+        check_lifecycle_path "$B" || fail
+        exec mv -- "$A" "$B"
+        ;;
+    "'rm' '-rf' '--' '"*"'")
+        P=${CMD#"'rm' '-rf' '--' '"}
+        P=${P%"'"}
+        case $P in *\'*) fail ;; esac
+        check_lifecycle_path "$P" || fail
+        exec rm -rf -- "$P"
+        ;;
+    "'df' '-Pk' '--' '"*"'")
+        P=${CMD#"'df' '-Pk' '--' '"}
+        P=${P%"'"}
+        case $P in *\'*) fail ;; esac
+        check_lifecycle_path "$P" || fail
+        exec df -Pk -- "$P"
+        ;;
+    "rsync --server "*)
+        # Word-split the raw command (set -f: no globbing, and the split
+        # results are never variable-expanded again), validate, then exec the
+        # argv directly - no shell re-parse, no eval.
+        set -- $CMD
+        validate_rsync "$@" || fail
+        exec "$@"
+        ;;
+    *)
+        fail
+        ;;
+esac
