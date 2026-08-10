@@ -236,6 +236,9 @@ export class Backupkit {
     /** The pending `start()` loop promise. */
     private startPromise: Promise<void> | null = null;
 
+    /** Set by `stop()`; makes a stop that lands before the scheduler exists still prevent the loop. */
+    private stopRequested = false;
+
     /** Abort controller for the in-flight transfer during graceful shutdown. */
     private abortController: AbortController | null = null;
 
@@ -669,7 +672,13 @@ export class Backupkit {
         return { startedAt, finishedAt: this.deps.now().toISOString(), targets: reports };
     }
 
-    /** Foreground scheduler loop; resolves after `stop()` completes. */
+    /**
+     * Foreground scheduler loop; resolves after `stop()` completes. A `stop()`
+     * that arrives BEFORE the loop exists (during preflight or backoff
+     * rehydration - both do real I/O, and the daemon wires its signal handlers
+     * before either) still counts: it would otherwise be a no-op that leaves the
+     * process ignoring SIGTERM and then starting backups anyway.
+     */
     async start(): Promise<void> {
         if (this.startPromise !== null) {
             return this.startPromise;
@@ -677,6 +686,13 @@ export class Backupkit {
         await this.preflight();
         for (const target of this.config.targets) {
             await this.ensureBackoffState(target);
+        }
+        if (this.stopRequested) {
+            // Consumed here so a later start() is unaffected - the request
+            // applies to the one startup it interrupted, nothing more.
+            this.stopRequested = false;
+            this.log.info("stop requested during startup - not starting the scheduler");
+            return;
         }
         this.abortController = new AbortController();
         const signal = this.abortController.signal;
@@ -693,6 +709,7 @@ export class Backupkit {
             this.scheduler = null;
             this.startPromise = null;
             this.abortController = null;
+            this.stopRequested = false;
         });
         return this.startPromise;
     }
@@ -704,6 +721,7 @@ export class Backupkit {
      * once the loop has exited. Second-signal semantics belong to the CLI.
      */
     async stop(): Promise<void> {
+        this.stopRequested = true;
         const pending = this.startPromise;
         this.scheduler?.stop();
         this.abortController?.abort();

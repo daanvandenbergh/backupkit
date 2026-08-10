@@ -681,6 +681,26 @@ describe("Backupkit", () => {
         expect(estimateCalls).toBe(3);
     });
 
+    // The daemon wires SIGTERM/SIGINT to stop() BEFORE preflight, and both
+    // preflight and backoff rehydration do real I/O. A stop landing in that
+    // window used to be a no-op: the process ignored the signal and then went
+    // on to start backing up, so systemd waited out TimeoutStopSec and killed it.
+    it("a stop that lands before the scheduler exists prevents the loop from starting", async () => {
+        const fixture = track(await makeKit({ deps: { tickMs: 20 } }));
+        await fixture.kit.stop();
+        await fixture.kit.start();
+        // No tick ran: nothing was backed up, and the loop resolved immediately.
+        expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z"))).toBe(false);
+        expect(existsSync(join(fixture.stateDir, "runs", "web"))).toBe(false);
+
+        // A later start is unaffected - the request applies to that one stop.
+        const started = fixture.kit.start();
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await fixture.kit.stop();
+        await started;
+        expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z"))).toBe(true);
+    });
+
     // An unwritable logging.file must never be fatal. It becomes unwritable for
     // reasons unrelated to backups - a stale systemd ReadWritePaths after the
     // log path moved, a full or remounted filesystem - and an unguarded

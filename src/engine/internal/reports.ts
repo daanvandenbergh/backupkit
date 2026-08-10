@@ -42,9 +42,16 @@ export async function writeTargetReport(stateDir: string, report: TargetRunRepor
     const tmp = `${final}.tmp`;
     await writeFile(tmp, JSON.stringify(report, null, 4) + "\n", { mode: 0o600 });
     await rename(tmp, final);
-    const kept = (await readdir(dir)).filter((name) => name.endsWith(".json")).sort();
-    for (const stale of kept.slice(0, Math.max(0, kept.length - REPORTS_KEPT))) {
-        await rm(join(dir, stale), { force: true });
+    // Both families rotate to the same depth. `.corrupt` files are kept for
+    // forensics, but they are set aside by `readTargetReports` and nothing ever
+    // removes them, so without their own pass a directory that keeps producing
+    // unparseable reports grows without bound.
+    const names = await readdir(dir);
+    for (const suffix of [".json", ".json.corrupt"]) {
+        const kept = names.filter((name) => name.endsWith(suffix)).sort();
+        for (const stale of kept.slice(0, Math.max(0, kept.length - REPORTS_KEPT))) {
+            await rm(join(dir, stale), { force: true });
+        }
     }
 }
 
