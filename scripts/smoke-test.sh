@@ -363,6 +363,9 @@ setup_paths() {
     run_id="$(date +%Y%m%d%H%M%S)-$$"
     WORK="$SCRATCH_DIR/backupkit-smoke-$run_id"
     mkdir -p -- "$WORK/keys" "$WORK/archive" "$WORK/push-src" "$WORK/state" "$WORK/restore"
+    # backupkit requires the stateDir be 0700 (it is a private dir); the umask
+    # above often makes it 0755, which the permission preflight rejects.
+    chmod 700 "$WORK/state"
 
     # $WORK holds real ed25519 PRIVATE KEYS (and, on a successful run, keys that
     # are live in two hosts' authorized_keys), and SCRATCH_DIR is whatever the
@@ -608,8 +611,16 @@ step3_push_jail() {
     bk run push-target --force
 
     log "confirming the jail rejects an arbitrary command (the escape attempt)..."
+    # IdentitiesOnly=yes + PreferredAuthentications=publickey force ssh to offer
+    # ONLY the jailed push key. Without it, ssh also offers the agent's keys and
+    # any default ~/.ssh identity - so when SOURCE and ARCHIVE are the same host
+    # (e.g. localhost), the operator's own unrestricted key in that host's
+    # authorized_keys authenticates instead, bypassing the jail and turning this
+    # into a false "ESCAPE NOT BLOCKED". The jail is what we are testing, so pin
+    # the connection to exactly the key it guards.
     local out rc
-    out=$(ssh -o BatchMode=yes -o ConnectTimeout=8 -p "$DST_PORT" -i "$KEY_PUSH" \
+    out=$(ssh -o BatchMode=yes -o ConnectTimeout=8 -o IdentitiesOnly=yes -o PreferredAuthentications=publickey \
+        -p "$DST_PORT" -i "$KEY_PUSH" \
         "$DST_USER@$DST_HOST" "id; cat /etc/passwd" 2>&1)
     rc=$?
     if [ "$rc" -eq 0 ]; then
