@@ -13,6 +13,7 @@ import { Logger } from "../../shared/logger.js";
 import type { ResolvedConfig, ResolvedTarget } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import type { RsyncStats, TransferAttempt, TransferResult } from "../../rsync/rsync.js";
+import type { UnlockOutcome } from "../../snapshots/internal/lock.js";
 import type { SnapshotStore } from "../../snapshots/store.js";
 import { newestUndeletable } from "../../snapshots/types.js";
 import { Backupkit, type BackupkitDeps } from "../backupkit.js";
@@ -53,6 +54,9 @@ export class FakeStore implements SnapshotStore {
 
     /** When set, withLock throws this instead of running fn (live contention). */
     failLock: LockHeldError | null = null;
+
+    /** What unlock() reports. */
+    unlockOutcome: UnlockOutcome = { status: "none" };
 
     /** Clock behind the newest-complete deletion floor (the real stores take one too). */
     now: () => Date = () => new Date();
@@ -112,6 +116,12 @@ export class FakeStore implements SnapshotStore {
         return this.freeInodeCount;
     }
 
+    /** Fake unlock: reports what `unlockOutcome` says and records the force flag. */
+    async unlock(force: boolean): Promise<UnlockOutcome> {
+        this.calls.push(`unlock:${force}`);
+        return this.unlockOutcome;
+    }
+
     /** Scope-shaped lock recording acquire/release; throws failLock when set. */
     async withLock<T>(fn: () => Promise<T>): Promise<T> {
         if (this.failLock !== null) {
@@ -134,7 +144,7 @@ export function makeTarget(overrides: Partial<ResolvedTarget> = {}): ResolvedTar
         name: "web",
         direction: "pull",
         remoteName: "example",
-        remoteRef: { kind: "alias", name: "example", alias: "example" },
+        remoteRef: { kind: "alias", restrictedShell: false, name: "example", alias: "example" },
         source: "/data/src",
         destination: "/data/archive",
         exclude: [],

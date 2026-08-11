@@ -148,6 +148,53 @@ async function acquire(backend: LockBackend, log: Logger): Promise<void> {
     }
 }
 
+/** What `forceUnlock` did to the lock. */
+export type UnlockOutcome =
+    /** Nothing was holding the lock. */
+    | { status: "none" }
+    /** A lock was there and is gone now; `detail` describes what it was. */
+    | { status: "removed"; detail: string }
+    /** A LIVE lock was there and was left alone (no `force`); `detail` describes its holder. */
+    | { status: "held"; detail: string };
+
+/**
+ * Clear the lock by hand - the operator escape hatch behind `backupkit unlock`.
+ *
+ * A leaked lock is not hypothetical: a remote lock has no pid to probe, so a
+ * holder killed between `mkdir` and its `finally` blocks the target until the
+ * 24 h TTL expires, and a MARKERLESS one (killed inside the acquire window)
+ * blocks it forever. Without this verb the only cure was an ssh session and an
+ * `rm -rf` typed against a live archive root - by hand, as root, next to real
+ * snapshots. This does the same thing with the store's own primitives, and
+ * refuses by default in exactly the case a human cannot check for himself.
+ *
+ * Existence is probed by ACQUIRING, not by reading: `tryAcquire` is the only
+ * primitive both backends can answer honestly (the jail's `find` cannot tell
+ * "no lock" from "unreadable lock", and guessing wrong there means deleting a
+ * live holder's lock). Winning it proves nothing held it - and holding it for
+ * the removal is exactly right, since no contender can slip in between. The
+ * meta is written first for the same reason `acquire` writes it: a crash in
+ * this window would otherwise leave the markerless lock that never expires.
+ *
+ * A live lock is left alone unless `force`, because "held" here means a real
+ * pipeline may be writing into this archive root right now, and two pipelines
+ * over one root is the single thing the lock exists to prevent. A stale one is
+ * removed without ceremony - that is what an ordinary `acquire` would do.
+ */
+export async function forceUnlock(backend: LockBackend, force: boolean): Promise<UnlockOutcome> {
+    if (await backend.tryAcquire()) {
+        await backend.writeMeta().catch(() => undefined);
+        await backend.remove();
+        return { status: "none" };
+    }
+    const inspection = await backend.inspect();
+    if (!inspection.stale && !force) {
+        return { status: "held", detail: inspection.detail };
+    }
+    await backend.remove();
+    return { status: "removed", detail: inspection.detail };
+}
+
 /**
  * Run `fn` under the destination-root lock: acquire (throwing `LockHeldError`
  * on live contention without running `fn`), then release in `finally` on every

@@ -26,7 +26,9 @@ import { listCommand } from "./internal/commands/list.js";
 import { pruneCommand } from "./internal/commands/prune.js";
 import { restoreCommand } from "./internal/commands/restore.js";
 import { runCommand } from "./internal/commands/run.js";
+import { startCommand } from "./internal/commands/start.js";
 import { statusCommand } from "./internal/commands/status.js";
+import { unlockCommand } from "./internal/commands/unlock.js";
 import type { CliDeps } from "./internal/context.js";
 import { UsageError } from "./internal/context.js";
 import { ROOT_HELP } from "./internal/help.js";
@@ -39,6 +41,7 @@ type Command = (argv: string[], deps: CliDeps) => Promise<number>;
 /** The static dispatch table (`ls` is the one alias, for `list`). */
 const COMMANDS: Record<string, Command> = {
     run: runCommand,
+    start: startCommand,
     daemon: daemonCommand,
     service: serviceCommand,
     logs: logsCommand,
@@ -47,6 +50,7 @@ const COMMANDS: Record<string, Command> = {
     status: statusCommand,
     restore: restoreCommand,
     prune: pruneCommand,
+    unlock: unlockCommand,
     check: checkCommand,
     init: initCommand,
     jail: jailCommand,

@@ -52,6 +52,7 @@ import type {
     TargetPruneReport,
     TargetRunReport,
     TargetStatus,
+    TargetUnlockReport,
 } from "./types.js";
 
 /** The exec/ spawn function shape (injectable for tests). */
@@ -395,10 +396,15 @@ export class Backupkit {
      * Ensure agent + keys + permission checks (spec section 4; alias remotes
      * skip key priming; a config with no explicit remote starts no agent).
      * Idempotent; called by run/start. Never prompts without a TTY.
+     *
+     * `serviceMode` marks this process as the installed service (what
+     * `backupkit daemon` passes): a passphrase-protected key is then a fatal
+     * startup error instead of a per-remote failure, because no unattended
+     * process can ever unlock one. Memoized with the first call's options.
      */
-    preflight(): Promise<void> {
+    preflight(options?: { serviceMode?: boolean }): Promise<void> {
         if (this.preflightPromise === null) {
-            this.preflightPromise = this.runPreflight();
+            this.preflightPromise = this.runPreflight(options?.serviceMode === true);
             this.preflightPromise.catch(() => {
                 this.preflightPromise = null;
             });
@@ -407,7 +413,7 @@ export class Backupkit {
     }
 
     /** The actual preflight work behind the memoization. */
-    private async runPreflight(): Promise<void> {
+    private async runPreflight(serviceMode: boolean): Promise<void> {
         const remotes = Object.values(this.config.remotes);
         const localRoots = [...new Set(this.config.targets.filter((t) => t.dst.kind === "local").map((t) => t.dst.path))];
         await checkFilePermissions(
@@ -432,6 +438,7 @@ export class Backupkit {
             runtimeDir: this.runtimeDir,
             log: this.log,
             hasTty: this.deps.hasTty,
+            serviceMode,
         });
         this.agentSock = keys.sock;
         this.keyFailures = keys.failures;
@@ -525,7 +532,7 @@ export class Backupkit {
     private storeFor(target: ResolvedTarget, context: SshContext, signal?: AbortSignal): SnapshotStore {
         const log = this.log.with({ target: target.name });
         return openStore(
-            { name: target.name, dst: target.dst },
+            { name: target.name, dst: target.dst, jail: target.jail },
             {
                 log,
                 now: this.deps.now,
@@ -1018,6 +1025,47 @@ export class Backupkit {
             }
         }
         return infos;
+    }
+
+    /**
+     * Clear a leaked destination lock, per target in config order.
+     *
+     * The escape hatch for the one lock state nothing else can resolve: a
+     * remote lock has no pid to probe, so a holder killed before its release
+     * blocks the target until the 24 h TTL - and one killed inside the
+     * acquire window blocks it forever. Before this verb the only cure was an
+     * ssh session and an `rm -rf` typed by hand against a live archive root.
+     *
+     * A LIVE lock is reported and left alone unless `force`: "held" means a
+     * pipeline may be writing into that root right now, and two pipelines over
+     * one root is the exact thing the lock prevents. One target's failure never
+     * stops the rest - it is reported as `failed` and the loop continues, the
+     * same shape `prune` uses.
+     *
+     * Preflights first: clearing a push target's lock is an ssh round-trip, and
+     * invariant 8 puts the permission gate before ANY network I/O.
+     */
+    async unlock(options: { targets?: string[]; force?: boolean } = {}): Promise<TargetUnlockReport[]> {
+        await this.preflight();
+        const rows: TargetUnlockReport[] = [];
+        for (const target of this.selectTargets(options.targets)) {
+            try {
+                const outcome = await this.storeFor(target, "unattended").unlock(options.force === true);
+                rows.push({
+                    target: target.name,
+                    status: outcome.status,
+                    detail: outcome.status === "none" ? "" : outcome.detail,
+                });
+                if (outcome.status === "removed") {
+                    this.log.warn("lock cleared by hand", { target: target.name, detail: outcome.detail });
+                }
+            } catch (error) {
+                const message = sanitize(error instanceof Error ? error.message : String(error));
+                this.log.error("unlock failed", { target: target.name, error: message });
+                rows.push({ target: target.name, status: "failed", detail: message });
+            }
+        }
+        return rows;
     }
 
     /** Copy one snapshot (`"latest"` accepted) to a non-existent output path; optional checksum verify pass. */

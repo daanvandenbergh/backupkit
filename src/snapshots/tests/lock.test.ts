@@ -206,6 +206,77 @@ describe("local store lock (mkdir + meta)", () => {
     });
 });
 
+describe("unlock (the operator escape hatch behind `backupkit unlock`)", () => {
+    let tmp: string;
+    let root: string;
+    let lockPath: string;
+    let store: LocalSnapshotStore;
+
+    beforeEach(async () => {
+        tmp = await mkdtemp(join(tmpdir(), "backupkit-unlock-"));
+        root = join(tmp, "web");
+        lockPath = join(root, ".backupkit.lock");
+        store = new LocalSnapshotStore(root, log);
+    });
+
+    afterEach(async () => {
+        await rm(tmp, { recursive: true, force: true });
+    });
+
+    /** Plant a lock directory with the given meta, backdated past the grace window. */
+    async function plantLock(meta: unknown): Promise<void> {
+        await mkdir(lockPath, { recursive: true });
+        await writeFile(join(lockPath, "meta"), JSON.stringify(meta));
+        await utimes(lockPath, OLD_LOCK_TIME, OLD_LOCK_TIME);
+    }
+
+    it("reports `none` when nothing is holding it, and leaves no lock behind", async () => {
+        // Existence is probed by ACQUIRING, so the probe itself must not leak
+        // the very thing this verb exists to clean up.
+        await expect(store.unlock(false)).resolves.toEqual({ status: "none" });
+        expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it("removes a stale lock without --force (a dead holder is nobody's live run)", async () => {
+        await plantLock({ pid: 999999, pidStartTime: null, hostname: hostname(), createdAt: OLD_LOCK_TIME.toISOString() });
+        const outcome = await store.unlock(false);
+        expect(outcome.status).toBe("removed");
+        expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it("refuses a LIVE lock without --force and leaves it exactly where it was", async () => {
+        // process.pid is alive by definition - the one case an operator cannot
+        // adjudicate from the message alone, so the default must not delete it.
+        await plantLock({
+            pid: process.pid,
+            pidStartTime: await pidStartTime(process.pid),
+            hostname: hostname(),
+            createdAt: new Date().toISOString(),
+        });
+        const outcome = await store.unlock(false);
+        expect(outcome.status).toBe("held");
+        expect(existsSync(lockPath)).toBe(true);
+        expect(existsSync(join(lockPath, "meta"))).toBe(true);
+    });
+
+    it("clears that same live lock with --force", async () => {
+        await plantLock({
+            pid: process.pid,
+            pidStartTime: await pidStartTime(process.pid),
+            hostname: hostname(),
+            createdAt: new Date().toISOString(),
+        });
+        expect((await store.unlock(true)).status).toBe("removed");
+        expect(existsSync(lockPath)).toBe(false);
+    });
+
+    it("a cleared lock is immediately re-acquirable", async () => {
+        await plantLock({ pid: 999999, pidStartTime: null, hostname: hostname(), createdAt: OLD_LOCK_TIME.toISOString() });
+        await store.unlock(true);
+        await expect(store.withLock(async () => "ok")).resolves.toBe("ok");
+    });
+});
+
 // Regression (HIGH): the stale-lock steal was a blind `remove()` of whatever
 // sat at the lock path at that moment, not of the instance `inspect()` had
 // judged - so two contenders over ONE pre-existing stale lock BOTH ended up

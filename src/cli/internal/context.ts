@@ -16,6 +16,7 @@ import type {
     RestoreReport,
     RunReport,
     TargetStatus,
+    TargetUnlockReport,
 } from "../../engine/types.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
@@ -27,8 +28,8 @@ export type ExecFn = (bin: string, args: readonly string[], options?: ExecOption
  * this shape, never the class, so tests inject a plain fake object.
  */
 export interface EngineLike {
-    /** Ensure agent + keys + permission checks. */
-    preflight(): Promise<void>;
+    /** Ensure agent + keys + permission checks; `serviceMode` refuses passphrase-protected keys. */
+    preflight(options?: { serviceMode?: boolean }): Promise<void>;
     /** Run every due target once (or the named subset). */
     run(options?: { targets?: string[]; force?: boolean; dryRun?: boolean }): Promise<RunReport>;
     /** Foreground scheduler loop; resolves after stop() completes. */
@@ -43,6 +44,8 @@ export interface EngineLike {
     restore(options: { target: string; snapshot: string; output: string; verify?: boolean }): Promise<RestoreReport>;
     /** Apply retention now. */
     prune(options?: { targets?: string[]; dryRun?: boolean; force?: boolean }): Promise<PruneReport>;
+    /** Clear a leaked destination lock; a live lock needs `force`. */
+    unlock(options?: { targets?: string[]; force?: boolean }): Promise<TargetUnlockReport[]>;
     /** Validate config, probe binaries and hosts, produce jail-line data. */
     check(): Promise<CheckReport>;
 }

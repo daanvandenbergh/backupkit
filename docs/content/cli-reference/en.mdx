@@ -50,6 +50,7 @@ backupkit <command> --help for details.
 
 ```
 backupkit run       [TARGET...] [--force] [--dry-run] [--config P]
+backupkit start     [--config P]
 backupkit daemon    [--config P]
 backupkit service   install|uninstall|start|stop|restart|status [--config P]
 backupkit logs      [-f|--follow] [-n N|--lines N] [--config P]
@@ -57,12 +58,13 @@ backupkit list      [TARGET...] [--json] [--config P]        (alias: ls)
 backupkit status    [TARGET...] [--json] [--config P]
 backupkit restore   TARGET SNAPSHOT|latest --output PATH [--verify] [--config P]
 backupkit prune     [TARGET...] [--dry-run] [--force] [--config P]
+backupkit unlock    [TARGET...] [--force] [--config P]
 backupkit check     [--config P]
 backupkit init      [--force] [--config P]
 backupkit jail      install|status [--path P]
 ```
 
-`run`, `status`, `list`, and `prune` take optional target names. Name none and the command applies to every target.
+`run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target.
 
 ### run
 
@@ -70,9 +72,19 @@ Back up every due target once, or only the targets you name.
 
 `--force` runs a target whether or not it is due, ignoring backoff and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move; retention is planned but not applied. Because it writes nothing it also takes no destination lock, so an estimate works while a real run is in flight - and can never leave a lock behind. The number it reports is a snapshot of that moment, not a reservation.
 
+### start
+
+Run the scheduler in the foreground **in your own session**, for as long as the process lives. Ctrl-C stops it cleanly.
+
+This is the supported home for **passphrase-protected keys**. On startup it launches backupkit's ssh-agent and adds every explicit remote's key to it, prompting on your terminal for each encrypted one; the schedule then runs against that unlocked agent. Everything else - windows, retention, locking, the disk guard - is identical to the service.
+
+Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot.
+
 ### daemon
 
 Run the scheduler in the foreground. This is exactly what the installed service unit runs. Use `backupkit service` to install and drive it instead of running this yourself.
+
+**It refuses to start when any configured key is passphrase-protected**, naming each offending key and remote. A service has no terminal to unlock a key on, so such a key could never be primed - the run would simply fail on every tick forever. A key counts as protected when its remote declares a `passphrase` (`file:` or `prompt`) *or* when the key file itself turns out to be encrypted. Fix it by giving the service a key of its own with no passphrase (`ssh-keygen -t ed25519 -N ""`), or stop the service and use `backupkit start` instead.
 
 ### service
 
@@ -106,13 +118,32 @@ Apply retention now. `--dry-run` prints the plan - what is kept and why, then wh
 
 `prune` refuses if snapshots have appeared in the archive that no run created (see [the planted-snapshot guard](/retention#the-planted-snapshot-guard)), because retention picks by name and a list with extra names in it would have it delete the real snapshots. Review with `--dry-run`, remove anything that is not yours, then `--force` to prune anyway.
 
+### unlock
+
+Clear a destination lock a killed run left behind.
+
+Each target's archive root is locked for the length of a run, and the release is structural - it happens in a `finally`, so an ordinary failure or Ctrl-C always frees it. A `kill -9`, a lost ssh connection, or a power cut has no `finally`. What is left then depends on where the archive is: a **local** lock records its holder's pid, so the next run sees the process is gone and takes it over by itself. A **remote** lock cannot - there is no pid on this side to probe - so it blocks the target until its 24-hour TTL expires, and one interrupted inside the acquire window (between the lock and its timestamp marker) never expires at all.
+
+That is what this verb is for:
+
+```bash
+backupkit unlock                # every target
+backupkit unlock persistance    # one of them
+```
+
+Each target reports one line: `no lock held`, `lock cleared (...)`, or a refusal.
+
+**A live lock is refused, not removed.** If the holder still looks alive, `unlock` names it and exits 1 without touching anything - two backupkits writing one archive root is the exact thing the lock prevents, and only you can know whether that run is really gone. `--force` clears it anyway. A lock that is already stale (dead holder, or past the TTL) is cleared without `--force`, because that is what the next run would have done regardless.
+
+Exit 1 if any target was left locked or could not be reached.
+
 ### check
 
 The readiness gate you run before trusting a config. It validates the config (stopping at the first error), checks your local `rsync` and `ssh` versions, loads keys, opens a test connection to each remote, records host keys for unknown hosts when run on a terminal, and prints the `authorized_keys` line for push targets.
 
 That last part is informational: the jail is recommended but optional and is never probed, and a `"jail": false` target gets a note instead.
 
-It exits 2 on a config error and 1 if any connection check fails. Run it after each reboot if any remote uses a `prompt` passphrase.
+It exits 2 on a config error and 1 if any connection check fails. On a terminal it also unlocks encrypted keys into backupkit's agent, prompting for each - so it is worth running after a reboot on a deployment whose keys have passphrases, though `backupkit start` does the same thing and then keeps the schedule running.
 
 ### init
 

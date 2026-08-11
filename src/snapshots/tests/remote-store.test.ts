@@ -382,6 +382,61 @@ describe("RemoteSnapshotStore", () => {
             expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
         });
 
+        it("names the archive host in the message - the lock is not on this machine", async () => {
+            // A bare absolute path reads as a local one: an operator rm -rf'd
+            // it on his own box (where it does not even exist) while the real
+            // lock sat untouched on the archive host.
+            const { runner } = fakeRunner((argv) => {
+                if (argv[0] === "mkdir" && argv[1] === "--") {
+                    return { exitCode: 1, stderr: "mkdir: File exists" };
+                }
+                if (argv[0] === "find" && argv[1] === LOCK) {
+                    return { stdout: findOutput(LOCK, ["2026-08-10T021502Z"]) };
+                }
+                return {};
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW, true, "backupkit@archive.example.com");
+            await expect(store.withLock(async () => undefined)).rejects.toThrow(
+                `another backupkit holds backupkit@archive.example.com:${LOCK}`,
+            );
+        });
+
+        it("unlock: nothing held - probes by acquiring, then leaves the root clean", async () => {
+            const { runner, calls } = fakeRunner();
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await expect(store.unlock(false)).resolves.toEqual({ status: "none" });
+            // The probe wins the lock, writes the marker (so a crash here
+            // leaves a TTL-expiring lock, never an eternal markerless one) and
+            // removes it again.
+            expect(calls.slice(-3)).toEqual([
+                ["mkdir", "--", LOCK],
+                ["mkdir", "-p", "--", `${LOCK}/${NEW}`],
+                ["rm", "-rf", "--", LOCK],
+            ]);
+        });
+
+        it("unlock: clears a leaked lock a killed run left behind (the 24h-TTL trap)", async () => {
+            const leaked = "2026-08-10T021502Z";
+            const { runner, calls } = fakeRunner((argv) => {
+                if (argv[0] === "mkdir" && argv[1] === "--") {
+                    return { exitCode: 1, stderr: "mkdir: File exists" };
+                }
+                if (argv[0] === "find" && argv[1] === LOCK) {
+                    return { stdout: findOutput(LOCK, [leaked]) };
+                }
+                return {};
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            // Within the TTL it is a LIVE lock, so the default refuses it: no
+            // pid exists remotely to prove the holder is dead.
+            await expect(store.unlock(false)).resolves.toEqual({ status: "held", detail: `created ${leaked}` });
+            expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
+            // --force is the operator saying "that run is gone" - the only cure
+            // that used to require an ssh session and a hand-typed rm -rf.
+            await expect(store.unlock(true)).resolves.toEqual({ status: "removed", detail: `created ${leaked}` });
+            expect(calls.filter((argv) => argv[0] === "rm")).toEqual([["rm", "-rf", "--", LOCK]]);
+        });
+
         it("does not steal a fresh markerless lock caught in the mkdir->marker window", async () => {
             // Contender's mkdir loses (EEXIST); the winner has created the lock
             // dir but not yet its snapshot-named marker, so find lists nothing.
@@ -556,16 +611,76 @@ describe("RemoteSnapshotStore", () => {
     });
 });
 
+// `"jail": false` exists for the restricted appliance account (a Hetzner
+// Storage Box: ls/mkdir/mv/rm/df/rsync and nothing else). Listing with `find`
+// there fails every run with "Command not found", so an unjailed store must
+// list with `ls -A --` - the one listing verb such a shell always has.
+describe("RemoteSnapshotStore unjailed (jail: false)", () => {
+    /** Handler answering `ls` on `dir` with newline-separated basenames, everything else success. */
+    function lsListing(dir: string, names: string[]) {
+        return (argv: readonly string[]) =>
+            argv[0] === "ls" && argv[3] === dir ? { stdout: `${names.join("\n")}\n` } : {};
+    }
+
+    it("lists the root with ls -A -- and parses newline-separated basenames", async () => {
+        const { runner, calls } = fakeRunner(lsListing(ROOT, [NEW, `${MID}.partial`, OLD, ".backupkit.lock"]));
+        const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW, false);
+        await expect(store.listComplete()).resolves.toEqual([OLD, NEW]);
+        expect(calls).toEqual([
+            ["mkdir", "-p", "--", ROOT],
+            ["ls", "-A", "--", ROOT],
+        ]);
+    });
+
+    it("never sends find - the appliance shell has none", async () => {
+        const { runner, calls } = fakeRunner(lsListing(ROOT, [OLD, NEW]));
+        const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW, false);
+        await store.withLock(async () => {
+            await store.listComplete();
+            await store.claimPartial(NEW);
+        });
+        expect(calls.some((argv) => argv[0] === "find")).toBe(false);
+    });
+
+    it("verifies a promote with ls and still catches the nested rename", async () => {
+        const nested = fakeRunner((argv) => {
+            if (argv[0] !== "ls") {
+                return {};
+            }
+            return argv[3] === ROOT
+                ? { stdout: `${NEW}.partial\n` }
+                : { stdout: `${NEW}.partial\nsome-file\n` }; // listing the promoted dir
+        });
+        const store = new RemoteSnapshotStore(ROOT, nested.runner, log, () => NOW, false);
+        await expect(store.promote(NEW)).rejects.toThrow(/nested instead of renaming/);
+    });
+
+    it("reads the lock marker with ls, so the 24h TTL still frees a stale lock", async () => {
+        const stale = "2026-08-01T000000Z"; // > 24 h before NOW
+        const { runner, calls } = fakeRunner((argv, call) => {
+            if (argv[0] === "mkdir" && argv[1] === "--") {
+                // First acquire attempt loses; after the stale lock is removed the retry wins.
+                return { exitCode: call < 3 ? 1 : 0 };
+            }
+            return argv[0] === "ls" && argv[3] === `${ROOT}/.backupkit.lock` ? { stdout: `${stale}\n` } : {};
+        });
+        const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW, false);
+        await expect(store.withLock(async () => "ran")).resolves.toBe("ran");
+        expect(calls.some((argv) => argv[0] === "ls" && argv[3] === `${ROOT}/.backupkit.lock`)).toBe(true);
+        expect(calls.some((argv) => argv[0] === "rm" && argv[3] === `${ROOT}/.backupkit.lock`)).toBe(true);
+    });
+});
+
 describe("openStore", () => {
     it("returns the local implementation for a local destination endpoint", () => {
-        const store = openStore({ name: "web", dst: { kind: "local", path: "/srv/backups" } }, { log });
+        const store = openStore({ name: "web", dst: { kind: "local", path: "/srv/backups" }, jail: false }, { log });
         expect(store).toBeInstanceOf(LocalSnapshotStore);
     });
 
     it("throws when the destination is remote but no ssh settings are given", () => {
-        const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+        const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
         expect(() =>
-            openStore({ name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } }, { log }),
+            openStore({ name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true }, { log }),
         ).toThrow(SnapshotStoreError);
     });
 
@@ -583,9 +698,9 @@ describe("openStore", () => {
         });
 
         it("sends each store command as one fully quoted shell word sequence to the alias destination", async () => {
-            const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+            const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } },
+                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
                 {
                     log,
                     ssh: {
@@ -612,10 +727,10 @@ describe("openStore", () => {
         // stop against an unresponsive archive host is SIGKILLed mid-lock,
         // leaving a remote lock only the 24 h TTL clears.
         it("aborts an in-flight store command when the shutdown signal fires", async () => {
-            const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+            const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const controller = new AbortController();
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } },
+                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
                 {
                     log,
                     ssh: {
@@ -651,9 +766,9 @@ describe("openStore", () => {
         // failed run, and the next tick retries against a lock this process can
         // still distinguish from its own.
         it("never re-sends the lock mkdir when the transport blips, even with a retrying store policy", async () => {
-            const remote: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+            const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" } },
+                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
                 {
                     log,
                     ssh: {
@@ -692,7 +807,7 @@ describe("mkdtemp hygiene helper", () => {
     });
 
     it("local stores opened via openStore operate under <destination>/<name>", async () => {
-        const store = openStore({ name: "web", dst: { kind: "local", path: tmp } }, { log });
+        const store = openStore({ name: "web", dst: { kind: "local", path: tmp }, jail: false }, { log });
         await store.claimPartial(NEW);
         await expect(store.listComplete()).resolves.toEqual([]);
     });

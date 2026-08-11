@@ -13,10 +13,12 @@ Setup (3 steps):
 
 Commands:
     run [TARGET...]        back up due targets now
+    start                  foreground scheduler in YOUR session (unlocks encrypted keys)
     status  [TARGET...]    one row per target: last run, next due
     list    [TARGET...]    complete snapshots (alias: ls)
     restore TARGET SNAP    copy a snapshot to a fresh path
     prune   [TARGET...]    apply retention now
+    unlock  [TARGET...]    clear a leaked destination lock
     logs                   tail the daemon logs
     service <verb>         install|uninstall|start|stop|restart|status
     daemon                 foreground scheduler (what the service runs)
@@ -33,9 +35,18 @@ Back up every due target once (or only the named targets).
     --force      bypass due-ness, backoff, and bucket dedup
     --dry-run    no writes; show what a transfer would do
     --config P   config file path`,
+    start: `backupkit start [--config P]
+
+Foreground scheduler loop in your own session - the home for encrypted keys.
+Starts backupkit's ssh-agent, adds every explicit remote's key (prompting on
+this terminal for each passphrase-protected one), then schedules exactly like
+the service does for as long as this process lives. Ctrl-C stops it.
+    --config P   config file path`,
     daemon: `backupkit daemon [--config P]
 
 Foreground scheduler loop - what the installed service unit runs.
+Refuses to start when any configured key is passphrase-protected: a service
+has no terminal to unlock one on. Use an unencrypted key, or "backupkit start".
     --config P   config file path`,
     service: `backupkit service install|uninstall|start|stop|restart|status [--config P]
 
@@ -70,6 +81,15 @@ Apply retention now.
     --dry-run    print the retention plan (keeps with reasons) and stop
     --force      prune even when snapshots appeared that no run created
     --config P   config file path`,
+    unlock: `backupkit unlock [TARGET...] [--force] [--config P]
+
+Clear a destination lock left behind by a killed run.
+    --force      clear it even while a LIVE backupkit holds it
+    --config P   config file path
+
+Without --force a live lock is reported, never removed: two backupkits in
+one archive root is what the lock exists to prevent. A stale lock (its
+holder dead, or past the 24h TTL) is cleared either way.`,
     check: `backupkit check [--config P]
 
 Readiness gate: validate config, verify binaries and versions, load keys,

@@ -65,6 +65,33 @@ describe("daemon", () => {
         expect(await main(["daemon"], h.deps)).toBe(0);
         expect(h.out).toEqual(["Daemon started - scheduling 1 of 1 configured target.", "Daemon stopped cleanly."]);
     });
+
+    // The service is the ONE caller that must refuse a passphrase-protected
+    // key: it has no terminal to unlock one on, and no later tick can fix it.
+    // If this flag stops being passed, the daemon silently reverts to failing
+    // every target on every tick instead of refusing to start.
+    it("preflights in SERVICE mode", async () => {
+        const h = fakeDeps();
+        await main(["daemon"], h.deps);
+        expect(h.engine.calls[0]).toEqual({ method: "preflight", options: { serviceMode: true } });
+    });
+});
+
+describe("start", () => {
+    it("preflights in LOCAL mode (encrypted keys are prompted for, not refused), then schedules", async () => {
+        const h = fakeDeps();
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.engine.calls[0]).toEqual({ method: "preflight", options: undefined });
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "start"]);
+        expect(h.stops).toHaveLength(1);
+    });
+
+    it("says the schedule only lives as long as this process", async () => {
+        const h = fakeDeps();
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.out[0]).toContain("Backups run while this process stays alive");
+        expect(h.out[1]).toBe("Scheduler stopped cleanly.");
+    });
 });
 
 describe("list", () => {
@@ -200,6 +227,41 @@ describe("prune", () => {
     });
 });
 
+describe("unlock", () => {
+    it("reports each outcome and passes --force through", async () => {
+        const h = fakeDeps();
+        h.engine.unlockRows = [
+            { target: "web", status: "none", detail: "" },
+            { target: "db", status: "removed", detail: "created 2026-08-10T021502Z, past the 24h TTL" },
+        ];
+        expect(await main(["unlock", "--force"], h.deps)).toBe(0);
+        expect(h.engine.calls[0]).toEqual({ method: "unlock", options: { targets: undefined, force: true } });
+        expect(h.out).toEqual([
+            "web: no lock held",
+            "db: lock cleared (created 2026-08-10T021502Z, past the 24h TTL)",
+        ]);
+        expect(h.err).toEqual([]);
+    });
+
+    it("exits 1 naming the holder and --force when the lock is live", async () => {
+        const h = fakeDeps();
+        h.engine.unlockRows = [{ target: "web", status: "held", detail: "pid 4242 on mbprodaan" }];
+        expect(await main(["unlock"], h.deps)).toBe(1);
+        expect(h.engine.calls[0]).toEqual({ method: "unlock", options: { targets: undefined, force: false } });
+        expect(h.err[0]).toBe(
+            "Error: web is locked by a live backupkit (pid 4242 on mbprodaan). " +
+                "Stop it, or pass --force to clear the lock anyway.",
+        );
+    });
+
+    it("exits 1 when a target could not be reached", async () => {
+        const h = fakeDeps();
+        h.engine.unlockRows = [{ target: "web", status: "failed", detail: "ssh: connection refused" }];
+        expect(await main(["unlock", "web"], h.deps)).toBe(1);
+        expect(h.err[0]).toBe("Error: could not unlock web: ssh: connection refused");
+    });
+});
+
 describe("check", () => {
     it("prints versions, alias resolution, and jail lines with the install instruction", async () => {
         const h = fakeDeps();
@@ -245,7 +307,7 @@ describe("check", () => {
             name: "push-www",
             direction: "push",
             jail: false,
-            dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+            dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/backups" },
             destination: "/srv/backups",
         });
         const h = fakeDeps({ config: makeConfig({ configPath: "/etc/backupkit/config.jsonc", stateDir: "/var/lib/backupkit", targets: [target] }) });

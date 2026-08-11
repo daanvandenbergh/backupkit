@@ -13,7 +13,8 @@ import { SnapshotStoreError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type { RetryPolicy } from "../shared/retry.js";
 import type { Endpoint } from "../shared/types.js";
-import { runRemote, type SshContext } from "../ssh/ssh.js";
+import { runRemote, sshDestination, type SshContext } from "../ssh/ssh.js";
+import type { UnlockOutcome } from "./internal/lock.js";
 import { LocalSnapshotStore } from "./internal/local-store.js";
 import { RemoteSnapshotStore } from "./internal/remote-store.js";
 
@@ -46,6 +47,12 @@ export interface SnapshotStore {
      * contention without running `fn`.
      */
     withLock<T>(fn: () => Promise<T>): Promise<T>;
+    /**
+     * Clear a leaked lock by hand (`backupkit unlock`). A live lock is reported
+     * and left alone unless `force`; a stale one is removed either way. See
+     * `forceUnlock` for why "is anything holding it" is answered by acquiring.
+     */
+    unlock(force: boolean): Promise<UnlockOutcome>;
 }
 
 /**
@@ -59,6 +66,15 @@ export interface StoreTarget {
     name: string;
     /** The archive-root endpoint (the transfer destination side). */
     dst: Endpoint;
+    /**
+     * Push mode: whether the remote key is confined by the `backupkit-remote`
+     * forced command. It decides how the remote store LISTS a directory - the
+     * jail's fixed grammar answers only `find -print0`, while an unjailed
+     * account may be a restricted appliance shell that has no `find` at all
+     * (a Hetzner Storage Box), so those list with `ls -A --`. Always false for
+     * a pull target, where listing is a local readdir.
+     */
+    jail: boolean;
 }
 
 /** ssh invocation settings for a remote (push-mode) store. */
@@ -127,5 +143,8 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
             }),
         deps.log,
         now,
+        target.jail,
+        // Every lock message then names the machine the lock is actually on.
+        sshDestination(remote),
     );
 }

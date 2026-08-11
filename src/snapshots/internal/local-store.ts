@@ -18,7 +18,16 @@ import { sanitize } from "../../shared/sanitize.js";
 import { isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
 import { newestUndeletable } from "../types.js";
-import { isPidAlive, pidStartTime, withLockScope, type LockBackend, type LockInspection, type LockMeta } from "./lock.js";
+import {
+    forceUnlock,
+    isPidAlive,
+    pidStartTime,
+    withLockScope,
+    type LockBackend,
+    type LockInspection,
+    type LockMeta,
+    type UnlockOutcome,
+} from "./lock.js";
 
 /** Name of the lock directory inside a store root. */
 const LOCK_DIR_NAME = ".backupkit.lock";
@@ -426,5 +435,11 @@ export class LocalSnapshotStore implements SnapshotStore {
     async withLock<T>(fn: () => Promise<T>): Promise<T> {
         await mkdir(this.root, { recursive: true });
         return withLockScope(new LocalLockBackend(this.root, this.now), this.log, fn);
+    }
+
+    /** Clear a leaked lock; a live one is reported and left alone without `force`. */
+    async unlock(force: boolean): Promise<UnlockOutcome> {
+        await mkdir(this.root, { recursive: true });
+        return forceUnlock(new LocalLockBackend(this.root, this.now), force);
     }
 }

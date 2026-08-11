@@ -1,8 +1,9 @@
 /**
  * The remote (push-mode) snapshot store: every operation is one jailed remote
  * command through `runRemote` (which quotes every argv element and wraps the
- * control-path transient retry). Listing is `find -maxdepth 1 -mindepth 1
- * -print0` parsed NUL-delimited; `--` precedes every path operand; free space
+ * control-path transient retry). Listing is `find -print0` when the key is
+ * jailed and `ls -A --` when it is not (see {@link listArgv}); `--` precedes
+ * every path operand; free space
  * is `df -Pk --` with shape-validated output; and only names matching the
  * snapshot regex family are ever acted upon - a hostile remote listing can
  * never steer a destructive command (security invariants 2, 6, 9).
@@ -18,7 +19,7 @@ import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
 import { formatSnapshotName, isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
 import { newestUndeletable } from "../types.js";
-import { withLockScope, type LockBackend, type LockInspection } from "./lock.js";
+import { forceUnlock, withLockScope, type LockBackend, type LockInspection, type UnlockOutcome } from "./lock.js";
 
 /** Name of the lock directory inside a store root. */
 const LOCK_DIR_NAME = ".backupkit.lock";
@@ -43,6 +44,43 @@ export type RemoteRunner = (
 /** Per-call runner options that disable the transport retry (non-idempotent commands). */
 const NO_RETRY = { retryPolicy: NO_RETRY_POLICY } as const;
 
+/**
+ * Argv that lists one directory level on the remote.
+ *
+ * Jailed remotes get the jail's only listing verb, `find -maxdepth 1 -mindepth
+ * 1 -print0`. Unjailed remotes get `ls -A --`, because the whole point of
+ * `"jail": false` is the restricted appliance account where a forced command
+ * cannot be installed - and those shells do not ship `find` (a Hetzner Storage
+ * Box offers ls/mkdir/mv/rm/df/rsync and nothing else). `ls` exists everywhere
+ * `find` does, so the unjailed path needs no capability probe.
+ */
+function listArgv(path: string, jailed: boolean): readonly string[] {
+    return jailed ? ["find", path, "-maxdepth", "1", "-mindepth", "1", "-print0"] : ["ls", "-A", "--", path];
+}
+
+/**
+ * Entry basenames from a {@link listArgv} listing: `find` prints NUL-separated
+ * absolute paths, `ls` newline-separated basenames (ssh gives it no tty, so
+ * coreutils emits names unquoted).
+ *
+ * ponytail: a newline INSIDE a remote filename splits into fragments under
+ * `ls`, where `-print0` is exact. That is safe rather than merely tolerable -
+ * every caller acts only on names that pass the snapshot regex family and then
+ * re-joins them onto the store root, so a fragment can at worst name a path
+ * that does not exist (a failed run), never steer a command at a different one.
+ * The exact listing stays available: keep the jail.
+ */
+function parseListing(stdout: string, jailed: boolean): string[] {
+    const names: string[] = [];
+    for (const entry of stdout.split(jailed ? "\0" : "\n")) {
+        if (entry === "") {
+            continue;
+        }
+        names.push(entry.slice(entry.lastIndexOf("/") + 1));
+    }
+    return names;
+}
+
 /** Throw unless `name` is a valid snapshot name (the codec form). */
 function assertSnapshotName(name: string): void {
     if (parseSnapshotName(name) === null) {
@@ -63,17 +101,30 @@ class RemoteLockBackend implements LockBackend {
     /** Absolute remote path of the lock directory. */
     readonly lockPath: string;
 
+    /**
+     * The same path as an operator has to read it: `<user@host>:<path>`. The
+     * lock lives on the ARCHIVE host, and a bare absolute path in a message
+     * reads as a local one - it sent an operator to `rm -rf` a path his own
+     * machine does not even have while the real lock sat untouched.
+     */
+    readonly displayPath: string;
+
     /** The remote command seam. */
     private readonly runner: RemoteRunner;
 
     /** Clock for the TTL comparison and the marker name. */
     private readonly now: () => Date;
 
+    /** Whether the remote key is jailed, which decides the listing verb (see {@link listArgv}). */
+    private readonly jailed: boolean;
+
     /** Construct the backend for one remote store root. */
-    constructor(root: string, runner: RemoteRunner, now: () => Date) {
+    constructor(root: string, runner: RemoteRunner, now: () => Date, jailed: boolean, sshDestination: string) {
         this.lockPath = posix.join(root, LOCK_DIR_NAME);
+        this.displayPath = sshDestination === "" ? this.lockPath : `${sshDestination}:${this.lockPath}`;
         this.runner = runner;
         this.now = now;
+        this.jailed = jailed;
     }
 
     /**
@@ -123,15 +174,11 @@ class RemoteLockBackend implements LockBackend {
      */
     async inspect(): Promise<LockInspection> {
         const stale = (detail: string): LockInspection => ({ stale: true, pid: null, hostname: null, detail });
-        const result = await this.runner(["find", this.lockPath, "-maxdepth", "1", "-mindepth", "1", "-print0"]);
+        const result = await this.runner(listArgv(this.lockPath, this.jailed));
         if (result.exitCode !== 0) {
             return { stale: false, pid: null, hostname: null, detail: "lock unreadable (assuming held)" };
         }
-        for (const entry of result.stdout.split("\0")) {
-            if (entry === "") {
-                continue;
-            }
-            const name = entry.slice(entry.lastIndexOf("/") + 1);
+        for (const name of parseListing(result.stdout, this.jailed)) {
             const created = parseSnapshotName(name);
             if (created === null) {
                 continue;
@@ -176,15 +223,30 @@ export class RemoteSnapshotStore implements SnapshotStore {
     /** Clock, injectable for tests. */
     private readonly now: () => Date;
 
+    /** Whether the push key is jailed - decides the listing verb (see {@link listArgv}). */
+    private readonly jailed: boolean;
+
+    /** ssh destination of the archive host, prefixed onto lock paths in messages (`""` = no prefix). */
+    private readonly sshDestination: string;
+
     /** Whether `mkdir -p -- <root>` has succeeded this process (idempotent, so a lost race just re-runs it). */
     private rootEnsured = false;
 
     /** Construct a store over one remote archive root. */
-    constructor(root: string, runner: RemoteRunner, log: Logger, now: () => Date = () => new Date()) {
+    constructor(
+        root: string,
+        runner: RemoteRunner,
+        log: Logger,
+        now: () => Date = () => new Date(),
+        jailed = true,
+        sshDestination = "",
+    ) {
         this.root = root;
         this.runner = runner;
         this.log = log;
         this.now = now;
+        this.jailed = jailed;
+        this.sshDestination = sshDestination;
     }
 
     /**
@@ -237,21 +299,14 @@ export class RemoteSnapshotStore implements SnapshotStore {
     }
 
     /**
-     * All entry basenames in the root via `find -maxdepth 1 -mindepth 1
-     * -print0`, parsed NUL-delimited. Remote-derived and untrusted: callers
-     * act only on names that pass the snapshot regex family.
+     * All entry basenames in the root ({@link listArgv} / {@link parseListing}).
+     * Remote-derived and untrusted: callers act only on names that pass the
+     * snapshot regex family.
      */
     private async listEntries(): Promise<string[]> {
         await this.ensureRoot();
-        const result = await this.run(["find", this.root, "-maxdepth", "1", "-mindepth", "1", "-print0"], "listing");
-        const names: string[] = [];
-        for (const entry of result.stdout.split("\0")) {
-            if (entry === "") {
-                continue;
-            }
-            names.push(entry.slice(entry.lastIndexOf("/") + 1));
-        }
-        return names;
+        const result = await this.run(listArgv(this.root, this.jailed), "listing");
+        return parseListing(result.stdout, this.jailed);
     }
 
     /** Complete snapshot names, lexically ascending. Ignores anything failing the regex. */
@@ -315,13 +370,8 @@ export class RemoteSnapshotStore implements SnapshotStore {
         }
         const final = posix.join(this.root, name);
         await this.run(["mv", "--", posix.join(this.root, `${name}.partial`), final], "promote", NO_RETRY);
-        const inside = await this.run(
-            ["find", final, "-maxdepth", "1", "-mindepth", "1", "-print0"],
-            "promote verification",
-        );
-        const nested = inside.stdout
-            .split("\0")
-            .some((entry) => entry !== "" && entry.slice(entry.lastIndexOf("/") + 1) === `${name}.partial`);
+        const inside = await this.run(listArgv(final, this.jailed), "promote verification");
+        const nested = parseListing(inside.stdout, this.jailed).includes(`${name}.partial`);
         if (nested) {
             throw new SnapshotStoreError(
                 `promote of ${name} nested instead of renaming: ${name} already existed on the remote, so the snapshot now sits at ${name}/${name}.partial - not promoted`,
@@ -402,6 +452,19 @@ export class RemoteSnapshotStore implements SnapshotStore {
     /** Run `fn` under the store-root lock (structural release; spec section 6). */
     async withLock<T>(fn: () => Promise<T>): Promise<T> {
         await this.ensureRoot();
-        return withLockScope(new RemoteLockBackend(this.root, this.runner, this.now), this.log, fn);
+        return withLockScope(
+            new RemoteLockBackend(this.root, this.runner, this.now, this.jailed, this.sshDestination),
+            this.log,
+            fn,
+        );
+    }
+
+    /** Clear a leaked lock; a live one is reported and left alone without `force`. */
+    async unlock(force: boolean): Promise<UnlockOutcome> {
+        await this.ensureRoot();
+        return forceUnlock(
+            new RemoteLockBackend(this.root, this.runner, this.now, this.jailed, this.sshDestination),
+            force,
+        );
     }
 }

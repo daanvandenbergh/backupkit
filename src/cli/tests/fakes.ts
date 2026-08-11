@@ -15,6 +15,7 @@ import type {
     RunReport,
     TargetRunReport,
     TargetStatus,
+    TargetUnlockReport,
 } from "../../engine/types.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 import { makeConfig, makeExecResult, makeTarget } from "../../engine/tests/fakes.js";
@@ -55,6 +56,9 @@ export class FakeEngine implements EngineLike {
     /** Result of prune(). */
     pruneReport: PruneReport = { targets: [] };
 
+    /** Result of unlock(). */
+    unlockRows: TargetUnlockReport[] = [];
+
     /** Result of check(). */
     checkReport: CheckReport = { ok: true, localRsync: { bin: "/usr/bin/rsync", version: "3.2.7" }, sshOk: true, remotes: [], jailLines: [], errors: [] };
 
@@ -67,9 +71,9 @@ export class FakeEngine implements EngineLike {
         return Promise.resolve(value);
     }
 
-    /** Fake preflight. */
-    preflight(): Promise<void> {
-        return this.answer("preflight", undefined, undefined);
+    /** Fake preflight (records the serviceMode options the command passed). */
+    preflight(options?: { serviceMode?: boolean }): Promise<void> {
+        return this.answer("preflight", options, undefined);
     }
 
     /** Fake run. */
@@ -105,6 +109,11 @@ export class FakeEngine implements EngineLike {
     /** Fake prune. */
     prune(options?: { targets?: string[]; dryRun?: boolean }): Promise<PruneReport> {
         return this.answer("prune", options, this.pruneReport);
+    }
+
+    /** Fake unlock. */
+    unlock(options?: { targets?: string[]; force?: boolean }): Promise<TargetUnlockReport[]> {
+        return this.answer("unlock", options, this.unlockRows);
     }
 
     /** Fake check. */

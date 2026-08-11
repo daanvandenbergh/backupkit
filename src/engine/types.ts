@@ -134,6 +134,20 @@ export interface PruneReport {
     targets: TargetPruneReport[];
 }
 
+/** One target's `unlock()` outcome. */
+export interface TargetUnlockReport {
+    /** Target name. */
+    target: string;
+    /**
+     * What happened: `none` = nothing was holding the lock, `removed` = a lock
+     * was cleared, `held` = a LIVE lock was found and left alone (no `force`),
+     * `failed` = the store could not be reached or the removal failed.
+     */
+    status: "none" | "removed" | "held" | "failed";
+    /** The holder description (or the error), empty when there was no lock. */
+    detail: string;
+}
+
 /** One remote's readiness probe outcome inside a `CheckReport`. */
 export interface RemoteCheck {
     /** The remote's short name. */
