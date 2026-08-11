@@ -52,7 +52,7 @@ type ExecFn = (bin: string, args: readonly string[], options?: ExecOptions) => P
 export interface BackupkitDeps {
     /** Clock. Default `() => new Date()`. */
     now?: () => Date;
-    /** Runtime dir override (agent socket home). Default (root) /run/backupkit on Linux, /var/run/backupkit on macOS; else $XDG_RUNTIME_DIR/backupkit, else ~/.backupkit/run. */
+    /** Runtime dir override (agent socket home). Default (root) /run/backupkit on Linux, /var/db/backupkit/agent on macOS (/var/run is group-writable); else $XDG_RUNTIME_DIR/backupkit, else ~/.backupkit/run. */
     runtimeDir?: string;
     /** Process environment seam (SSH_AUTH_SOCK, XDG_RUNTIME_DIR). Default process.env. */
     env?: Record<string, string | undefined>;
@@ -151,11 +151,15 @@ export function defaultRuntimeDir(
     platform: NodeJS.Platform,
 ): string {
     if (euid === 0) {
-        // Linux keeps /run (a tmpfs the systemd unit's RuntimeDirectory= owns).
-        // macOS has no /run - a root LaunchDaemon must use /var/run, which
-        // exists and is root-writable; otherwise creating the agent-socket dir
-        // fails and launchd crash-loops the daemon ("loaded", no pid, no logs).
-        return platform === "darwin" ? "/var/run/backupkit" : "/run/backupkit";
+        // Linux keeps /run (a tmpfs the systemd unit's RuntimeDirectory= owns;
+        // /run is 0755 root-owned, so its child passes the parent-writability
+        // check). macOS has NO private runtime dir: /run is absent and /var/run
+        // is 0775 (group 'daemon' writable), which the parent-writability check
+        // in ssh/permissions.ts correctly refuses - a group-writable parent lets
+        // another account swap the socket dir. So on macOS the agent socket
+        // lives inside backupkit's OWN 0700 tree under /var/db (which is 0755
+        // root:wheel), never under /var/run. Do not move this back to /var/run.
+        return platform === "darwin" ? "/var/db/backupkit/agent" : "/run/backupkit";
     }
     if (env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "") {
         return join(env.XDG_RUNTIME_DIR, "backupkit");

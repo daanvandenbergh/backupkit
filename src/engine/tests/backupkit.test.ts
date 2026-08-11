@@ -32,8 +32,8 @@ describe("defaultRuntimeDir", () => {
         expect(defaultRuntimeDir({}, 0, "/root", "linux")).toBe("/run/backupkit");
     });
 
-    it("uses /var/run/backupkit for root on macOS, where /run does not exist", () => {
-        expect(defaultRuntimeDir({}, 0, "/var/root", "darwin")).toBe("/var/run/backupkit");
+    it("uses /var/db/backupkit/agent for root on macOS (/run absent, /var/run group-writable)", () => {
+        expect(defaultRuntimeDir({}, 0, "/var/root", "darwin")).toBe("/var/db/backupkit/agent");
     });
 
     it("prefers XDG_RUNTIME_DIR for a non-root user, platform-independent", () => {
