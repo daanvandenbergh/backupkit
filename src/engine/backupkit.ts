@@ -16,12 +16,12 @@ import { loadConfig } from "../config/config.js";
 import type { ResolvedConfig, ResolvedTarget } from "../config/types.js";
 import { exec, minimalEnv, type ExecOptions, type ExecResult } from "../exec/exec.js";
 import { ConfigError, isBackupkitError, RestoreError } from "../shared/errors.js";
-import { formatEndpoint } from "../shared/format.js";
+import { formatEndpoint, formatUtc } from "../shared/format.js";
 import { Logger } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
 import { parseSnapshotName } from "../shared/snapshot-name.js";
 import type { Endpoint, ResolvedRemote } from "../shared/types.js";
-import { loadKeys } from "../ssh/agent.js";
+import { findEncryptedKeys, loadKeys } from "../ssh/agent.js";
 import { quoteShellArg } from "../ssh/internal/quote.js";
 import { checkFilePermissions, defaultPermissionDeps, type PermissionDeps } from "../ssh/permissions.js";
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
@@ -873,7 +873,7 @@ export class Backupkit {
                 if (until !== null && now.getTime() < until.getTime()) {
                     this.log.info("target in failure backoff - skipping", {
                         target: target.name,
-                        nextAttemptAt: until.toISOString(),
+                        nextAttemptAt: formatUtc(until),
                     });
                     continue;
                 }
@@ -1350,8 +1350,17 @@ export class Backupkit {
             }
         } catch (error) {
             errors.push(sanitize(error instanceof Error ? error.message : String(error)));
-            return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], errors };
+            return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], encryptedKeys: [], errors };
         }
+
+        // Which of the two ways to schedule this config supports. Reported, not
+        // judged: an encrypted key is a valid setup that belongs to
+        // `backupkit start`, so it must not become a check error.
+        const encryptedKeys = await findEncryptedKeys(Object.values(this.config.remotes), {
+            runtimeDir: this.runtimeDir,
+            log: this.log,
+            hasTty: this.deps.hasTty,
+        });
 
         let localRsync: { bin: string; version: string } | null = null;
         try {
@@ -1451,6 +1460,6 @@ export class Backupkit {
             }
         }
 
-        return { ok: errors.length === 0, localRsync, sshOk, remotes: remoteChecks, jailLines, errors };
+        return { ok: errors.length === 0, localRsync, sshOk, remotes: remoteChecks, jailLines, encryptedKeys, errors };
     }
 }

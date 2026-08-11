@@ -5,6 +5,7 @@ import { sshArgs, sshDestination } from "../ssh.js";
 /** A fully explicit remote fixture. */
 const EXPLICIT: ResolvedRemote = {
     kind: "explicit",
+    restrictedShell: false,
     name: "example",
     host: "10.0.0.11",
     user: "backup-reader",
@@ -15,7 +16,7 @@ const EXPLICIT: ResolvedRemote = {
 };
 
 /** An alias remote fixture. */
-const ALIAS: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+const ALIAS: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
 
 /** The option tokens alias mode must never carry. */
 const FORBIDDEN_FOR_ALIAS = ["-i", "-p", "IdentitiesOnly", "PreferredAuthentications", "UserKnownHostsFile"];

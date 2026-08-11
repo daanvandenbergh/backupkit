@@ -15,6 +15,7 @@ import type {
     PruneReport,
     RestoreReport,
     RunReport,
+    RunStatus,
     TargetStatus,
     TargetUnlockReport,
 } from "../../engine/types.js";
@@ -134,10 +135,12 @@ export interface ParsedFlags {
 /**
  * Parse a command's argv with node:util parseArgs (strict): `--flag value`
  * and `--flag=value` both accepted, unknown flags become a UsageError that
- * lists the command's valid flags. Every command implicitly accepts --help.
+ * lists the command's valid flags. Every command implicitly accepts -h/--help.
  */
 export function parseFlags(argv: string[], flags: Record<string, FlagSpec>, allowPositionals: boolean): ParsedFlags {
-    const options: Record<string, { type: "boolean" | "string"; short?: string }> = { help: { type: "boolean" } };
+    const options: Record<string, { type: "boolean" | "string"; short?: string }> = {
+        help: { type: "boolean", short: "h" },
+    };
     for (const name of Object.keys(flags)) {
         options[name] = flags[name];
     }
@@ -180,6 +183,53 @@ export function selectTargets(positionals: string[], config: ResolvedConfig): st
  */
 export function count(n: number, singular: string, plural: string = `${singular}s`): string {
     return `${n} ${n === 1 ? singular : plural}`;
+}
+
+/**
+ * The word each run outcome gets on stdout. A `Record<RunStatus, string>`, not
+ * a lookup with a fallback: adding a RunStatus to the engine's union then
+ * breaks `npm run typecheck` here, rather than silently printing `undefined`
+ * next to a target name.
+ */
+const VERDICT: Record<RunStatus, string> = {
+    success: "OK     ",
+    warning: "WARNING",
+    failed: "FAILED ",
+    skipped: "skipped",
+    aborted: "ABORTED",
+};
+
+/**
+ * Print one line per target of a run report and a closing summary; returns the
+ * number of failed targets. Shared by `run` (whose exit code is that count) and
+ * by `start --force` (whose immediate pass reports the same way before the
+ * scheduler takes over).
+ */
+export function printRunReport(report: RunReport, stdout: (line: string) => void): number {
+    let failed = 0;
+    for (const target of report.targets) {
+        const detail = [
+            target.snapshot === null ? null : `snapshot ${target.snapshot}`,
+            target.reason === null ? null : target.reason,
+            target.error === null ? null : target.error,
+        ]
+            .filter((part) => part !== null)
+            .join("; ");
+        stdout(`${VERDICT[target.status]} ${target.target}${detail === "" ? "" : ` - ${detail}`}`);
+        if (target.status === "failed") {
+            failed += 1;
+        }
+    }
+    // Always a closing line: with several targets the per-target rows scroll,
+    // and "did the whole pass succeed?" is the one question the exit code
+    // answers but a terminal full of rows does not.
+    const total = report.targets.length;
+    stdout(
+        failed === 0
+            ? `Done - ${count(total, "target")} processed, none failed.`
+            : `Done - ${failed} of ${count(total, "target")} FAILED. See the lines above, or run: backupkit logs`,
+    );
+    return failed;
 }
 
 /**

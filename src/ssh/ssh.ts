@@ -13,7 +13,7 @@ import { CONTROL_RETRY_POLICY, withTransientRetry, type RetryPolicy } from "../s
 import { sanitize } from "../shared/sanitize.js";
 import type { ResolvedRemote } from "../shared/types.js";
 import { isPermanentSshStderr, matchPermanentSshPattern, sshStderrTail } from "./classify.js";
-import { quoteShellArg } from "./internal/quote.js";
+import { bareShellArg, quoteShellArg } from "./internal/quote.js";
 
 /** An alias-kind resolved remote. */
 type AliasRemote = Extract<ResolvedRemote, { kind: "alias" }>;
@@ -153,8 +153,11 @@ function sshFailureMessage(remote: ResolvedRemote, tail: string): string {
 }
 
 /**
- * Run one command on a remote host: every argv element quoted by the single
- * quoter, options from `sshArgs`, spawned through `exec/`, wrapped in the
+ * Run one command on a remote host: every argv element passed through the
+ * single quoter - `quoteShellArg`, or `bareShellArg` when the remote declares
+ * `restrictedShell` (an appliance shell that does not parse quotes and would
+ * read `'mkdir'` as a command name; that quoter refuses anything that is not
+ * already one inert word) - options from `sshArgs`, spawned through `exec/`, wrapped in the
  * control-path transient retry. Transport failures (exit 255, timeouts,
  * signals) throw `SshError` with `retriable` set by the permanent-pattern
  * classifier; any other exit - including a non-zero exit of the REMOTE
@@ -168,7 +171,7 @@ export async function runRemote(
     argv: readonly string[],
     options: RunRemoteOptions,
 ): Promise<ExecResult> {
-    const command = argv.map(quoteShellArg).join(" ");
+    const command = argv.map(remote.restrictedShell ? bareShellArg : quoteShellArg).join(" ");
     const fullArgs = [...sshArgs(remote, options.context), sshDestination(remote), command];
     const env: Record<string, string> = { ...(options.env ?? minimalEnv()) };
     if (options.authSock !== null) {

@@ -11,6 +11,7 @@ keywords:
     - jsonc
     - schedule
     - remotes
+    - passphrase
 image: "/assets/docs/configuration/hero.en.jpg"
 updated: "2026-08-11"
 ---
@@ -28,6 +29,8 @@ Two rules are stricter than `JSON.parse`:
 - **A duplicate key is a fatal error** naming both lines, so a shadowed remote or target can never be dropped silently.
 - **Nesting is capped** at 64 levels.
 
+The schema itself adds a third: **any key it does not know is a fatal error**, at every level - top-level, remote, target, schedule, retry, rsync, retention, logging - so a typo'd field is never silently ignored. A remote no target references is the one soft case: that is a warning, not an error.
+
 ### Where the config is found
 
 Every command looks in the same order:
@@ -37,7 +40,11 @@ Every command looks in the same order:
 3. `/etc/backupkit/` - trying `config.jsonc`, then `config.json`
 4. `~/.backupkit/` - same two names
 
-A path from `--config` or `$BACKUPKIT_CONFIG` is used exactly as given. If nothing is there, that is an error, not a reason to keep looking. Having both `config.jsonc` and `config.json` in one directory is also an error, and it names both files.
+A path from `--config` or `$BACKUPKIT_CONFIG` is resolved against the current directory and normalized - it may hold no `.` or `..` component, and no whitespace or quote character, because its directory becomes the default `known_hosts` location that ends up inside rsync's `-e` string. An empty `$BACKUPKIT_CONFIG` counts as unset and falls through to the probe directories. If nothing is at a path you named, that is an error, not a reason to keep looking. Having both `config.jsonc` and `config.json` in one directory is also an error, and it names both files.
+
+**The two run modes normally keep two different files.** `/etc/backupkit/config.jsonc` is the system config - root-owned, and the only one [a service](/daemon-setup) finds by itself, since its unit runs as root. `~/.backupkit/config.jsonc` is your own, the one [a scheduler you run yourself](/run-it-yourself) uses. `backupkit init` writes whichever matches the identity that ran it.
+
+That order is the same for *every* identity, though, so a `/etc/backupkit/config.jsonc` shadows every user's personal file. On a machine that has both, unprivileged commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` in the shell profile) to reach their own.
 
 ## Top-level fields
 
@@ -45,16 +52,16 @@ A path from `--config` or `$BACKUPKIT_CONFIG` is used exactly as given. If nothi
 | --- | --- | --- | --- |
 | `remotes` | object | required | Machines this host talks to, keyed by short name |
 | `targets` | object | required | What to back up, keyed by target name (they run in the order you write them) |
-| `name` | string | `"backupkit"` | Instance label used in logs and lock files |
+| `name` | string | `"backupkit"` | Instance label the schema accepts; nothing surfaces it yet |
 | `retention` | object | keep everything | Default retention for targets that define none |
-| `stateDir` | string | `/var/lib/backupkit` as root (`/var/db/backupkit` on macOS), else `~/.local/state/backupkit` | Where run reports are stored |
+| `stateDir` | string | `/var/lib/backupkit` as root (`/var/db/backupkit` on macOS), else `$XDG_STATE_HOME/backupkit` falling back to `~/.local/state/backupkit` | Where run reports are stored |
 | `logging` | object | `{ level: "info" }` | `level` (`error`/`warn`/`info`/`debug`) and an optional `file` |
 | `rsyncBin` | string | tries `/opt/homebrew/bin/rsync`, `/usr/local/bin/rsync`, then PATH | Override the local rsync |
 | `sshBin` | string | from PATH | Override the local ssh |
 
-Remote and target keys have to match `/^[a-z0-9][a-z0-9._-]*$/` and stay under 64 characters.
+Remote and target keys have to match `/^[a-z0-9][a-z0-9._-]*$/` and be at most 64 characters.
 
-The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup).
+The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup#root-service-per-user-config).
 
 ## Remotes
 
@@ -70,8 +77,9 @@ Backupkit owns the identity, loads the key, and manages known_hosts.
 | `user` | string | required | SSH username, `/^[a-z_][a-z0-9._-]{0,31}$/i` |
 | `identityFile` | string | required | Absolute path to the private key (no whitespace or quotes) |
 | `port` | integer | `22` | SSH port, 1-65535 |
-| `passphrase` | string | none | `"file:/abs/path"` or `"prompt"` - never the passphrase itself |
+| `passphrase` | string | none | `"file:/abs/path"` or `"prompt"` - never the passphrase itself. **Not usable under the service** |
 | `knownHostsFile` | string | `<configDir>/known_hosts` | Override the dedicated known_hosts path |
+| `restrictedShell` | boolean | `false` | The remote's shell parses no quoting (an appliance account) - send bare, charset-checked words. Only usable on a target with `"jail": false` |
 
 ```jsonc
 "remotes": {
@@ -85,11 +93,13 @@ Backupkit owns the identity, loads the key, and manages known_hosts.
 
 `passphrase` accepts only `"file:/..."` or exactly `"prompt"`. A raw passphrase or an `env:` form is rejected. The path after `file:` is validated like every other path field. See the [Security Model](/security-model#permissions-are-checked-before-anything-talks-to-the-network) for how each form is loaded.
 
+**A passphrase-protected key rules out the service.** `backupkit daemon` refuses to start when any configured key is encrypted - by declaration or in fact - because a service has no terminal to unlock one on. A config with this field therefore belongs to the mode you [run yourself](/run-it-yourself), where `backupkit start` prompts once per key and then schedules identically; the alternative is giving the service a key with no passphrase. See [a service cannot hold an encrypted key](/daemon-setup#a-service-cannot-hold-an-encrypted-key).
+
 `host` is validated against a list of allowed characters rather than a list of banned ones, because the failure modes are quiet: a value containing `/` makes rsync read `user@host/x:/path` as a *local* path and write your archive into a relative directory, and a leading `-` or a control character reaches ssh's option parser or your terminal. A pre-bracketed `[::1]` is rejected because backupkit adds the brackets itself.
 
 ### Alias remote
 
-An alias remote reuses a `Host` entry from your `ssh_config`. It has exactly **one** field, `alias`. Host, user, key, port, and known_hosts all come from ssh, so any sibling field is a config error.
+An alias remote reuses a `Host` entry from your `ssh_config`. Host, user, key, port, and known_hosts all come from ssh, so the only fields it takes are `alias` and `restrictedShell` - anything else is a config error, because it belongs in `ssh_config`. (`restrictedShell` is the exception precisely because it describes the remote's *shell*, which `ssh_config` has no way to express.)
 
 Given this in `~/.ssh/config`:
 
@@ -128,12 +138,16 @@ Each target is keyed by name. That name becomes the snapshot subdirectory and th
 | `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
 | `minFree` | string \| `false` | `"5%"` | Free-space floor; `false` turns the guard off |
 | `rsync` | object | `{}` | Per-target rsync tuning - see below |
-| `jail` | boolean | `true` | Push only. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` leaves out the `authorized_keys` line. See [running without the jail](/push-vs-pull#running-without-the-jail) |
+| `jail` | boolean | `true` (push targets) | Push only - writing it on a pull target is a config error. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` prints a warning in place of the `authorized_keys` line. See [running without the jail](/push-vs-pull#running-without-the-jail) |
 | `enabled` | boolean | `true` | `false` means configured but never scheduled |
 
 ### Path rules
 
-Every path field has to be absolute (`~` is rejected), free of NUL and newline, and must not start with `-`. It also must not contain a `.` or `..` component - write the resolved path.
+Every path field has to be absolute (`~` is rejected), free of NUL and newline, and free of any `.` or `..` component - write the resolved path.
+
+The paths that end up inside rsync's `-e` string or a remote command are stricter still: `identityFile`, `knownHostsFile`, `rsyncBin`, `sshBin`, `rsync.remoteRsyncBin`, the path after `passphrase: "file:"`, and a push `destination` additionally reject whitespace and quote characters. `source`, `stateDir`, `logging.file`, and a pull `destination` accept both, so `/Volumes/My Backups` is a perfectly good pull destination.
+
+**Two targets may not have nesting snapshot roots.** The snapshot root is `<destination>/<name>`, and no target's may equal or sit inside another's in the same place - destinations `/b` for target `a` and `/b/a` for target `b` collide, and validation says so by name rather than letting one target's archive grow inside another's.
 
 Paths are normalized when the config loads: duplicate slashes collapse and a trailing slash is stripped, so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination.
 
@@ -141,7 +155,7 @@ That matters most for push targets. The destination is written verbatim into the
 
 **A push `destination` also may not contain whitespace or quote characters**, jailed or not. rsync backslash-escapes a space when it re-serializes its own `--server` argv, and the receiving side word-splits that argv. So a destination like `/Volumes/My Backups` passes validation, prints a plausible-looking jail line, lets every lifecycle command through - and then fails the actual data transfer on every run. A pull destination is purely local and is unaffected.
 
-`minFree` is either `"N%"` (0-50) or an absolute binary size like `"10G"` or `"500M"`.
+`minFree` is either `"N%"` (0-50) or an absolute binary size with a `K`/`M`/`G`/`T` suffix - `"500M"`, `"10G"`, `"1.5T"`. Both forms accept a decimal.
 
 ### Schedules
 
@@ -191,8 +205,10 @@ The optional `rsync` object tunes the transfer for one target. Every field is op
 | `xattrs` | boolean | `false` | `--xattrs` |
 | `preserveOwnership` | boolean | `true` | Receive owner and group; `false` adds `--no-owner --no-group` |
 | `preserveDevices` | boolean | `false` | Allow device and special files (rsync `-D`) |
-| `remoteRsyncBin` | string | the remote's default | `--rsync-path` |
-| `verify` | boolean | `false` | Run a `--checksum --dry-run` pass before promoting |
+| `remoteRsyncBin` | string | the remote's default | `--rsync-path`. Pull targets only |
+| `verify` | boolean | `false` | Run a `--checksum --dry-run` pass before promoting. Separate from `restore --verify` |
+
+Setting `remoteRsyncBin` on a **push** target is a config error: the archive host's forced command fixes the remote rsync binary, so point the jail account's own PATH at an rsync 3.2.5 or newer instead.
 
 ## Retention
 
@@ -201,15 +217,19 @@ The top-level `retention` object is the default for targets that do not define t
 ```jsonc
 "retention": {
     "keepLast": 7,
+    "keepHourly": 24,
     "keepDaily": 14,
     "keepWeekly": 8,
     "keepMonthly": 12,
+    "keepYearly": 3,
 }
 ```
 
+There are six keys: `keepLast` (the N newest snapshots) plus `keepHourly`, `keepDaily`, `keepWeekly`, `keepMonthly`, and `keepYearly`, each keeping the newest snapshot of each of the N most recent UTC buckets *that hold one*. On a minute or hour schedule, `keepLast` and `keepHourly` are what govern sub-daily density.
+
 All counts are non-negative integers.
 
-- Omit the object entirely to keep everything forever.
+- Omit the object entirely and every target that sets no `retention` of its own keeps all its snapshots forever.
 - Set a target's `retention` to `false` to keep everything for that target.
 - An empty `{}` is rejected, because it would be ambiguous.
 
@@ -223,4 +243,5 @@ A target's `retention` replaces the default wholesale; the two are never merged.
 
 - [Versioning & Retention](/retention) - how retention rules pick snapshots
 - [Security Model](/security-model) - keys, passphrases, and known_hosts
+- [Run It Yourself](/run-it-yourself) / [Run It as a Service](/daemon-setup) - which file each mode reads
 - [CLI Reference](/cli-reference) - the commands that read this config

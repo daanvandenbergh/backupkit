@@ -1,5 +1,5 @@
 export default {
     gradient: "horizon-glow",
-    title: "Daemon Setup",
-    subtitle: "Install the service, tail its logs, and recover across reboots.",
+    title: "Run It as a Service",
+    subtitle: "Unattended, as root, under systemd or launchd - and only with unencrypted keys.",
 };

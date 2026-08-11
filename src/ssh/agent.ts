@@ -36,6 +36,13 @@ export interface AgentDeps {
     hasTty?: boolean;
     /** Timeout per non-interactive tool call in milliseconds. Default 10000. */
     timeoutMs?: number;
+    /**
+     * True when this process is the SERVICE (`backupkit daemon` under systemd
+     * or launchd). Passphrase-protected keys are then refused up front - see
+     * {@link findEncryptedKeys} for why a service cannot own one. Default false
+     * (a local, user-run process: `backupkit start`, `run`, `check`).
+     */
+    serviceMode?: boolean;
 }
 
 /** The backupkit agent socket path under a runtime directory. */
@@ -201,8 +208,9 @@ async function probeUnencrypted(key: string, deps: AgentDeps): Promise<ExecResul
  * Ensure the `.pub` sidecar exists next to a key, generating it when allowed
  * (spec section 4 step 6): unencrypted keys regenerate it any time from the
  * `-y -P ""` probe; encrypted keys regenerate it only interactively (`file:`
- * passphrase via the askpass env, `prompt` via ssh-keygen's own /dev/tty
- * prompt) and fail unattended with a pointer at `backupkit check`. Written
+ * passphrase via the askpass env, otherwise via ssh-keygen's own /dev/tty
+ * prompt - declared `prompt` and undeclared alike) and fail unattended with a
+ * pointer at `backupkit check`. Written
  * 0644 through `writePubSidecar` (O_EXCL - never following a planted symlink).
  * Returns the unencrypted probe result when one was run (so the caller need
  * not repeat it).
@@ -215,23 +223,28 @@ async function ensurePubSidecar(remote: ExplicitRemote, deps: AgentDeps): Promis
     }
     if (remote.passphrase === null) {
         const probe = await probeUnencrypted(key, deps);
-        if (probe.exitCode !== 0) {
+        if (probe.exitCode === 0) {
+            await writePubSidecar(pubPath, probe.stdout);
+            return probe;
+        }
+        if (!hasTty(deps)) {
             throw new SshError(
                 `key ${key} could not be read without a passphrase (is it encrypted?); ` +
                     `configure "passphrase" for remote "${remote.name}" or fix the key: ${toolTail(probe.stderr)}`,
             );
         }
-        await writePubSidecar(pubPath, probe.stdout);
-        return probe;
-    }
-    if (!hasTty(deps)) {
+        // Encrypted, undeclared, and a human is here (`backupkit start`,
+        // `check`): ssh-keygen's own /dev/tty prompt settles it, exactly as it
+        // would for a declared "prompt" key. Demanding the declaration first
+        // would be a hoop with no purpose - the terminal is right there.
+    } else if (!hasTty(deps)) {
         throw new SshError(
             `key ${key} is encrypted and has no ${pubPath} sidecar; ` +
                 `run "backupkit check" in a terminal to generate it, then restart the service`,
         );
     }
     const env =
-        remote.passphrase.kind === "file"
+        remote.passphrase?.kind === "file"
             ? { ...baseEnv(deps), ...askpassEnv(remote.passphrase.value) }
             : baseEnv(deps);
     // "prompt" keys: ssh-keygen prompts on /dev/tty itself; stdout is still captured.
@@ -270,6 +283,12 @@ async function sshAdd(key: string, env: Record<string, string>, deps: AgentDeps)
  * never in argv or env - only the file path is), `prompt` keys via ssh-add's
  * own TTY prompt with inherited stdio (backupkit never sees the passphrase),
  * refused with an actionable error when no TTY is present.
+ *
+ * An encrypted key whose remote declares NO passphrase takes that same TTY
+ * prompt when a human is present - `backupkit start` is meant to load every key
+ * it was given, and refusing over a missing declaration when the terminal is
+ * right there would be a hoop, not a safeguard. Without a TTY it stays the
+ * actionable failure it was.
  */
 async function primeKey(
     remote: ExplicitRemote,
@@ -292,16 +311,20 @@ async function primeKey(
         if (unencryptedProbe === null) {
             unencryptedProbe = await probeUnencrypted(key, deps);
         }
-        if (unencryptedProbe.exitCode !== 0) {
+        if (unencryptedProbe.exitCode === 0) {
+            await sshAdd(key, agentEnv, deps);
+            return;
+        }
+        if (!hasTty(deps)) {
             throw new SshError(
                 `key ${key} appears to be encrypted but remote "${remote.name}" configures no passphrase; ` +
-                    `add "passphrase": "file:/path" or "prompt" to the remote`,
+                    `add "passphrase": "file:/path" or "prompt" to the remote, or run "backupkit start" in a terminal`,
             );
         }
-        await sshAdd(key, agentEnv, deps);
-        return;
-    }
-    if (remote.passphrase.kind === "file") {
+        // Encrypted but undeclared, with a human present: fall through to
+        // ssh-add's own prompt rather than refusing over a missing declaration.
+        // This is what makes `backupkit start` load EVERY key it was given.
+    } else if (remote.passphrase.kind === "file") {
         await sshAdd(key, { ...agentEnv, ...askpassEnv(remote.passphrase.value) }, deps);
         return;
     }
@@ -316,6 +339,56 @@ async function primeKey(
         throw new SshError(`ssh-add ${key} failed (exit ${result.exitCode ?? "signal"})`);
     }
     deps.log.info("loaded key into agent", { key });
+}
+
+/** One explicit remote whose private key is passphrase-protected. */
+export interface EncryptedKey {
+    /** The remote's short name (its key in config `remotes`). */
+    remote: string;
+    /** Absolute path of the encrypted private key. */
+    key: string;
+}
+
+/**
+ * Every unique explicit-remote key that is passphrase-protected, in config
+ * order. A key counts as encrypted when the remote DECLARES a passphrase
+ * source (`file:` or `prompt`) or when `ssh-keygen -y -P ""` cannot read it -
+ * the second half is what catches an encrypted key whose remote declares
+ * nothing, which is the shape that used to fail later, per-remote, as a
+ * priming error.
+ *
+ * Why the service refuses these outright (see {@link loadKeys}): unlocking a
+ * key needs either a human at a TTY - which a launchd/systemd unit never has -
+ * or the passphrase in a file next to the key, which buys no secrecy over an
+ * unencrypted key while adding a second secret to lose. A service therefore
+ * takes ONLY unencrypted keys; an operator who wants a passphrase runs
+ * `backupkit start` in their own session, where an agent can be unlocked once
+ * and interactively.
+ */
+export async function findEncryptedKeys(
+    remotes: readonly ResolvedRemote[],
+    deps: AgentDeps,
+): Promise<EncryptedKey[]> {
+    const encrypted: EncryptedKey[] = [];
+    for (const group of explicitRemotesByKey(remotes).values()) {
+        const remote = group[0];
+        if (remote.passphrase !== null || (await probeUnencrypted(remote.identityFile, deps)).exitCode !== 0) {
+            encrypted.push({ remote: remote.name, key: remote.identityFile });
+        }
+    }
+    return encrypted;
+}
+
+/** The operator-facing message for keys a service cannot unlock (one wording, two call sites). */
+export function encryptedKeysMessage(keys: readonly EncryptedKey[]): string {
+    const list = keys.map((entry) => `${entry.key} (remote "${entry.remote}")`).join(", ");
+    return (
+        `passphrase-protected keys are not supported when backupkit runs as a service: ${list}. ` +
+        "A service has no terminal to unlock a key on. Either give the service its own key with no " +
+        'passphrase (ssh-keygen -t ed25519 -N ""), or stop the service and run "backupkit start" in ' +
+        "your own session instead - it starts an ssh-agent, prompts once for each key, and then " +
+        "schedules exactly like the service does."
+    );
 }
 
 /** The outcome of `loadKeys`: the agent socket plus every per-remote priming failure. */
@@ -335,12 +408,24 @@ export interface LoadKeysResult {
  * lands in `failures` for every remote using it, so the caller fails only
  * that remote's targets while the daemon and every other remote keep running.
  * Only agent-level failures (agent cannot start or answer) still throw.
+ *
+ * `serviceMode` is the one exception to that fault isolation: a
+ * passphrase-protected key THROWS instead, before any agent is started, so the
+ * service refuses to come up rather than running half-blind forever (its
+ * targets would fail every tick with an error no unattended process can ever
+ * resolve). See {@link findEncryptedKeys}.
  */
 export async function loadKeys(remotes: readonly ResolvedRemote[], deps: AgentDeps): Promise<LoadKeysResult> {
     const groups = explicitRemotesByKey(remotes);
     if (groups.size === 0) {
         deps.log.debug("no explicit remotes - agent not started");
         return { sock: null, failures: new Map() };
+    }
+    if (deps.serviceMode === true) {
+        const encrypted = await findEncryptedKeys(remotes, deps);
+        if (encrypted.length > 0) {
+            throw new SshError(encryptedKeysMessage(encrypted));
+        }
     }
     const sock = await ensureAgent(deps);
     const loaded = await loadedFingerprints(sock, deps);

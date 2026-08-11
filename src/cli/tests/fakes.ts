@@ -60,7 +60,7 @@ export class FakeEngine implements EngineLike {
     unlockRows: TargetUnlockReport[] = [];
 
     /** Result of check(). */
-    checkReport: CheckReport = { ok: true, localRsync: { bin: "/usr/bin/rsync", version: "3.2.7" }, sshOk: true, remotes: [], jailLines: [], errors: [] };
+    checkReport: CheckReport = { ok: true, localRsync: { bin: "/usr/bin/rsync", version: "3.2.7" }, sshOk: true, remotes: [], jailLines: [], encryptedKeys: [], errors: [] };
 
     /** Record a call and either throw the scripted failure or return the given value. */
     private answer<T>(method: string, options: unknown, value: T): Promise<T> {
@@ -76,8 +76,15 @@ export class FakeEngine implements EngineLike {
         return this.answer("preflight", options, undefined);
     }
 
+    /** When set, ONLY run() rejects with this - a failing pass on an otherwise healthy engine. */
+    runFailure: Error | null = null;
+
     /** Fake run. */
     run(options?: { targets?: string[]; force?: boolean; dryRun?: boolean }): Promise<RunReport> {
+        if (this.runFailure !== null) {
+            this.calls.push({ method: "run", options });
+            return Promise.reject(this.runFailure);
+        }
         return this.answer("run", options, this.runReport);
     }
 

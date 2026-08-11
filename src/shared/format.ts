@@ -1,10 +1,42 @@
 /**
- * Human formatting (bytes, durations), the size grammar shared by `minFree`
- * and `bwlimit`, and `formatEndpoint` - the ONLY place `user@host:` prefixing
- * and IPv6 bracketing happen in the codebase.
+ * Human formatting (timestamps, bytes, durations), the size grammar shared by
+ * `minFree` and `bwlimit`, and `formatEndpoint` - the ONLY place `user@host:`
+ * prefixing and IPv6 bracketing happen in the codebase.
  */
 
 import type { Endpoint } from "./types.js";
+
+/** Left-pad a non-negative integer with zeros to the given width. */
+function pad(value: number, width = 2): string {
+    return String(value).padStart(width, "0");
+}
+
+/**
+ * THE human-facing timestamp: `YYYY-MM-DDTHH:mm:ssZ` in UTC, truncated to
+ * whole seconds. Every timestamp a USER reads goes through here - CLI table
+ * columns, lock details - so the whole tool speaks one format and one
+ * timezone. The one exception is the LOG line prefix, which is this format
+ * plus `.sss` (i.e. `toISOString()`): a busy run emits many lines inside a
+ * second, and second precision would lose their order irrecoverably.
+ *
+ * The `Z` is load-bearing, not decoration: it is the ISO-8601 zone designator
+ * for UTC. Without it the same string denotes LOCAL time by the standard (and
+ * to `Date.parse`), so a reader in another timezone would misread every
+ * backup time by their offset.
+ *
+ * MACHINE-facing timestamps are deliberately NOT this either: `--json` output,
+ * the on-disk run reports, and the lock meta stay strict `toISOString()` so
+ * existing `jq` and `Date.parse` consumers keep working. Snapshot DIRECTORY
+ * names are this string with the colons removed (`:` is illegal on exFAT/
+ * NTFS/SMB destinations) - see `shared/snapshot-name.ts`, which derives them
+ * from here so the two can never drift.
+ */
+export function formatUtc(date: Date): string {
+    return (
+        `${pad(date.getUTCFullYear(), 4)}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())}` +
+        `T${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}Z`
+    );
+}
 
 /** Binary multiplier per size-suffix letter. */
 const SIZE_MULTIPLIER: Record<string, number> = {

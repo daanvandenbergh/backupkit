@@ -45,7 +45,7 @@ describe("the starter config", () => {
         const uncommented = STARTER_CONFIG.replace('// "myserver": { "alias": "myserver" },', '"myserver": { "alias": "myserver" },');
         expect(uncommented).not.toBe(STARTER_CONFIG);
         const config = resolveStarter(uncommented);
-        expect(config.remotes.myserver).toEqual({ kind: "alias", name: "myserver", alias: "myserver" });
+        expect(config.remotes.myserver).toEqual({ kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" });
         // Unreferenced by the example target - a warning, never an error.
         expect(config.warnings).toEqual(['remote "myserver" is not referenced by any target']);
     });

@@ -10,7 +10,7 @@ compromised source host cannot touch the backup archive).
 ```
 assets/
   logo/                             # The mark: bare SVG, gradient mark, dark and light app tiles
-.agent/
+.agentstore/
   scribekit-hero/readme/            # The README hero: brand settings, params, rendered hero.png
 src/
   index.ts                          # Package root entry (".")

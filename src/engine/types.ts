@@ -7,6 +7,7 @@
 
 import type { TransferAttempt } from "../rsync/rsync.js";
 import type { RetentionPlan } from "../retention/retention.js";
+import type { EncryptedKey } from "../ssh/agent.js";
 
 export type { TransferAttempt } from "../rsync/rsync.js";
 
@@ -190,6 +191,14 @@ export interface CheckReport {
     remotes: RemoteCheck[];
     /** Jail-line data for every push target with the jail enabled (`jail: false` targets are omitted). */
     jailLines: JailLine[];
+    /**
+     * Every configured key a SERVICE could never unlock, in config order -
+     * empty when this config can run unattended. Not an error: such a config is
+     * perfectly valid, it just belongs to `backupkit start` rather than to
+     * `backupkit service install`, and `check` has to say which of the two it
+     * is instead of always recommending the daemon.
+     */
+    encryptedKeys: EncryptedKey[];
     /** Every collected error, in discovery order. */
     errors: string[];
 }

@@ -15,13 +15,13 @@ image: "/assets/docs/security-model/hero.en.jpg"
 updated: "2026-08-11"
 ---
 
-Backupkit moves data over ssh and writes it to an archive, so its security model comes down to one question: who can reach what. This page walks through each defense - the trust direction, the jail around a push key, host-key pinning, the permission preflight, and how to harden the filesystem the archive lives on.
+Backupkit moves data over ssh and writes it to an archive, so its security model comes down to one question: who can reach what. This page walks through each defence - the trust direction, the jail around a push key, host-key pinning, the permission preflight, and how to harden the filesystem the archive lives on.
 
 ## Start with the trust direction
 
-The strongest control here is not a check in the code, it is the direction you pick.
+Direction is the control that does the most work here; everything below it is defence behind that choice.
 
-In a **pull** target, the backup server reaches out to the source, and the source holds no key that reaches the archive. Take over the source host and you still cannot read, delete, or alter a stored snapshot. That is why pull is the default.
+In a **pull** target, the archive server reaches out to the source, and the source holds no key that reaches the archive. Take over the source host and you still cannot read, delete, or alter a stored snapshot. That is why pull is the default.
 
 **Push** exists for hosts that have to start the connection themselves. The source then does hold a key that reaches the archive, so backupkit confines that key (see [the push jail](#the-push-jail)). [Push vs Pull](/push-vs-pull) compares the two in full.
 
@@ -31,9 +31,11 @@ A compromised source still controls one thing: **the files it hands over**.
 
 It can serve an empty tree, or one quietly missing half its data. Retention decides what to keep by looking at snapshot names and counts, never at contents - so those near-empty snapshots would slowly push every snapshot holding real data out of the retention window. The archive dies by attrition, without a single delete command.
 
-Backupkit watches for that. If a promoted snapshot's file count collapses compared to the previous one, **the prune after that run is skipped** and the event is logged at error level and recorded on the run report. The snapshot itself is kept, because the data already crossed the wire and throwing it away would be the more destructive move. The archive only grows until a human looks at it.
+Backupkit watches for that. If a promoted snapshot holds fewer than **half** the files of the previous trusted run - or if this run's file count could not be measured at all while a baseline exists, since a hostile source decides whether its rsync emits a parsable stats block - **the prune after that run is skipped** and the event is logged at error level and recorded on the run report. The snapshot itself is kept, because the data already crossed the wire and throwing it away would be the more destructive move. The archive only grows until a human looks at it.
 
 `backupkit prune` never consults this tripwire, so it is your override once you have confirmed the shrink was real. See [the content-collapse tripwire](/retention#the-content-collapse-tripwire) for what you see and what to do.
+
+A second tripwire on the same path catches the mirror-image trick: complete snapshots appearing *below* the previous run's newest mean names were planted rather than taken, and that also promotes, skips retention, and logs at error level - see [the planted-snapshot guard](/retention#the-planted-snapshot-guard).
 
 This fails safe in one direction on purpose: a false alarm costs disk, a missed one costs the archive.
 
@@ -50,7 +52,7 @@ That last one deserves a note. Backupkit runs ssh with an agent socket in the en
 
 Both kinds of remote get this baseline, so even an alias remote whose `ssh_config` is lax still gets the strict, no-hang behaviour.
 
-An **explicit** remote gets more on top: `IdentitiesOnly=yes`, `PreferredAuthentications=publickey`, a dedicated `UserKnownHostsFile`, and the exact `-i <identityFile>` and `-p <port>` from your config. An **alias** remote gets the baseline plus `LogLevel=ERROR` and nothing else - its host, user, key, port, and known_hosts come from `ssh_config`, which backupkit deliberately leaves alone.
+Both kinds also get `LogLevel=ERROR`. An **explicit** remote gets more on top: `IdentitiesOnly=yes`, `PreferredAuthentications=publickey`, a dedicated `UserKnownHostsFile`, and the exact `-i <identityFile>` and `-p <port>` from your config. An **alias** remote gets no identity, port, or known_hosts options at all - its host, user, key, port, and known_hosts come from `ssh_config`, which backupkit deliberately leaves alone.
 
 ## The push jail
 
@@ -59,17 +61,17 @@ An **explicit** remote gets more on top: `IdentitiesOnly=yes`, `PreferredAuthent
 By default a push key is not a normal shell key. It sits in `authorized_keys` behind a **forced command**: an ssh setting that runs one fixed program regardless of what the client asks to run. Backupkit's program is `backupkit-remote`, and `backupkit check` generates the line for you from your config and your real key:
 
 ```
-restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...
+restrict,command="/usr/local/bin/backupkit-remote '/srv/backups'" ssh-ed25519 AAAA...
 ```
 
 `restrict` strips port, agent, PTY, and X11 forwarding. The forced command then reads what the client asked for and allows only two things:
 
-- **`rsync --server` transfers** whose options are on an allowlist, and whose single path operand is one of exactly two shapes: `<jailRoot>/<target>/<snapshot>.partial` for a write, or `<jailRoot>/<target>/<snapshot>` for a `--sender` read (a restore). The allowlist comes from argv that real rsync was *measured* to send, and a test feeds those captured command lines back through the shipped script.
+- **`rsync --server` transfers**, whose single path operand is `<jailRoot>/<target>/<snapshot>.partial` for a write, or `<jailRoot>/<target>/<snapshot>` (or its `.partial`) for a `--sender` read - a restore. The option policy is a **denylist, not an allowlist**: an option is refused when it can name a path, execute something, follow a symlink, or move the file arguments off the command line - `--protect-args`/`-s`, `--rsync-path`, `--rsh`/`-e`, `--files-from`, `--temp-dir`, `--inplace`, `--remove-source-files`, `--append`, the batch options, and the `L`/`K`/`k`/`s` bundle letters - and `--timeout` and `--bwlimit` must be nonzero. Anything else unfamiliar is allowed precisely because it cannot name a file, and the pinned path operand is what bounds it. A test feeds argv that real rsync was *measured* to send back through the shipped script, which keeps the happy path honest without being the boundary itself.
 - **the handful of directory commands** the snapshot store needs: `mkdir`, `find`, `mv`, `rm -rf`, `df`, and `rsync --version`. Every path operand has to sit under the jail root, and its last component has to look like a snapshot name, its `.partial` or `.deleting` form, `.backupkit.lock`, or a valid target name.
 
 Anything else is rejected. There is no `eval` anywhere in the script - validated arguments are `exec`'d directly, so no shell ever re-parses text an attacker controls.
 
-The jail is recommended, not enforced. The client cannot verify it is installed, and a target can opt out with `"jail": false` - see [running without the jail](/push-vs-pull#running-without-the-jail). Everything in this section describes what you get **when it is installed**.
+The jail is recommended rather than enforced. The client cannot verify it is installed, and a target can opt out with `"jail": false` - see [running without the jail](/push-vs-pull#running-without-the-jail). A remote with `"restrictedShell": true` is the second opt-out, and the two do not compose: bare-word commands do not match the jail's quoted grammar, so such a remote needs `"jail": false` as well. Everything in this section describes what you get **when it is installed**.
 
 ### Deletion is blocked on three routes, not one
 
@@ -83,7 +85,7 @@ Locking down `rm -rf` alone would not help, because an attacker only needs *some
 mv -- /srv/backups/web /srv/backups/2026-01-01T000000Z.deleting
 ```
 
-followed by an `rm -rf` of that name would erase a whole target using two permitted commands. So the jail requires both operands to be snapshot-shaped *and* siblings in the same directory. Every real rename is (promote, delete phase one, reclaiming a partial); no gadget like the one above is. The same rule stops `.backupkit.lock` being moved aside to defeat the remote lock.
+followed by an `rm -rf` of that name would erase a whole target using two permitted commands. So the jail requires three things at once: both operands snapshot-shaped, siblings in the same directory, and the destination not already existing - POSIX `mv` moves a source *inside* an existing directory, so `mv <snap>.partial <snap>` against an already-promoted snapshot would bury a partial inside verified history. Every real rename is (promote, delete phase one, reclaiming a partial); no gadget like the one above is. The same rule stops `.backupkit.lock` being moved aside to defeat the remote lock.
 
 **A transfer cannot be turned into a deletion.** The client sends `--delete --force` on every run, so that flag has to be allowed - which means the *destination* is what gets pinned instead. Left open, `rsync --server --delete --force . /srv/backups/web` with an empty file list would delete every snapshot of that target in one command, and a destination naming a finished snapshot would overwrite verified history. Pinning the operand to the run's own `<snapshot>.partial` makes `--delete` harmless: it can only delete inside the scratch directory currently being built.
 
@@ -93,13 +95,13 @@ The client-side "never delete the newest complete snapshot" guard does not help 
 
 In push mode, the pushing host is the one running retention. The archive server holds no retention policy of its own, so it cannot tell a policy-driven prune from a targeted deletion. A compromised push client can retire finished snapshots one at a time, exactly the way the legitimate client does.
 
-The jail bounds the damage to one snapshot per command pair rather than a whole history, and the newest complete snapshot is refused on both sides. But the authority is real, and it comes with the direction. This is the structural reason [pull is the recommendation](/push-vs-pull).
+The jail bounds the damage to one snapshot per command pair rather than a whole history. It does **not** protect the newest complete snapshot: that guard lives in the client's snapshot store, and a compromised client is precisely the thing that does not run it - the server has no notion of "newest" at all. The authority is real, and it comes with the direction. This is the structural reason [pull is the recommendation](/push-vs-pull).
 
 ### Symlinks cannot be used to escape
 
 Checking the text of a path only bounds the *literal* path. rsync transfers symlinks by default, so an attacker who can write inside the jail could plant one and try to make a later `mv` or `mkdir` follow it out.
 
-To stop that, for every path operand `backupkit-remote` walks each existing component from the jail root down and refuses if any of them is a symlink. That bounds the *resolved* path, so a planted symlink in the middle can never be followed out of the jail root. The forced command also shell-quotes the jail root, so a root path containing spaces or quotes cannot break out or widen the jail.
+To stop that, for every path operand `backupkit-remote` walks each existing component from the jail root down and refuses if any of them is a symlink. That bounds the *resolved* path, so a planted symlink in the middle can never be followed out of the jail root. The generated `authorized_keys` line shell-quotes the jail root for you - `backupkit check` single-quotes it and escapes it again for the `command="..."` field - so a root path containing spaces or quotes cannot break out or widen the jail. The script's own half of that deal is to refuse outright to run with a root that is not absolute or that contains `'`, `,`, `\`, or `..`.
 
 For an alias push remote, `check` cannot see the real public key. It prints the `restrict,command=...` prefix plus instructions to append the public key the alias authenticates with. No generated line ever shows an unrestricted key.
 
@@ -121,8 +123,11 @@ A *changed* host key - the classic man-in-the-middle signal - is fatal everywher
 Backupkit runs a permission preflight and refuses to continue on a mode that is too open. It always checks the files it owns:
 
 - the config file - not group- or other-writable, owned by your effective uid or by root;
-- the state and runtime directories - `0700`, created that way when missing;
-- every local destination root - has to exist, not group- or other-writable.
+- the state and runtime directories - `0700`, owned by your euid or root, created that way when missing;
+- every local destination root - has to exist, not group- or other-writable, owned by your euid or root;
+- `logging.file` when you set one - a regular file, not group- or other-writable, owned by your euid or root, and no looser than `0640`.
+
+Every one of those is judged through its **containing directory** as well: a writable or foreign-owned parent lets any local user swap the file out whatever its own mode says.
 
 For each **explicit** remote it also checks the private key and any `file:` passphrase file (no group or other bits, owned by your euid or root), the `.pub` sidecar if there is one, and the dedicated known_hosts file.
 
@@ -132,7 +137,9 @@ For each **explicit** remote it also checks the private key and any `file:` pass
 
 The *mode* check (no group or other access) always runs - it is what keeps other unprivileged users out of your keys. The *ownership* check is different: when backupkit runs as **root**, it does **not** require these files to be owned by root. Root can already read, write, and change the owner of any file, so demanding you `chown` your keys to root would add no security - it would only force you to copy them into a root-owned directory for nothing. So a root daemon happily uses your own user-owned keys, config, and state directory exactly where they already live (for example `~/.ssh/id_ed25519`, or an alias remote that reuses your `~/.ssh/config`). When backupkit runs as a **non-root** user, ownership is still enforced: a process using a file owned by a *different* unprivileged user is a real risk, because that user could swap the file out from under it.
 
-Passphrases never appear in a config value, an environment variable, argv, or a log. There are exactly two ways one is ever carried: ssh-add's own terminal prompt (`passphrase: "prompt"`, refused when there is no terminal), or a `0600` askpass file (`passphrase: "file:/abs/path"`). An alias remote cannot carry a passphrase at all - the field is not part of its shape.
+Passphrases never appear in a config value, an environment variable, argv, or a log. There are exactly two ways one is ever carried: ssh-add's own terminal prompt (`passphrase: "prompt"` - and any encrypted key when a terminal is present, declared or not), or a `0600` askpass file (`passphrase: "file:/abs/path"`). An alias remote cannot carry a passphrase at all - the field is not part of its shape.
+
+**The service never carries one.** `backupkit daemon` refuses to start if any configured key is passphrase-protected, so an unattended backupkit only ever holds keys that need no secret to unlock. Encrypted keys belong to the mode you [run yourself](/run-it-yourself): `backupkit start` runs the same scheduler in your session and can prompt. See [a service cannot hold an encrypted key](/daemon-setup#a-service-cannot-hold-an-encrypted-key).
 
 ## Harden the archive filesystem
 
@@ -148,4 +155,5 @@ Back that up at the mount layer anyway. Mount the filesystem holding your destin
 
 - [Push vs Pull](/push-vs-pull) - the trust direction in depth
 - [Configuration Reference](/configuration) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
-- [Daemon Setup](/daemon-setup) - the hardened service unit and how keys behave across reboots
+- [Run It as a Service](/daemon-setup) - the hardened service unit and how keys behave across reboots
+- [Run It Yourself](/run-it-yourself) - the session scheduler, its ssh-agent, and passphrase-protected keys

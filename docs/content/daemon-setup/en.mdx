@@ -1,9 +1,9 @@
 ---
-title: "Daemon Setup"
-description: "Install and drive the backupkit service, tail its logs, and understand how it recovers from a crash or a reboot."
+title: "Run It as a Service"
+description: "Install backupkit as a root systemd unit or launchd daemon: its own system config, unencrypted keys only, plus the lifecycle verbs, logs, and reboot recovery."
 tab: "Guide"
 group: "Operate"
-order: 1
+order: 2
 icon: "gear"
 keywords:
     - daemon
@@ -11,24 +11,63 @@ keywords:
     - systemd
     - launchd
     - logs
+    - passphrase
 image: "/assets/docs/daemon-setup/hero.en.jpg"
 updated: "2026-08-11"
 ---
 
-The daemon runs the scheduler: one snapshot per due window, then a prune against your retention policy. This page installs it, drives it, tails its logs, and explains what happens after a crash or a reboot.
-
-**You need:** a config that passes `backupkit check` (see [Getting Started](/getting-started)). Every service verb except `status` needs root.
-
-## Install and start it
+There are exactly two ways to run backupkit on a schedule, and this page is one of them: **the OS runs it, as root, unattended** - a systemd unit on Linux, a launchd daemon on macOS. The other is [running the scheduler yourself](/run-it-yourself) in your own session. They use different commands, different config files, different state directories, and they differ on one hard constraint: **a service cannot hold a key that has a passphrase.**
 
 ```bash
-sudo backupkit init      # write the starter config
-sudo backupkit check     # verify keys, hosts, and versions
 sudo backupkit service install
 sudo backupkit service start
 ```
 
-`service install` writes the OS unit - a systemd unit on Linux, a launchd plist on macOS - enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
+**You need:** root (every verb except `status`), a config in `/etc/backupkit/`, and keys with no passphrase. `backupkit check` tells you whether this config qualifies.
+
+## The whole setup
+
+```bash
+sudo backupkit init      # writes /etc/backupkit/config.jsonc
+sudo backupkit check     # verify keys, hosts, and versions
+sudo backupkit service install
+sudo backupkit service start
+backupkit service status # no root needed
+```
+
+`service install` writes the OS unit, enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it. Everything the daemon uses lives in root-owned locations:
+
+| Thing | Where it lives for the service |
+| --- | --- |
+| Config | `/etc/backupkit/config.jsonc` - or `config.json`, but never both in one directory - the only directory a root service finds by itself |
+| Host keys | `/etc/backupkit/known_hosts` (`<configDir>/known_hosts`) |
+| Run reports (`stateDir`) | `/var/lib/backupkit`, or `/var/db/backupkit` on macOS |
+| ssh-agent socket | `/run/backupkit/agent.sock`, or `/var/db/backupkit/agent/agent.sock` on macOS |
+| Unit definition | `/etc/systemd/system/backupkit.service`, or `/Library/LaunchDaemons/com.daanvandenbergh.backupkit.plist` |
+| Logs | journald, or `/var/log/backupkit/` on macOS - read either with `backupkit logs` |
+
+A config kept anywhere else has to be named at install time - see [Root service, per-user config](#root-service-per-user-config).
+
+## A service cannot hold an encrypted key
+
+**The service takes only keys with no passphrase.** `backupkit daemon` - the loop the unit runs - checks every configured key before it starts anything, and if any of them is passphrase-protected it exits with an error naming the key and its remote. It does not come up half-working.
+
+That is a property of services, not a policy choice. Unlocking a key needs a terminal to type the passphrase on, and a launchd job or systemd unit has none. The alternative - the passphrase in a file beside the key, readable by the same process that reads the key - buys no secrecy over an unencrypted key while adding a second secret to lose. So the choice is made explicitly rather than papered over.
+
+A key counts as protected when its remote declares a `passphrase` (`"file:/..."` or `"prompt"`) **or** when the key file itself turns out to be encrypted, whatever the config claims.
+
+Two ways forward:
+
+**Give the service its own passphrase-less key.** The usual answer for an unattended backup: a key that exists only for this, with only the access the backup needs.
+
+```bash
+sudo ssh-keygen -t ed25519 -N "" -f /etc/backupkit/keys/archive_ed25519
+ssh-copy-id -i /etc/backupkit/keys/archive_ed25519.pub backup@archive.example.com
+```
+
+**Or keep the passphrase and [run the scheduler yourself](/run-it-yourself)** with `backupkit start` - the same scheduler, the same windows, the same retention, in your own session where it can prompt.
+
+Alias remotes are unaffected either way: `ssh_config` and an agent are in charge of those, not backupkit. Note that a root service resolves an alias against **root's** `ssh_config` and root's agent, which is a different arrangement from the one your `backupkit check` just verified - `check` says so when it sees one.
 
 ## Root service, per-user config
 
@@ -37,12 +76,22 @@ The daemon always runs as **root** - `User=root` in the systemd unit, and the la
 **Root looks in root's places.** Under `sudo` the lookup is `/etc/backupkit/` and then *root's* `~/.backupkit/` - never yours. So a config written by an unprivileged `backupkit init`, which lands in your own `~/.backupkit/config.jsonc`, is invisible to it. Name the file once, at install:
 
 ```bash
-sudo backupkit service install --config ~/.backupkit/config.jsonc
+sudo backupkit service install --config /home/dan/.backupkit/config.jsonc
 ```
 
-The absolute path is written into the unit's `ExecStart`, so every later `start` and `restart` uses that same file. A root service may read a config you own - it only has to be owned by you or root and not group- or other-writable, and `install` refuses it by name with the exact `chmod` otherwise.
+The absolute path is written into the unit's `ExecStart`, so the daemon the OS launches reads that file. **Repeat the same `--config` on every later lifecycle verb**, or export `BACKUPKIT_CONFIG` for root:
 
-**Set `stateDir` explicitly when you do this.** Its default depends on *who runs the command*, not on the config: root gets `/var/lib/backupkit` (`/var/db/backupkit` on macOS), you get `~/.local/state/backupkit`. Share one config between the root daemon and your own unprivileged `backupkit status` and the two read different report directories - the daemon backs up correctly while your `status` shows nothing at all. One line settles it, and both identities then agree:
+```bash
+sudo backupkit service start   --config /home/dan/.backupkit/config.jsonc
+sudo backupkit service restart --config /home/dan/.backupkit/config.jsonc
+sudo backupkit service status  --config /home/dan/.backupkit/config.jsonc
+```
+
+`start`, `restart`, and `status` re-resolve the config themselves rather than reading it back out of the unit. A bare `sudo backupkit service start` after that install either fails with `no config file found` or - worse, if `/etc/backupkit/config.jsonc` also exists - quietly rewrites `ExecStart` to that other file and reloads, so the daemon backs up from a config you never installed.
+
+A root service may read a config you own: installing as root, the only rule is that the file is not group- or other-writable, and `install` refuses it by name with the exact `chmod go-w` otherwise. Ownership is not checked when the installer is root, since root can read and chown anything regardless.
+
+**Set `stateDir` explicitly when you do this.** Its default depends on *who runs the command*, not on the config: root gets `/var/lib/backupkit` (`/var/db/backupkit` on macOS), you get `$XDG_STATE_HOME/backupkit`, or `~/.local/state/backupkit` when that is unset. Share one config between the root daemon and your own unprivileged `backupkit status` and the two read different report directories - the daemon backs up correctly while your `status` shows nothing at all. One line settles it, and both identities then agree:
 
 ```jsonc
 "stateDir": "/var/lib/backupkit",
@@ -53,11 +102,9 @@ The absolute path is written into the unit's `ExecStart`, so every later `start`
 `install` writes a single system unit - `/etc/systemd/system/backupkit.service` or `/Library/LaunchDaemons/com.daanvandenbergh.backupkit.plist`. There is no per-user instance, so two people who each keep their own `~/.backupkit/config.jsonc` cannot both have a service: the second `install` overwrites the first one's unit. Pick one:
 
 - **Shared:** merge the targets into `/etc/backupkit/config.jsonc`, the root-owned location every default aims at. One config, one daemon, and no `--config` anywhere.
-- **Per-user, unscheduled:** each user keeps their own config and runs `backupkit run` from their own cron or user timer - no root needed. `backupkit daemon` also runs the scheduler in the foreground under their own identity, which a systemd **user** unit or a launchd **LaunchAgent** can supervise.
+- **Per-user:** each user runs their own schedule instead - see [Run It Yourself](/run-it-yourself), which covers cron, a terminal multiplexer, and supervising `backupkit daemon` from a systemd **user** unit or a launchd **LaunchAgent** under their own uid.
 
 Mind the order in that second case: `/etc/backupkit/` is probed **before** `~/.backupkit/` for *every* identity, so the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file. Where both exist, each user's commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` exported in their shell profile) to reach their own.
-
-Per-user configs stay separate all the way down: each one's `stateDir`, its `<configDir>/known_hosts`, and its agent socket live under that user's home.
 
 ## Drive the lifecycle
 
@@ -66,25 +113,27 @@ Per-user configs stay separate all the way down: each one's `stateDir`, its `<co
 | Verb | What it does |
 | --- | --- |
 | `install` | Write the unit (plus enable on systemd, plus a newsyslog conf on macOS) |
-| `uninstall` | Stop the unit if it is running, then remove everything `install` wrote |
+| `uninstall` | Stop the unit, disable it on systemd, and remove the unit definition (plus the newsyslog conf on macOS). State directories, log directories, and log files are left alone |
 | `start` | Start the unit. Already up? `Service is already running.` and exit 0 |
 | `stop` | Stop the unit. Already down? `Service is already stopped.` and exit 0 |
 | `restart` | Restart the running unit |
 | `status` | The unit-state header line, plus the per-target table |
 
-Run any lifecycle verb with no unit installed and it says the service is not installed, names the command that registers it, and exits 1.
+Run `start`, `stop`, or `restart` with no unit installed and it says the service is not installed, names the command that registers it, and exits 1. `uninstall` with no unit is a success instead - `Service was not installed - nothing to remove.` and exit 0.
 
 On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`.
 
-`service status` is the one verb that needs no root. It puts a one-line unit-state header - running with the pid, installed but stopped, or not installed - above the ordinary `status` table, and never errors just because the unit is missing.
+`service status` is the one verb that needs no root. It puts a one-line unit-state header above the ordinary `status` table and never errors just because the unit is missing: running with its pid, installed but not running, not installed, `loaded, no process running right now` on macOS, or whatever state systemd itself reports (`failed`, `activating`) passed through verbatim.
+
+`backupkit daemon` is the command the unit's `ExecStart` runs. You never need to type it yourself on a machine with the service installed; it is documented so the unit holds no mystery.
 
 ### The unit follows your config
 
-Parts of the unit are derived from the config. The important one is `ReadWritePaths`, which lists every path the daemon is allowed to write to: each local destination root, the `stateDir`, the config directory, and the `logging.file` directory.
+Parts of the unit are derived from the config. The important one is `ReadWritePaths`, which lists every path the daemon is allowed to write to: each local destination root, the `stateDir`, the config directory, the `logging.file` directory, and - for every explicit remote - the directory holding its `identityFile` and the one holding its `knownHostsFile`, since the daemon creates a missing `known_hosts` and writes the public-key sidecar next to the private key. A key or `knownHostsFile` outside that set does not merely go unhardened; the unit cannot write it at all.
 
 Under `ProtectSystem=strict` the rest of the filesystem is read-only. So a unit written *before* you added a target would leave the daemon unable to write that target's archive at all.
 
-You do not have to remember this. `start` and `restart` re-derive the unit from the current config; if it differs, they rewrite it, print `config changed since install - refreshed the service unit`, and reload. (On macOS a changed plist is reloaded with `bootout` plus `bootstrap`, because `kickstart` would re-exec the cached one.)
+You do not have to remember this. `start` and `restart` both re-derive the unit from the current config and rewrite it when it differs, printing `Config changed since install - refreshed the service unit.` **`restart` is the verb that makes the new unit take effect** - it reloads (on macOS with `bootout` plus `bootstrap`, because `kickstart` would re-exec the cached plist). `start` against an already-running service refreshes the file on disk and then reports `Service is already running.` without reloading anything.
 
 So adding a target is an edit plus:
 
@@ -103,7 +152,11 @@ backupkit logs -f         # follow until Ctrl-C
 backupkit logs -n 500     # last 500 lines
 ```
 
-If there is no log source yet - no journal unit, or no macOS log files - it says so, names the command that registers the service, and exits 1. There is no `--json`, because journald already offers `-o json`.
+On macOS the log directory `/var/log/backupkit` is `0750 root:wheel` and newsyslog keeps the files themselves at `640`, so read them with `sudo backupkit logs`.
+
+If there is no log source yet it distinguishes the two reasons: no unit installed (it names the command that registers one), or a unit that has written nothing yet (it points at `backupkit service status`, since the usual cause is a daemon failing to start). Either way it exits 1. There is no `--json`, because journald already offers `-o json`.
+
+This command reads the *service's* logs only. A scheduler you started yourself logs to its own terminal - see [Run It Yourself](/run-it-yourself#while-it-runs).
 
 ## Restarts and reboots
 
@@ -117,16 +170,12 @@ After a crash or a reboot the daemon rebuilds its picture of the world from the 
 
 - resumes any in-progress `.partial` snapshot instead of starting over;
 - re-derives each target's failure counters from the run reports;
-- re-primes `file:` passphrase keys automatically;
-- runs exactly **one** catch-up run per missed window.
+- re-adds every key to its agent;
+- runs **one** catch-up run no matter how many windows were missed.
 
 So a host that was down overnight comes back and takes one snapshot per target, not one per missed hour.
 
-Keys behave differently across a reboot depending on how the passphrase is supplied:
-
-- **Unencrypted keys and `file:` passphrases** need nothing - the daemon reloads them itself.
-- **`prompt` passphrases** cannot be re-primed unattended. Only that remote's targets fail, and the error points at `backupkit check`, which is the command to run after each reboot on a `prompt` deployment.
-- **Alias remotes** need nothing - your own agent and `ssh_config` are in charge.
+Keys need no attention across a reboot: the service only ever holds unencrypted keys, so it re-adds them itself with nothing to type. That is the practical pay-off of the [passphrase rule above](#a-service-cannot-hold-an-encrypted-key) - unattended really means unattended.
 
 ## Crash-loop backoff
 
@@ -144,6 +193,7 @@ On Linux that is journald. On macOS, `service install` writes `/etc/newsyslog.d/
 
 ## Related
 
-- [Getting Started](/getting-started) - the path to a passing `check`
+- [Run It Yourself](/run-it-yourself) - the other mode: your session, your config, passphrases allowed
+- [Getting Started](/getting-started) - the setup path up to the point these two modes fork
 - [CLI Reference](/cli-reference) - every command and flag
 - [Security Model](/security-model) - key handling and archive hardening

@@ -2,6 +2,11 @@
  * The `backupkit daemon` command - the foreground scheduler loop the service
  * unit's ExecStart runs: preflight, then `start()` until a signal stops it.
  * The process never self-daemonizes.
+ *
+ * This is the SERVICE entry point, so its preflight runs in service mode: a
+ * passphrase-protected key aborts startup with an actionable error instead of
+ * failing silently on every tick. `backupkit start` is the same loop for a
+ * human's own session, where a key CAN be unlocked.
  */
 
 import type { CliDeps } from "../context.js";
@@ -17,7 +22,7 @@ export async function daemonCommand(argv: string[], deps: CliDeps): Promise<numb
     }
     const { config, engine } = deps.loadContext(values.config as string | undefined);
     deps.wireSignals(() => engine.stop());
-    await engine.preflight();
+    await engine.preflight({ serviceMode: true });
     // The unit's ExecStart is this command, so these two lines are what the
     // journal (and `backupkit logs`) shows for a clean start and a clean stop -
     // without them a healthy daemon is indistinguishable from one that died

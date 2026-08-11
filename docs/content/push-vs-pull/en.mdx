@@ -10,6 +10,7 @@ keywords:
     - push
     - direction
     - architecture
+    - storage box
 image: "/assets/docs/push-vs-pull/hero.en.jpg"
 updated: "2026-08-11"
 ---
@@ -20,25 +21,25 @@ Every target has a `direction`, either `"pull"` or `"push"`. It decides which ma
 
 Either way, *this* machine is the one running backupkit and dialling out over ssh. What changes is which end the data is on.
 
-- **`"pull"`** - you run backupkit on the backup server. It connects to the remote, reads the remote's `source`, and writes into a local `destination`.
+- **`"pull"`** - you run backupkit on the archive server. It connects to the remote, reads the remote's `source`, and writes into a local `destination`.
 - **`"push"`** - you run backupkit on the source host. It connects to the archive server and sends its local `source` to a `destination` over there.
 
 ## Why pull is the default
 
-With pull, the backup server holds the ssh key and reaches into the source host. The source host holds nothing that reaches the archive.
+With pull, the archive server holds the ssh key and reaches into the source host. The source host holds nothing that reaches the archive.
 
-So if someone takes over the source host, they get no credential to the backup server. They cannot read other machines' backups sitting there, and they cannot delete or alter existing snapshots. The archive is simply not reachable from where they are.
+So if someone takes over the source host, they get no credential to the archive server. They cannot read other machines' backups sitting there, and they cannot delete or alter existing snapshots. The archive is simply not reachable from where they are.
 
 Pull also needs less privilege on the remote: the account only has to *read* the source. That is why the starter config calls its example user `backup-reader`.
 
 ## When to use push
 
-Push is for the case where the source host has to start the connection - the backup server cannot route to it, or it sits behind NAT.
+Push is for the case where the source host has to start the connection - the archive server cannot route to it, or it sits behind NAT.
 
 The cost is that the source host now holds a key that reaches the archive. To limit the damage that key can do, put it behind a **forced command**: an `authorized_keys` setting that makes ssh run one fixed program no matter what the client asks for. Backupkit ships that program as `backupkit-remote`, and `backupkit check` prints the exact line to install on the archive server:
 
 ```
-restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...
+restrict,command="/usr/local/bin/backupkit-remote '/srv/backups'" ssh-ed25519 AAAA...
 ```
 
 `restrict` turns off port forwarding, agent forwarding, PTY allocation, and X11. The forced command then allows only the `rsync --server` transfers and the few directory operations backupkit actually needs, all confined to the directory you name. Everything else is rejected. The [Security Model](/security-model) covers exactly what it lets through.
@@ -55,18 +56,18 @@ The easy fix is to install backupkit on the archive server too, and run this aft
 
 ```bash
 sudo backupkit jail install     # atomic and idempotent
-sudo backupkit jail status      # exits 1 if the installed copy is stale
+backupkit jail status           # exits 1 unless the installed copy matches the package
 ```
 
 `jail install` reads no config. It copies the shipped script to `/usr/local/bin/backupkit-remote` via a temp file and a rename, so an interrupted install never leaves half a jail behind. `jail status` needs no root, which makes it a cheap monitoring check.
 
-You will also be told without asking: on any machine that has a script installed at that path, every `backupkit` command prints a stderr warning when the installed copy no longer matches the package. Machines with no script installed stay quiet.
+You will also be told without asking: on any machine that has a script installed at that path, every `backupkit` command except `jail` itself - whose verbs report that state precisely - prints a stderr warning when the installed copy no longer matches the package. Machines with no script installed stay quiet.
 
-If you cannot install backupkit on the archive server, copy `dist/snapshots/internal/backupkit-remote.sh` there by hand.
+If you cannot install backupkit on the archive server, copy `dist/snapshots/internal/backupkit-remote.sh` there by hand as `/usr/local/bin/backupkit-remote` and `chmod 755` it - the mode matters, because a `0644` jail rejects every push with a bare `Permission denied`.
 
 ## Running without the jail
 
-Set `"jail": false` on a push target to use a plain account instead:
+Set `"jail": false` on a push target to use a plain account instead. It defaults to `true` on push, and it is never settable on pull - writing it there is a config error, since a pull target keeps every credential local and has no jail to speak of.
 
 ```jsonc
 "nas-www": {
@@ -83,15 +84,34 @@ Two reasons to do that:
 - **You accept the risk.** The push key gets normal account access, and you are fine with it - a NAS on a LAN that nothing hostile can reach, say.
 - **The host will not let you install one.** Storage appliances and hosted "storage box" products often offer rsync over ssh but no way to install a script or set a forced command.
 
-Backups run exactly the same either way. The client always sends plain `rsync` plus ordinary POSIX commands; the jail only checks them and then runs them unchanged. For an unjailed target, `backupkit check` prints a note about the accepted risk instead of an `authorized_keys` line. It never probes the jail - `check` cannot tell whether the forced command is installed, so installing it is entirely on you.
+Backups run exactly the same either way. The client always sends plain `rsync` plus ordinary POSIX commands; the jail only checks them and then runs them unchanged. For an unjailed target, `backupkit check` prints a warning in place of the `authorized_keys` line: `Warning: push target <name> has the jail disabled ("jail": false) - its key gets whatever access the server grants it.` It never probes the jail - `check` cannot tell whether the forced command is installed, so installing it is entirely on you.
 
 What you give up is containment. An unjailed key can do anything the account can, including deleting the whole archive with one command from a compromised source host. That is the exact scenario versioned backups exist for, so use the jail where you can - or better, [pull](#why-pull-is-the-default).
 
-On a restricted host, the account has to accept the commands backupkit sends: `rsync --server` (both directions), `mkdir -p --`, `mkdir --`, `mv --`, `find <dir> -maxdepth 1 -mindepth 1 -print0`, `rm -rf --`, `df -Pk --`, and `rsync --version`. If the provider's restricted shell handles those, an unjailed push target works. Try it with `backupkit run <target> --dry-run` and then a real run against a scratch destination.
+On a restricted host, the account has to accept the commands backupkit sends: `rsync --server` (both directions), `mkdir -p --`, `mkdir --`, `mv --`, `ls -A --`, `rm -rf --`, `df -Pk --`, and `rsync --version`. Listing is the one command that differs by mode: a jailed target lists with `find <dir> -maxdepth 1 -mindepth 1 -print0` (the jail's grammar), an unjailed one with `ls -A --`, because appliance shells routinely ship no `find` at all - a Hetzner Storage Box offers exactly ls/mkdir/mv/rm/df/rsync. If the provider's restricted shell handles those, an unjailed push target works. Try it with `backupkit run <target> --dry-run` and then a real run against a scratch destination.
+
+Some appliance shells go further and parse **no quoting at all**: a Hetzner Storage Box reads `'mkdir' '-p'` as a command literally named `'mkdir'` and answers "Command not found", so every lifecycle command fails while rsync itself keeps working. Set `"restrictedShell": true` on that remote and backupkit sends each command as bare words instead - refusing to send any element that is not already one inert shell word (`[A-Za-z0-9._/@:=+,-]` only) rather than escaping it, since no escape would survive such a shell. Everything it sends to such a host is narrower than that by construction: a push destination may hold no whitespace or quote characters, and the rest is fixed flags and timestamp snapshot names.
+
+**`restrictedShell` only works on an unjailed target.** The jail recognises the single-quoted form of each lifecycle command, and a restricted-shell remote sends bare words, so a jailed push target with this set rejects every `mkdir`, `mv`, and `rm` with the bare `backupkit-remote: rejected` above - while rsync itself still works, which makes it a confusing failure. Since `jail` defaults to `true` on push, set both:
+
+```jsonc
+"remotes": {
+    "storagebox": { "alias": "storagebox", "restrictedShell": true },
+},
+"targets": {
+    "nas-www": {
+        "direction": "push",
+        "remote": "storagebox",
+        "source": "/var/www",
+        "destination": "/home/backups",
+        "jail": false,  // required: the jail's grammar is the quoted form
+    },
+}
+```
 
 ## What changes downstream
 
-Almost nothing. Backupkit turns `direction` into a source endpoint and a destination endpoint once, up front, and no later code looks at the direction again. The snapshot store, the disk-space guard, retention, and restore all work on those two endpoints.
+Almost nothing. Backupkit turns `direction` into a source endpoint and a destination endpoint once, up front. No transfer, snapshot-store, disk-guard, retention, or restore code branches on the direction again - it survives only in the run reports and in `check`'s jail warning.
 
 The archive layout is identical in both directions: snapshots at `<destination>/<target>/<timestamp>/`, each run hard-linked against the previous complete one.
 

@@ -85,7 +85,7 @@ describe("restore", () => {
         let probes = 0;
         fixture = await makeKit({
             target: {
-                dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+                dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/backups" },
             },
             deps: {
                 probeRemote: async () => {

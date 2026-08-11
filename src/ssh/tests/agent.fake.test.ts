@@ -15,6 +15,7 @@ const log = new Logger({ level: "debug", stdout: { write() {} }, stderr: { write
 function explicitRemote(identityFile: string, passphrase: { kind: "file" | "prompt"; value: string } | null): ResolvedRemote {
     return {
         kind: "explicit",
+        restrictedShell: false,
         name: "example",
         host: "10.0.0.11",
         user: "backup",
@@ -93,8 +94,8 @@ describe("ssh agent lifecycle (fake binaries)", () => {
 
     it("an all-alias remote list starts no agent and spawns nothing", async () => {
         const aliases: ResolvedRemote[] = [
-            { kind: "alias", name: "a", alias: "a" },
-            { kind: "alias", name: "b", alias: "b" },
+            { kind: "alias", restrictedShell: false, name: "a", alias: "a" },
+            { kind: "alias", restrictedShell: false, name: "b", alias: "b" },
         ];
         const result = await loadKeys(aliases, deps({}));
         expect(result.sock).toBeNull();
@@ -274,6 +275,121 @@ describe("ssh agent lifecycle (fake binaries)", () => {
             "ssh-keygen": [{ exit: 1, stderr: "incorrect passphrase supplied" }],
         }));
         expect(failures.get("example")).toMatch(/configure "passphrase"/);
+    });
+
+    // A service (launchd/systemd) has no terminal, so an encrypted key can
+    // never be unlocked there - and unlike every other priming failure, no
+    // later tick can fix it. It is therefore a FATAL startup error, not a
+    // per-remote failure: the operator gets one message telling them to use an
+    // unencrypted key or run `backupkit start` themselves.
+    describe("serviceMode refuses passphrase-protected keys", () => {
+        it.each([
+            ["a prompt passphrase", { kind: "prompt", value: "" } as const],
+            ["a file passphrase", { kind: "file", value: "/tmp/pass" } as const],
+        ])("throws for %s, before any agent is started", async (_label, passphrase) => {
+            await expect(
+                loadKeys([explicitRemote(keyPath, passphrase)], deps({}, { serviceMode: true })),
+            ).rejects.toThrowError(/passphrase-protected keys are not supported.*backupkit start/s);
+            // Nothing spawned at all: the refusal precedes ensureAgent.
+            expect(await fake.calls()).toEqual([]);
+        });
+
+        it("throws for an ENCRYPTED key whose remote declares no passphrase", async () => {
+            await expect(
+                loadKeys(
+                    [explicitRemote(keyPath, null)],
+                    deps({ "ssh-keygen": [{ exit: 1, stderr: "incorrect passphrase supplied" }] }, { serviceMode: true }),
+                ),
+            ).rejects.toThrowError(/passphrase-protected keys are not supported/);
+            expect((await fake.calls()).map((c) => c.bin)).toEqual(["ssh-keygen"]);
+        });
+
+        it("names every offending key and its remote", async () => {
+            const error = await loadKeys(
+                [explicitRemote(keyPath, { kind: "prompt", value: "" })],
+                deps({}, { serviceMode: true }),
+            ).then(
+                () => null,
+                (e: unknown) => e as Error,
+            );
+            expect(error?.message).toContain(keyPath);
+            expect(error?.message).toContain('remote "example"');
+        });
+
+        it("primes an unencrypted key normally - service mode changes nothing else", async () => {
+            await writeFile(pubPath, "ssh-ed25519 SSSS c\n", { mode: 0o644 });
+            const { sock, failures } = await loadKeys(
+                [explicitRemote(keyPath, null)],
+                deps(
+                    {
+                        "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
+                        "ssh-keygen": [
+                            { exit: 0, stdout: "ssh-ed25519 SSSS c\n" },
+                            { exit: 0, stdout: "256 SHA256:SSSS c (ED25519)\n" },
+                            { exit: 0, stdout: "ssh-ed25519 SSSS c\n" },
+                        ],
+                    },
+                    { serviceMode: true },
+                ),
+            );
+            expect(sock).toBe(agentSocketPath(runtimeDir));
+            expect(failures.size).toBe(0);
+        });
+
+        it("an all-alias config starts nothing and never probes a key", async () => {
+            const alias: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "box", alias: "box" };
+            const { sock } = await loadKeys([alias], deps({}, { serviceMode: true }));
+            expect(sock).toBeNull();
+            expect(await fake.calls()).toEqual([]);
+        });
+    });
+
+    // `backupkit start` exists to load EVERY key, so an encrypted key whose
+    // remote forgot the "passphrase" declaration must still be promptable when
+    // a human is at the terminal - the declaration cannot be a hoop that stops
+    // the interactive path the service refusal points people at.
+    describe("an undeclared encrypted key with a TTY", () => {
+        it("prompts via ssh-add instead of failing on the missing declaration", async () => {
+            await writeFile(pubPath, "ssh-ed25519 TTTT c\n", { mode: 0o644 });
+            const { failures } = await loadKeys(
+                [explicitRemote(keyPath, null)],
+                deps(
+                    {
+                        "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
+                        "ssh-keygen": [
+                            { exit: 0, stdout: "256 SHA256:TTTT c (ED25519)\n" },
+                            { exit: 1, stderr: "incorrect passphrase supplied" },
+                        ],
+                    },
+                    { hasTty: true },
+                ),
+            );
+            expect(failures.size).toBe(0);
+            const addCalls = (await fake.calls()).filter((c) => c.bin === "ssh-add" && c.argv[0] !== "-l");
+            expect(addCalls.map((c) => c.argv)).toEqual([[keyPath]]);
+        });
+
+        it("generates a missing .pub through the same prompt", async () => {
+            await loadKeys(
+                [explicitRemote(keyPath, null)],
+                deps(
+                    {
+                        "ssh-add": [{ exit: 0 }, { exit: 1 }, { exit: 0 }],
+                        "ssh-keygen": [
+                            { exit: 1, stderr: "incorrect passphrase supplied" },
+                            { exit: 0, stdout: "ssh-ed25519 UUUU c\n" },
+                            { exit: 0, stdout: "256 SHA256:UUUU c (ED25519)\n" },
+                        ],
+                    },
+                    { hasTty: true },
+                ),
+            );
+            expect(await readFile(pubPath, "utf8")).toBe("ssh-ed25519 UUUU c\n");
+            // The interactive regeneration is the plain `-y -f` form (no -P ""):
+            // that is the invocation ssh-keygen prompts on /dev/tty for.
+            const keygen = (await fake.calls()).filter((c) => c.bin === "ssh-keygen").map((c) => c.argv);
+            expect(keygen).toContainEqual(["-y", "-f", keyPath]);
+        });
     });
 
     it("dedupes remotes sharing one identityFile: the key is primed once", async () => {

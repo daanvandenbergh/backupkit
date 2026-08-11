@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatUtc } from "../format.js";
 import { Logger, type LoggerOptions } from "../logger.js";
 
 /** A capturing sink recording every written chunk. */
@@ -12,7 +13,13 @@ function captureStream(): { chunks: string[]; write(chunk: string): void } {
     };
 }
 
-/** Build a logger with captured streams and a frozen clock. */
+/**
+ * Build a logger with captured streams and a frozen clock. The clock carries
+ * milliseconds and every expected line below keeps them: logs are the one
+ * human-facing surface at sub-second precision, so line ORDER within a busy
+ * second stays recoverable. Every other displayed timestamp is `formatUtc` at
+ * second precision.
+ */
 function testLogger(options?: Partial<LoggerOptions>) {
     const stdout = captureStream();
     const stderr = captureStream();
@@ -26,35 +33,55 @@ function testLogger(options?: Partial<LoggerOptions>) {
 }
 
 describe("Logger line format", () => {
-    it("emits timestamp, padded level, message, newline", () => {
+    it("emits timestamp, level, message, newline", () => {
         const { logger, stdout } = testLogger();
         logger.info("hello");
-        expect(stdout.chunks).toEqual(["2026-08-10T03:15:00.123Z INFO  hello\n"]);
+        expect(stdout.chunks).toEqual(["2026-08-10T03:15:00.123Z INFO hello\n"]);
+    });
+
+    // Logs are the ONE human-facing surface that keeps MILLISECONDS: a busy run
+    // emits many lines inside a second, and without sub-second precision their
+    // order is unrecoverable from the log alone. Everything else - `list`,
+    // `status`, lock details - uses `formatUtc` at second precision. If this
+    // ever drops to seconds, that ordering is gone silently.
+    it("keeps millisecond precision, unlike every other human-facing timestamp", () => {
+        const { logger, stdout } = testLogger({ now: () => new Date("2026-08-10T03:15:00.987Z") });
+        logger.info("hello");
+        expect(stdout.chunks[0].split(" ")[0]).toBe("2026-08-10T03:15:00.987Z");
+    });
+
+    // Still the same UTC format underneath: the log prefix is `formatUtc` plus
+    // `.sss`, so the two can be read side by side without a timezone in play.
+    it("is the formatUtc timestamp plus milliseconds, always UTC", () => {
+        const instant = new Date(Date.UTC(2026, 7, 10, 3, 15, 0, 123));
+        const { logger, stdout } = testLogger({ now: () => instant });
+        logger.info("hello");
+        expect(stdout.chunks[0].split(" ")[0]).toBe(`${formatUtc(instant).slice(0, -1)}.123Z`);
     });
 
     it("renders context as [key=value ...] before the message", () => {
         const { logger, stdout } = testLogger();
         logger.with({ target: "web1-var-www", run: "2026-08-10T031500Z_web1-var-www" }).info("message");
         expect(stdout.chunks[0]).toBe(
-            "2026-08-10T03:15:00.123Z INFO  [target=web1-var-www run=2026-08-10T031500Z_web1-var-www] message\n",
+            "2026-08-10T03:15:00.123Z INFO [target=web1-var-www run=2026-08-10T031500Z_web1-var-www] message\n",
         );
     });
 
     it("appends fields as key=value tokens", () => {
         const { logger, stdout } = testLogger();
         logger.info("done", { files: 812, ok: true, host: "h1" });
-        expect(stdout.chunks[0]).toBe("2026-08-10T03:15:00.123Z INFO  done files=812 ok=true host=h1\n");
+        expect(stdout.chunks[0]).toBe("2026-08-10T03:15:00.123Z INFO done files=812 ok=true host=h1\n");
     });
 
-    it("pads every level label to five characters", () => {
+    it("labels every level in upper case, one space either side", () => {
         const { logger, stdout, stderr } = testLogger({ level: "debug" });
         logger.error("e");
         logger.warn("w");
         logger.info("i");
         logger.debug("d");
         expect(stderr.chunks[0]).toContain(" ERROR e");
-        expect(stderr.chunks[1]).toContain(" WARN  w");
-        expect(stdout.chunks[0]).toContain(" INFO  i");
+        expect(stderr.chunks[1]).toContain(" WARN w");
+        expect(stdout.chunks[0]).toContain(" INFO i");
         expect(stdout.chunks[1]).toContain(" DEBUG d");
     });
 });
@@ -125,7 +152,7 @@ describe("Logger sanitization", () => {
     it("strips control characters from message, context, and fields", () => {
         const { logger, stdout } = testLogger();
         logger.with({ host: "h\n1" }).info("msg\x1b[31m", { file: "a\r\nb\0c" });
-        expect(stdout.chunks[0]).toBe("2026-08-10T03:15:00.123Z INFO  [host=h1] msg[31m file=abc\n");
+        expect(stdout.chunks[0]).toBe("2026-08-10T03:15:00.123Z INFO [host=h1] msg[31m file=abc\n");
     });
 });
 
@@ -173,7 +200,7 @@ describe("Logger field quoting", () => {
     it("quotes context fields too - a target name is remote-influenced as well", () => {
         const { logger, stdout } = testLogger();
         logger.with({ run: "r 1" }).info("m");
-        expect(stdout.chunks[0]).toBe('2026-08-10T03:15:00.123Z INFO  [run="r 1"] m\n');
+        expect(stdout.chunks[0]).toBe('2026-08-10T03:15:00.123Z INFO [run="r 1"] m\n');
     });
 });
 
@@ -185,7 +212,7 @@ describe("Logger file sink", () => {
         logger.error("e");
         logger.debug("suppressed");
         expect(lines).toHaveLength(2);
-        expect(lines[0]).toContain("INFO  i");
+        expect(lines[0]).toContain("INFO i");
         expect(lines[1]).toContain("ERROR e");
         expect(lines.every((line) => !line.endsWith("\n"))).toBe(true);
     });

@@ -174,9 +174,15 @@ describe("jail usage", () => {
         }
     });
 
-    it("prints help with --help", async () => {
+    it.each([["--help"], ["-h"]])("prints help with %s", async (flag) => {
         const h = jailDeps();
-        expect(await main(["jail", "--help"], h.deps)).toBe(0);
-        expect(h.out.join("\n")).toContain("backupkit jail install|status");
+        expect(await main(["jail", flag], h.deps)).toBe(0);
+        const text = h.out.join("\n");
+        expect(text).toContain("Usage: backupkit jail [options] <verb>");
+        // Both verbs listed as commands - the page is what tells an operator
+        // that `status` exists at all.
+        expect(text).toContain("Commands:");
+        expect(text).toMatch(/^ {2}install {2}/m);
+        expect(text).toMatch(/^ {2}status {2}/m);
     });
 });

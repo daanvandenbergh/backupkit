@@ -36,9 +36,17 @@ export interface LoadConfigOptions extends ResolvePathOptions {
     platform?: NodeJS.Platform;
 }
 
+/**
+ * The system-wide config directory - the FIRST place every identity looks, and
+ * the only one a root service finds without an explicit `--config`. Anything
+ * outside it has to be named on the command line, so the CLI compares against
+ * this rather than hard-coding the path a second time.
+ */
+export const SYSTEM_CONFIG_DIR = "/etc/backupkit";
+
 /** The default probe directories for the given environment. */
 function defaultProbeDirs(env: Record<string, string | undefined>): string[] {
-    return ["/etc/backupkit", join(env.HOME ?? homedir(), ".backupkit")];
+    return [SYSTEM_CONFIG_DIR, join(env.HOME ?? homedir(), ".backupkit")];
 }
 
 /**

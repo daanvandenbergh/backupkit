@@ -32,6 +32,8 @@ export type ResolvedRemote =
           } | null;
           /** Dedicated known_hosts file path (default `<configDir>/known_hosts`). */
           knownHostsFile: string;
+          /** Whether this host's shell cannot parse quotes (see the alias variant). */
+          restrictedShell: boolean;
       }
     | {
           /** Discriminator: ssh_config resolves everything; backupkit manages only its option baseline. */
@@ -40,6 +42,14 @@ export type ResolvedRemote =
           name: string;
           /** Host alias exactly as written in ssh_config. */
           alias: string;
+          /**
+           * Whether this host runs an appliance shell that does NOT parse
+           * quotes (a Hetzner Storage Box reads `'mkdir'` as a command named
+           * `'mkdir'`). Remote commands are then sent as bare words, and any
+           * element that is not provably one inert word is refused rather than
+           * escaped. Default false.
+           */
+          restrictedShell: boolean;
       };
 
 /**

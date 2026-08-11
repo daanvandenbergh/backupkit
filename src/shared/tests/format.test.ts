@@ -1,11 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatDuration, formatEndpoint, isValidBwlimit, parseMinFree, parseSize } from "../format.js";
+import {
+    formatBytes,
+    formatDuration,
+    formatEndpoint,
+    formatUtc,
+    isValidBwlimit,
+    parseMinFree,
+    parseSize,
+} from "../format.js";
+import { formatSnapshotName } from "../snapshot-name.js";
 import type { Endpoint, ResolvedRemote } from "../types.js";
 
 /** A fully resolved explicit remote fixture. */
 function explicitRemote(overrides?: Partial<Extract<ResolvedRemote, { kind: "explicit" }>>): ResolvedRemote {
     return {
         kind: "explicit",
+        restrictedShell: false,
         name: "r1",
         host: "10.0.0.11",
         user: "backup-reader",
@@ -68,6 +78,46 @@ describe("isValidBwlimit", () => {
     });
 });
 
+describe("formatUtc", () => {
+    it.each([
+        // The canonical shape, and the one every other surface is compared to.
+        ["2026-08-10T03:15:02.000Z", "2026-08-10T03:15:02Z"],
+        // Sub-second precision is TRUNCATED, never rounded: .999 must not roll
+        // the second forward, or a displayed time could sit ahead of the
+        // snapshot name minted from the same instant.
+        ["2026-08-10T03:15:02.999Z", "2026-08-10T03:15:02Z"],
+        // Every field zero-padded to its full width.
+        ["2026-01-02T03:04:05Z", "2026-01-02T03:04:05Z"],
+        // Boundaries: midnight, the last second of a day, a leap day, and the
+        // epoch itself.
+        ["2026-08-10T00:00:00Z", "2026-08-10T00:00:00Z"],
+        ["2026-12-31T23:59:59Z", "2026-12-31T23:59:59Z"],
+        ["2028-02-29T12:00:00Z", "2028-02-29T12:00:00Z"],
+        ["1970-01-01T00:00:00Z", "1970-01-01T00:00:00Z"],
+    ] as const)("formats %s as %s", (input, expected) => {
+        expect(formatUtc(new Date(input))).toBe(expected);
+    });
+
+    // The whole point of the `Z`: the output is the UTC wall clock, never the
+    // host's. A host at UTC+02:00 must still print 03:15:02Z for this instant.
+    it("renders UTC, not the host timezone", () => {
+        const instant = new Date(Date.UTC(2026, 7, 10, 3, 15, 2));
+        expect(formatUtc(instant)).toBe("2026-08-10T03:15:02Z");
+        // Same instant, expressed via a local-time offset - same UTC rendering.
+        expect(formatUtc(new Date(instant.getTime()))).toBe("2026-08-10T03:15:02Z");
+    });
+
+    // The two formats are one format: the snapshot DIRECTORY name is this
+    // string with the colons removed (`:` is illegal on exFAT/NTFS/SMB). If
+    // this ever fails the display and on-disk forms have drifted apart.
+    it("is the snapshot name with colons - the two forms cannot drift", () => {
+        for (const iso of ["2026-08-10T03:15:02Z", "1999-12-31T23:59:59Z", "2028-02-29T00:00:00Z"]) {
+            const date = new Date(iso);
+            expect(formatSnapshotName(date)).toBe(formatUtc(date).replaceAll(":", ""));
+        }
+    });
+});
+
 describe("formatBytes", () => {
     it.each([
         [0, "0 B"],
@@ -122,7 +172,7 @@ describe("formatEndpoint", () => {
     });
 
     it("formats an alias remote as alias:path - no user@, no brackets", () => {
-        const remote: ResolvedRemote = { kind: "alias", name: "r1", alias: "myserver" };
+        const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "r1", alias: "myserver" };
         const endpoint: Endpoint = { kind: "remote", remote, path: "/var/www" };
         expect(formatEndpoint(endpoint)).toBe("myserver:/var/www");
         expect(formatEndpoint(endpoint)).not.toContain("@");

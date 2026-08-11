@@ -62,7 +62,12 @@ export function resolveConfig(
     const remotes: Record<string, ResolvedRemote> = {};
     for (const { name, remote } of validated.remotes) {
         if ("alias" in remote) {
-            remotes[name] = { kind: "alias", name, alias: remote.alias };
+            remotes[name] = {
+                kind: "alias",
+                name,
+                alias: remote.alias,
+                restrictedShell: remote.restrictedShell ?? false,
+            };
         } else {
             remotes[name] = {
                 kind: "explicit",
@@ -78,6 +83,7 @@ export function resolveConfig(
                           ? { kind: "prompt", value: "" }
                           : { kind: "file", value: remote.passphrase.slice("file:".length) },
                 knownHostsFile: remote.knownHostsFile ?? join(configDir, "known_hosts"),
+                restrictedShell: remote.restrictedShell ?? false,
             };
         }
     }

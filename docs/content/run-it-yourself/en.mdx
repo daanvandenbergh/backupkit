@@ -1,0 +1,146 @@
+---
+title: "Run It Yourself"
+description: "Run the backupkit scheduler in your own session with backupkit start - your own config, your own key passphrases, no root and no service unit."
+tab: "Guide"
+group: "Operate"
+order: 1
+icon: "plug"
+keywords:
+    - backupkit start
+    - foreground scheduler
+    - passphrase
+    - ssh-agent
+    - user config
+image: "/assets/docs/run-it-yourself/hero.en.jpg"
+updated: "2026-08-11"
+---
+
+There are exactly two ways to run backupkit on a schedule, and this page is one of them: **you run the scheduler, in your own session, under your own user**. The other is [an OS service](/daemon-setup) supervised by systemd or launchd. They use different commands, different config files, different state directories, and they differ on the one thing that decides most setups - whether a key can have a passphrase.
+
+```bash
+backupkit start
+```
+
+That is the whole thing. It runs in the foreground until Ctrl-C.
+
+## When this is the right mode
+
+Pick this mode when any of these is true:
+
+- **Your SSH key has a passphrase.** This is the only mode that supports one. A service has no terminal to type it on, and [refuses to start](/daemon-setup#a-service-cannot-hold-an-encrypted-key) rather than fail on every tick forever.
+- **You do not have root**, or would rather not install a system-wide unit on this machine.
+- **It is a laptop or workstation** that is not up around the clock anyway.
+- **You want to watch a schedule run** before handing it to a daemon.
+
+The trade is simple: nothing runs while you are logged out, and nothing comes back after a reboot. If you need unattended backups on an always-on host, that is [the service](/daemon-setup).
+
+## Your config, not the system one
+
+Run `backupkit init` **as yourself** - no `sudo`:
+
+```bash
+backupkit init
+```
+
+It writes `~/.backupkit/config.jsonc` - unless `--config` or `$BACKUPKIT_CONFIG` names another path - and everything derived from that config stays in your home directory:
+
+| Thing | Where it lives for you |
+| --- | --- |
+| Config | `~/.backupkit/config.jsonc` |
+| Host keys | `~/.backupkit/known_hosts` (`<configDir>/known_hosts`) |
+| Run reports (`stateDir`) | `$XDG_STATE_HOME/backupkit`, else `~/.local/state/backupkit` |
+| ssh-agent socket | `$XDG_RUNTIME_DIR/backupkit/agent.sock`, else `~/.backupkit/run/agent.sock` |
+
+Every file backupkit needs is one you own - and running unprivileged, ownership is enforced strictly: a key, passphrase file, or state directory belonging to a *different* unprivileged user is refused before anything talks to the network. See the [Security Model](/security-model#permissions-are-checked-before-anything-talks-to-the-network).
+
+> **If a `/etc/backupkit/config.jsonc` also exists on this machine, it wins.** The lookup order is `--config`, `$BACKUPKIT_CONFIG`, `/etc/backupkit/`, then `~/.backupkit/` - and that order is the same for *every* user, so a system config shadows yours. Where both exist, name yours on every command: `backupkit start --config ~/.backupkit/config.jsonc`. Or export `BACKUPKIT_CONFIG=~/.backupkit/config.jsonc` in your shell profile once and forget it. Run `backupkit check --config ~/.backupkit/config.jsonc`: it echoes that same `--config` into the `backupkit start` line it prints at the end, so copy that line. (A bare `backupkit check` on such a machine validates the *system* config and prints no flag at all, since `/etc/backupkit` is the one directory found without one.)
+
+## Keys with a passphrase
+
+This is the mode built for them.
+
+Declare the passphrase source on the remote - never the passphrase itself:
+
+```jsonc
+"remotes": {
+    "archive": {
+        "host": "10.0.0.11",
+        "user": "backup",
+        "identityFile": "/home/dan/.ssh/archive_ed25519",
+        "passphrase": "prompt",          // you type it, once, at startup
+        // or: "passphrase": "file:/home/dan/.backupkit/archive.pass"   (mode 0600)
+    },
+}
+```
+
+On startup `backupkit start` starts backupkit's own ssh-agent - or adopts the one it left running - and never your login agent. It adds every explicit remote's key to it, one prompt per key *file* rather than per remote, and from then on the schedule runs against that unlocked agent.
+
+Four details worth knowing:
+
+- **A key that will not unlock does not stop the scheduler.** A mistyped passphrase or an unreadable key is recorded and `start` comes up anyway; only that key's targets fail, on every tick, with the reason logged. Fix the key and re-run `start` (or `check`).
+
+- **An undeclared encrypted key still works here.** If the key file turns out to be encrypted and the remote declares no `passphrase`, `start` prompts anyway, because a terminal is right there. Declaring it just tells you (and `check`) the truth up front.
+- **The agent outlives the process.** It is a persistent socket, and stopping the scheduler never kills it. Restart `backupkit start` and keys already loaded are not re-prompted.
+- **Alias remotes are none of this.** A `{ "alias": "..." }` remote is resolved by ssh against *your* `ssh_config` and *your* agent; backupkit never primes its key. If your login agent already holds it, it just works - and a config whose remotes are all aliases starts no backupkit agent at all.
+
+`backupkit check` does the same key-unlocking on a terminal, which is why it is the command to run after a reboot on a passphrase setup - though `start` does it too, and then keeps the schedule running.
+
+## The three commands you actually use
+
+```bash
+backupkit check      # the readiness gate: config, binaries, keys, hosts
+backupkit run        # one pass over every due target, then exit
+backupkit start      # schedule, in this terminal, until Ctrl-C
+```
+
+**`check`** validates the config, verifies the local `rsync` version and that `ssh` runs, loads the keys, probes every remote, and - on a terminal - pins the host key of any remote you have not connected to before. It ends by naming which of the two run modes this config can use. Run it until it is clean.
+
+**`run`** is one pass, not a scheduler: it backs up every target that is due (or only the ones you name) and exits. `--force` ignores due-ness, failure backoff, and bucket dedup; `--dry-run` writes nothing and takes no lock.
+
+**`start`** is the scheduler. Everything it does - windows, catch-up, retention pruning, destination locking, the free-space guard, per-target failure backoff - is identical to the service; the differences are who runs it, where the keys come from, and one thing you do not get: nothing restarts `start` if it dies, where systemd or launchd restarts the service.
+
+```bash
+backupkit start --force
+```
+
+`--force` backs every target up once immediately, prints that pass, and only then enters the schedule - so you see the config work end to end instead of waiting for the first window. A failure in that opening pass is reported and the scheduler starts anyway.
+
+## While it runs
+
+It prints one line on startup naming how many targets are scheduled, then logs each run. Logs go to this terminal - `backupkit logs` reads the *service's* logs (the journal on Linux, `/var/log/backupkit` on macOS) and has nothing to show for a session scheduler. To keep a file copy, set it in the config:
+
+```jsonc
+"logging": { "level": "info", "file": "/home/dan/.backupkit/backupkit.log" },
+```
+
+From a second terminal, the read-only commands work as usual - as the **same user**, so they resolve the same `stateDir`:
+
+```bash
+backupkit status         # last run, next due, lock state (pull targets), per target
+backupkit list           # the snapshots on disk
+```
+
+Ctrl-C stops the scheduler cleanly: it aborts the transfer in flight - that run is recorded as `aborted` - releases the destination lock, and exits 0 with `Scheduler stopped cleanly.` A second Ctrl-C exits 1 immediately, skipping the release, which leaves the destination lock behind; clear it with `backupkit unlock <target>` (a stale lock, dead holder or past its 24-hour TTL, needs no `--force`).
+
+## Surviving a logout
+
+The schedule dies with the process. Three ways to live with that:
+
+- **A terminal multiplexer.** `tmux new -s backupkit backupkit start` (or screen) keeps it alive across a disconnected SSH session. Simplest, and it keeps the passphrase prompt: you attach, type it once, detach.
+- **Cron, per pass.** With a key that needs no passphrase, drop the scheduler and let cron drive single passes: `0 3 * * * /usr/local/bin/backupkit run --config /home/dan/.backupkit/config.jsonc`. Spell both paths out - cron's `PATH` is usually just `/usr/bin:/bin`, which does not hold a globally installed `backupkit`. Retention still runs after each pass.
+- **A user-level unit.** A systemd **user** unit or a launchd **LaunchAgent** can supervise `backupkit daemon` under your own uid - no root anywhere. `daemon` is the same loop as `start` minus the prompting, so this needs a key with **no** passphrase.
+
+For anything that must survive a reboot on a server, install [the service](/daemon-setup) instead.
+
+## Two people, one machine
+
+Per-user configs stay separate all the way down: each user's `stateDir`, `known_hosts`, and agent socket live under their own home, so two users can each run `backupkit start` against their own config without colliding. The destination lock is the exception - it lives in the archive itself, at `<destination>/<target>/.backupkit.lock`, so two users must not point at the same destination root: the second one is refused with a lock-held error and exits 3, which is exactly what that lock is for. What they cannot both have is a service - there is one system unit per machine.
+
+Mind the lookup order again: the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file, so each of them needs `--config` or `BACKUPKIT_CONFIG`.
+
+## Related
+
+- [Run It as a Service](/daemon-setup) - the other mode: root, systemd/launchd, no passphrases
+- [Getting Started](/getting-started) - the setup path up to the point these two modes fork
+- [CLI Reference](/cli-reference) - every command and flag
+- [Security Model](/security-model) - how keys, passphrases, and file permissions are handled

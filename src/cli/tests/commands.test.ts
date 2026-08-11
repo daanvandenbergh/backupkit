@@ -92,6 +92,37 @@ describe("start", () => {
         expect(h.out[0]).toContain("Backups run while this process stays alive");
         expect(h.out[1]).toBe("Scheduler stopped cleanly.");
     });
+
+    it("--force backs every target up once before scheduling", async () => {
+        const h = fakeDeps();
+        h.engine.runReport = { startedAt: "s", finishedAt: "f", targets: [makeRunReport()] };
+        expect(await main(["start", "--force"], h.deps)).toBe(0);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "start"]);
+        expect(h.engine.calls[1]).toEqual({ method: "run", options: { force: true } });
+        expect(h.out).toEqual([
+            h.out[0],
+            "Running every target once now (--force), then scheduling.",
+            "OK      web - snapshot 2026-08-10T031500Z",
+            "Done - 1 target processed, none failed.",
+            "Scheduler stopped cleanly.",
+        ]);
+    });
+
+    // The scheduler is the point of this command: a held lock (or any other
+    // failing pass) must not leave the operator with no scheduler at all.
+    it("--force still starts the scheduler when the immediate pass throws", async () => {
+        const h = fakeDeps();
+        h.engine.runFailure = new Error("destination lock held");
+        expect(await main(["start", "--force"], h.deps)).toBe(0);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "start"]);
+        expect(h.err).toEqual(["Initial --force pass failed: destination lock held"]);
+    });
+
+    it("does not run a pass without --force", async () => {
+        const h = fakeDeps();
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.engine.calls.map((call) => call.method)).not.toContain("run");
+    });
 });
 
 describe("list", () => {
@@ -232,13 +263,13 @@ describe("unlock", () => {
         const h = fakeDeps();
         h.engine.unlockRows = [
             { target: "web", status: "none", detail: "" },
-            { target: "db", status: "removed", detail: "created 2026-08-10T021502Z, past the 24h TTL" },
+            { target: "db", status: "removed", detail: "created 2026-08-10T02:15:02Z, past the 24h TTL" },
         ];
         expect(await main(["unlock", "--force"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({ method: "unlock", options: { targets: undefined, force: true } });
         expect(h.out).toEqual([
             "web: no lock held",
-            "db: lock cleared (created 2026-08-10T021502Z, past the 24h TTL)",
+            "db: lock cleared (created 2026-08-10T02:15:02Z, past the 24h TTL)",
         ]);
         expect(h.err).toEqual([]);
     });
@@ -287,6 +318,7 @@ describe("check", () => {
                     line: 'restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA',
                 },
             ],
+            encryptedKeys: [],
             errors: [],
         };
         expect(await main(["check"], h.deps)).toBe(0);
@@ -319,6 +351,64 @@ describe("check", () => {
         );
     });
 
+    // The closing lines are the operator's next command, so they must load the
+    // config this check just blessed. Only /etc/backupkit is found without
+    // --config, and only by root - so a checked ~/.backupkit config that
+    // suggested a bare `sudo backupkit service install` sent the operator to
+    // install a service over root's /etc copy, or over nothing at all.
+    describe("what to do next", () => {
+        it("names the checked config on both suggestions when it is not the system one", async () => {
+            const h = fakeDeps({
+                config: makeConfig({
+                    configPath: "/Users/dan/.backupkit/config.jsonc",
+                    stateDir: "/tmp/state",
+                    targets: [makeTarget()],
+                }),
+            });
+            expect(await main(["check"], h.deps)).toBe(0);
+            const text = h.out.join("\n");
+            expect(text).toContain("backupkit start --config /Users/dan/.backupkit/config.jsonc");
+            expect(text).toContain("sudo backupkit service install --config /Users/dan/.backupkit/config.jsonc");
+        });
+
+        it("omits --config for a config in /etc/backupkit, which every identity finds", async () => {
+            const h = fakeDeps();
+            expect(await main(["check"], h.deps)).toBe(0);
+            const text = h.out.join("\n");
+            expect(h.out).toContain("    in this session:   backupkit start");
+            expect(h.out).toContain("    as a root service: sudo backupkit service install");
+            expect(text).not.toContain("--config");
+        });
+
+        it("offers only `start` when a key is passphrase-protected, and says why", async () => {
+            const h = fakeDeps();
+            h.engine.checkReport = { ...h.engine.checkReport, encryptedKeys: [{ remote: "box", key: "/keys/id_ed25519" }] };
+            expect(await main(["check"], h.deps)).toBe(0);
+            const text = h.out.join("\n");
+            expect(text).toContain("backupkit start");
+            expect(text).toContain("as a root service: NOT POSSIBLE");
+            expect(text).toContain('/keys/id_ed25519 (remote "box")');
+            // Still a PASS: an encrypted key is a valid config, not an error.
+            expect(text).toContain("Check passed");
+            expect(h.err).toEqual([]);
+        });
+
+        it("warns that a root service resolves ssh_config aliases against ROOT's ssh_config", async () => {
+            const base = makeConfig({ configPath: "/etc/backupkit/config.jsonc", stateDir: "/var/lib/backupkit", targets: [makeTarget()] });
+            const h = fakeDeps({
+                config: { ...base, remotes: { box: { kind: "alias", restrictedShell: false, name: "box", alias: "box" } } },
+            });
+            expect(await main(["check"], h.deps)).toBe(0);
+            expect(h.out.join("\n")).toContain("root's ssh_config");
+        });
+
+        it("says nothing about aliases for an all-explicit config", async () => {
+            const h = fakeDeps();
+            expect(await main(["check"], h.deps)).toBe(0);
+            expect(h.out.join("\n")).not.toContain("ssh_config");
+        });
+    });
+
     it("exits 1 and surfaces every error when a probe failed", async () => {
         const h = fakeDeps();
         h.engine.checkReport = {
@@ -327,6 +417,7 @@ describe("check", () => {
             sshOk: false,
             remotes: [{ remote: "example", kind: "explicit", reachable: false, rsyncVersion: null, resolved: null, error: "host unreachable" }],
             jailLines: [],
+            encryptedKeys: [],
             errors: ["rsync too old", "remote example: host unreachable"],
         };
         expect(await main(["check"], h.deps)).toBe(1);

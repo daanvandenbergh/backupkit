@@ -1,6 +1,6 @@
 # @daanvandenbergh/backupkit
 
-![backupkit - automated, versioned rsync backups over SSH](.agent/scribekit-hero/readme/hero.png)
+![backupkit - automated, versioned rsync backups over SSH](.agentstore/scribekit-hero/readme/hero.png)
 
 Automated, versioned backups over SSH - a thin, dependency-free TypeScript layer on top of `rsync`.
 

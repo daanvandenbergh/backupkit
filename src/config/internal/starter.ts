@@ -23,14 +23,20 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
             // "port": 22,
             // Absolute path to the SSH private key (mode 0600).
             "identityFile": "/etc/backupkit/keys/example_ed25519",
-            // Only for encrypted keys. "file:/abs/path" = a 0600 file holding the
-            // passphrase (unattended daemons); "prompt" = you type it once via
-            // \`backupkit check\` after each reboot. NEVER the passphrase itself.
+            // Only for encrypted keys, and only when you run the scheduler
+            // yourself with \`backupkit start\` - the SERVICE refuses every
+            // passphrase-protected key, having no terminal to unlock one on.
+            // "file:/abs/path" = a 0600 file holding the passphrase; "prompt" =
+            // you type it. NEVER the passphrase itself.
             // "passphrase": "file:/etc/backupkit/keys/example.pass",
         },
         // Alternatively: a Host alias from your ~/.ssh/config or /etc/ssh/ssh_config.
         // ssh resolves the hostname, user, key, and port itself; backupkit manages
-        // nothing but its safety options. "alias" must be the ONLY field.
+        // nothing but its safety options. "alias" takes no siblings except
+        // "restrictedShell": true, for an appliance account whose shell parses no
+        // quoting (a Hetzner Storage Box) - commands then go as bare words, which
+        // the push jail's quoted grammar rejects, so such a remote's push targets
+        // need "jail": false as well.
         // "myserver": { "alias": "myserver" },
     },
 

@@ -6,7 +6,14 @@
  * logger never rotates anything - rotation belongs to the platform.
  *
  * Line shape:
- * `2026-08-10T03:15:00.123Z INFO  [target=web1 run=...] message key=value`
+ * `2026-08-10T03:15:00.123Z INFO [target=web1 run=...] message key=value`
+ *
+ * The timestamp is the project's one UTC format plus MILLISECONDS - which is
+ * exactly `toISOString()`. Logs are the deliberate exception to the second
+ * precision every other human-facing surface uses (`shared/format.ts`
+ * `formatUtc`): a busy run emits many lines inside one second, and without
+ * sub-second precision their order is unrecoverable from the log alone.
+ * Everything else about it is the same - always UTC, always `Z`-suffixed.
  *
  * A field value that would break that grammar - empty, or carrying whitespace,
  * `=` or `"` - is JSON-quoted so it stays ONE token (see `renderField`).
@@ -20,8 +27,8 @@ export type LogLevel = "error" | "warn" | "info" | "debug";
 /** Numeric rank per level; a line is emitted when its rank <= the configured rank. */
 const LEVEL_RANK: Record<LogLevel, number> = { error: 0, warn: 1, info: 2, debug: 3 };
 
-/** Upper-case column-aligned level labels (5 chars). */
-const LEVEL_LABEL: Record<LogLevel, string> = { error: "ERROR", warn: "WARN ", info: "INFO ", debug: "DEBUG" };
+/** Upper-case level labels. */
+const LEVEL_LABEL: Record<LogLevel, string> = { error: "ERROR", warn: "WARN", info: "INFO", debug: "DEBUG" };
 
 /** Minimal writable-stream seam satisfied by process.stdout/process.stderr. */
 export interface LogStream {

@@ -1,6 +1,6 @@
 ---
 title: "CLI Reference"
-description: "Every backupkit command with its flags: run, daemon, service, logs, list, status, restore, prune, check, init, jail - plus JSON output and exit codes."
+description: "Every backupkit command with its flags: run, start, daemon, service, logs, list, status, restore, prune, unlock, check, init, jail - plus JSON output and exit codes."
 tab: "Reference"
 group: "CLI"
 order: 1
@@ -11,6 +11,7 @@ keywords:
     - flags
     - exit codes
     - service
+    - start
 image: "/assets/docs/cli-reference/hero.en.jpg"
 updated: "2026-08-11"
 ---
@@ -19,38 +20,80 @@ The `backupkit` binary is a thin layer over the engine. An unknown flag, subcomm
 
 ## Running it with no arguments
 
-That is a help request, not a mistake. It prints the setup steps and exits 0:
+That is a help request, not a mistake. Bare `backupkit`, `backupkit -h`, `backupkit --help`, and `backupkit help` all print the same page and exit 0:
 
 ```
-backupkit - versioned rsync-over-SSH backups
+Usage: backupkit [options] [command]
 
-Setup (3 steps):
-    1. backupkit init             write a commented starter config
-    2. backupkit check            verify keys, hosts, and versions
-    3. backupkit service install  register the daemon (then: backupkit service start)
+backupkit - automated, versioned backups over SSH with rsync, in both directions: push
+(the source sends) and pull (the archive server fetches, so a compromised source cannot
+touch the archive).
+
+Options:
+  -v, --version                          Output the version number
+  -h, --help                             Display help for command
 
 Commands:
-    run [TARGET...]        back up due targets now
-    status  [TARGET...]    one row per target: last run, next due
-    list    [TARGET...]    complete snapshots (alias: ls)
-    restore TARGET SNAP    copy a snapshot to a fresh path
-    prune   [TARGET...]    apply retention now
-    logs                   tail the daemon logs
-    service <verb>         install|uninstall|start|stop|restart|status
-    daemon                 foreground scheduler (what the service runs)
-    check | init           readiness / starter config
-    jail install|status    (on an archive server) install/verify the push jail script
+  run [options] [TARGET...]              Back up due targets now, once
+  start [options]                        Foreground scheduler in YOUR session (the home
+                                         for encrypted keys)
+  daemon [options]                       Foreground scheduler - what the installed service
+                                         runs
+  service [options] <verb>               Manage the OS service unit (systemd / launchd)
+  logs [options]                         Tail the daemon logs
+  list|ls [options] [TARGET...]          List complete snapshots (alias: ls)
+  status [options] [TARGET...]           One row per target: last run, next due, lock
+                                         state
+  restore [options] <TARGET> <SNAPSHOT>  Copy a snapshot to a fresh path
+  prune [options] [TARGET...]            Apply the retention policy now
+  unlock [options] [TARGET...]           Clear a destination lock left behind by a killed
+                                         run
+  check [options]                        Readiness gate: config, binaries, keys, hosts
+  init [options]                         Write the commented starter config
+  jail [options] <verb>                  (On an archive server) install/verify the push
+                                         jail script
+  help [command]                         Display help for a command
 
-backupkit <command> --help for details.
+Setup:
+  1. backupkit init             write a commented starter config
+  2. backupkit check            verify keys, hosts, and versions
+  3. schedule it, either way:
+       backupkit start            in this session (the only way for encrypted keys)
+       backupkit service install  as a root service (then: backupkit service start)
+
+Run `backupkit help <command>` or `backupkit <command> --help` for a command's own
+options.
 ```
 
-`--help` and `-h` print the same thing. `backupkit <command> --help` prints that command's flags, and `backupkit --version` prints the version. Every command takes `--config <path>` to point at a specific config file.
+## Per-command help
+
+`backupkit <command> --help`, `backupkit <command> -h`, and `backupkit help <command>` all print the same page: a usage line, what the command does, its positional arguments, and every flag it takes. Commands with verbs (`service`, `jail`) list those verbs too.
+
+```
+Usage: backupkit restore [options] <TARGET> <SNAPSHOT>
+
+Copy one snapshot out of the archive into a path that does not exist yet. Restoring never
+writes over an existing directory, and never touches the archive.
+
+Arguments:
+  TARGET           The target the snapshot belongs to
+  SNAPSHOT         A snapshot name from `backupkit list`, or `latest`
+
+Options:
+  --output <path>  Path to restore into - must not exist (required)
+  --verify         Re-read the copy and verify checksums afterwards
+  --config <path>  Config file to use (default: $BACKUPKIT_CONFIG, else
+                   /etc/backupkit/config.jsonc for root, else ~/.backupkit/config.jsonc)
+  -h, --help       Display help for command
+```
+
+`backupkit --version` (or `-v`) prints the version. Every command that loads a config takes `--config <path>` to point at a specific one.
 
 ## The commands
 
 ```
 backupkit run       [TARGET...] [--force] [--dry-run] [--config P]
-backupkit start     [--config P]
+backupkit start     [--force] [--config P]
 backupkit daemon    [--config P]
 backupkit service   install|uninstall|start|stop|restart|status [--config P]
 backupkit logs      [-f|--follow] [-n N|--lines N] [--config P]
@@ -66,9 +109,13 @@ backupkit jail      install|status [--path P]
 
 `run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target.
 
+**Three of these commands run the same scheduler**, and picking between them is the one architectural choice backupkit asks of you. `start` runs it in your session ([Run It Yourself](/run-it-yourself)); `service` installs and drives it as a root daemon ([Run It as a Service](/daemon-setup)); `daemon` is the loop that service unit executes, which you rarely type yourself. Of the three, only `start` can unlock a passphrase-protected key and keep a schedule running against it.
+
 ### run
 
 Back up every due target once, or only the targets you name.
+
+A target whose destination lock is held is skipped, its run still recorded, and the rest of the pass continues - but the pass then exits 3, so a locked target is never mistaken for a successful one.
 
 `--force` runs a target whether or not it is due, ignoring backoff and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move; retention is planned but not applied. Because it writes nothing it also takes no destination lock, so an estimate works while a real run is in flight - and can never leave a lock behind. The number it reports is a snapshot of that moment, not a reservation.
 
@@ -78,33 +125,41 @@ Run the scheduler in the foreground **in your own session**, for as long as the 
 
 This is the supported home for **passphrase-protected keys**. On startup it launches backupkit's ssh-agent and adds every explicit remote's key to it, prompting on your terminal for each encrypted one; the schedule then runs against that unlocked agent. Everything else - windows, retention, locking, the disk guard - is identical to the service.
 
-Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot.
+Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot. See [Run It Yourself](/run-it-yourself) for the whole mode - which config it reads, where its state lives, and how to survive a logout.
+
+`--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
 
 ### daemon
 
 Run the scheduler in the foreground. This is exactly what the installed service unit runs. Use `backupkit service` to install and drive it instead of running this yourself.
 
-**It refuses to start when any configured key is passphrase-protected**, naming each offending key and remote. A service has no terminal to unlock a key on, so such a key could never be primed - the run would simply fail on every tick forever. A key counts as protected when its remote declares a `passphrase` (`file:` or `prompt`) *or* when the key file itself turns out to be encrypted. Fix it by giving the service a key of its own with no passphrase (`ssh-keygen -t ed25519 -N ""`), or stop the service and use `backupkit start` instead.
+**It refuses to start when any configured key is passphrase-protected**, naming each offending key and remote. A service has no terminal to unlock a key on, so such a key could never be primed - the run would simply fail on every tick forever. A key counts as protected when its remote declares a `passphrase` (`file:` or `prompt`) *or* when the key file itself turns out to be encrypted. Fix it by giving the service a key of its own with no passphrase (`ssh-keygen -t ed25519 -N ""`), or stop the service and [run the scheduler yourself](/run-it-yourself) with `backupkit start` instead.
 
 ### service
 
 Manage the OS service unit: `install | uninstall | start | stop | restart | status`.
 
-Every verb is idempotent. All of them except `status` need root. Run a lifecycle verb with no unit installed and it tells you the service is not installed, names the command that registers it, and exits 1. See [Daemon Setup](/daemon-setup) for the whole lifecycle.
+Every verb is idempotent. All of them except `status` need root. Run `start`, `stop`, or `restart` with no unit installed and it tells you the service is not installed, names the command that registers it, and exits 1; `uninstall` with no unit is a success - it says there is nothing to remove and exits 0. See [Run It as a Service](/daemon-setup) for the whole lifecycle.
+
+`install` bakes the resolved config's **absolute path** into the unit's `ExecStart`, so the daemon the OS launches keeps reading that same file. The lifecycle verbs do not inherit it: `start`, `restart`, and `status` re-resolve the config themselves, so repeat the same `--config` on each of them (or export `BACKUPKIT_CONFIG`), or they will rewrite the unit from whatever config they find instead.
 
 ### logs
 
 Tail the daemon's logs - `journalctl -u backupkit` on Linux, a `tail` of the launchd log files on macOS.
 
-`-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. With no log source it says so, names the command that registers the service, and exits 1. There is no `--json` - journald already has `-o json`.
+`-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. There is no `--json` - journald already has `-o json`. Three states exit 1 with a different instruction each: no unit installed points at `sudo backupkit service install`; a unit that has written nothing yet points at `backupkit service status`; and on macOS a non-root operator is told to re-run under `sudo`, because the log files are root-owned.
+
+It reads the **service's** logs and nothing else. A scheduler you run yourself logs to its own terminal, plus `logging.file` if you set one.
 
 ### list (alias: ls)
 
-List complete snapshots per target, oldest first, with a marker on any partial snapshot waiting to resume. `ls` is the only alias in the CLI. If the archive directory does not exist yet it says there are no snapshots, points at `backupkit run`, and exits 0.
+List complete snapshots per target, oldest first. A snapshot counts as complete only once it has been renamed out of `<name>.partial`, so an interrupted run is invisible here. `ls` is the only alias in the CLI. If the archive directory does not exist yet it says there are no snapshots, points at `backupkit run`, and exits 0.
 
 ### status
 
 One row per target: last snapshot, next due, last result, consecutive failures, and lock state.
+
+The `LOCK` column covers **local** destinations only. A push target's lock lives on the archive server, and probing it would cost an ssh round-trip on a command that promises to be instant, so a push target always reports no lock here - `backupkit unlock` is what reads the real remote state.
 
 It is derived from the run reports and the due calculation, so it is instant and needs no root. `service status` prints the same table with a unit-state header on top.
 
@@ -139,15 +194,27 @@ Exit 1 if any target was left locked or could not be reached.
 
 ### check
 
-The readiness gate you run before trusting a config. It validates the config (stopping at the first error), checks your local `rsync` and `ssh` versions, loads keys, opens a test connection to each remote, records host keys for unknown hosts when run on a terminal, and prints the `authorized_keys` line for push targets.
+The readiness gate you run before trusting a config. It validates the config (stopping at the first error), checks your local `rsync` version against the 3.2.5 floor and confirms `ssh` runs, loads keys, opens a test connection to each remote, records host keys for unknown hosts when run on a terminal, and prints the `authorized_keys` line for push targets.
 
 That last part is informational: the jail is recommended but optional and is never probed, and a `"jail": false` target gets a note instead.
 
-It exits 2 on a config error and 1 if any connection check fails. On a terminal it also unlocks encrypted keys into backupkit's agent, prompting for each - so it is worth running after a reboot on a deployment whose keys have passphrases, though `backupkit start` does the same thing and then keeps the schedule running.
+It exits 2 on a config error and 1 if any check fails - an unusable local `rsync` or `ssh`, a key that will not load, or an unreachable remote. On a terminal it also unlocks encrypted keys into backupkit's agent, prompting for each - so it is worth running after a reboot on a deployment whose keys have passphrases, though `backupkit start` does the same thing and then keeps the schedule running.
+
+A passing check ends by naming both ways to schedule *this* config:
+
+```
+Check passed - backupkit is ready. Schedule it either way:
+    in this session:   backupkit start --config /home/dan/.backupkit/config.jsonc
+    as a root service: sudo backupkit service install --config /home/dan/.backupkit/config.jsonc
+```
+
+Two details there are deliberate. Each command carries `--config` unless the checked config lives in `/etc/backupkit`, because that is the only directory a root service finds on its own - a bare `sudo backupkit service install` after checking a config in your home directory would install a service over root's `/etc` copy, or over nothing at all. And when any configured key is passphrase-protected, the service line is replaced by `NOT POSSIBLE` naming the key, since [a service can never unlock one](/daemon-setup#a-service-cannot-hold-an-encrypted-key). That is not a failure - the check still passes and still exits 0; only one of the two ways to schedule is open to it.
+
+If any remote is an `ssh_config` alias, it adds a note alongside that service line: the check resolved that alias against *your* `ssh_config` and *your* agent, and a root service resolves it against root's. The note rides with the service line, so a config that also holds a passphrase-protected key prints the `NOT POSSIBLE` line instead and no alias note.
 
 ### init
 
-Write the commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force`, naming the config already in the way. Its output is three lines.
+Write the commented starter `config.jsonc` at the resolved path - `--config <path>` or `$BACKUPKIT_CONFIG` when either is set, else `/etc/backupkit` for root and `~/.backupkit` otherwise. It refuses to overwrite without `--force`, naming the config already in the way, and refuses just as firmly when the sibling spelling `config.json` sits in the same directory, since a directory holding both fails to load at all. Its output is three lines.
 
 ### jail
 
@@ -157,7 +224,7 @@ The one command meant for the **archive server** rather than the push client. In
 
 `status` needs no root. It compares the installed copy against the shipped one and exits 1 if it is missing or out of date - which matters, because an old copy rejects every push. Pair `npm update -g` with `sudo backupkit jail install`, and use `status` from monitoring to catch drift.
 
-As a backstop, **every** `backupkit` command on a machine that has a script at the well-known path warns on stderr when that copy differs from the package. Machines with no script installed stay quiet.
+As a backstop, **every** `backupkit` command except `jail` itself - whose verbs report that state precisely - warns on stderr when the copy at the well-known path differs from the package. Machines with no script installed stay quiet.
 
 The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. See [the push jail](/security-model#the-push-jail).
 
@@ -165,16 +232,28 @@ The `authorized_keys` lines that point at the script come from `backupkit check`
 
 `--json` exists on the two read-only commands machines actually consume: `status` and `list`. Each prints one JSON document on stdout, with logs going to stderr only.
 
+`list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, nextDueAt, lastResult, consecutiveFailures, lockHeld }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `consecutiveFailures` is a number, and `lockHeld` is a boolean that is always `false` for a push target.
+
 `run`, `prune`, `check`, `service`, and `logs` have no `--json`. The stored run reports, the printed prune plan, and journald's `-o json` already cover the machine-readable side.
 
-Everything else is plain text, aligned with padding - no table library and no ANSI color, so it all stays greppable. Errors go to stderr as `error <CODE>: message`. Stack traces appear only when `logging.level` is `debug`.
+Everything else is plain text, aligned with padding - no table library and no ANSI color, so it all stays greppable. Errors go to stderr as `Error: message`; the machine-readable part is the exit code, not a prefix a person has to read past. Stack traces appear only when `logging.level` is `debug`.
+
+## Timestamps
+
+Every timestamp you read is `YYYY-MM-DDTHH:mm:ssZ` in **UTC**, whole seconds - the `CREATED (UTC)` and `NEXT DUE` columns, the lock details. The trailing `Z` is the ISO-8601 designator for UTC, not decoration: without it the same string would mean *local* time, so a reader in another timezone would misread every backup by their offset. backupkit never prints a host-local time, on purpose - an archive is often read from a different machine than it was written on.
+
+Three deliberate exceptions:
+
+- **Log lines** add milliseconds - `2026-08-10T03:15:00.123Z`. Same format, same timezone, more precision: a busy run emits many lines inside one second, and at second precision their order would be unrecoverable from the log alone.
+- **`--json` output and the stored run reports** keep full-precision ISO-8601 (`2026-08-10T03:15:02.123Z`). They are a machine contract, and `jq` and `Date.parse` consumers depend on it.
+- **Snapshot directory names** are the same timestamp with the colons removed - `2026-08-10T031502Z`. A `:` is an illegal filename character on exFAT, NTFS and SMB, which is exactly what a USB backup drive or a NAS share is. Seconds are kept because the name is the uniqueness key: two runs in the same minute would otherwise collide.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
 | `0` | Success - including bare `backupkit`, `--help`, and idempotent service no-ops |
-| `1` | Runtime failure - a target failed, a deletion failed, a connection check failed, a lifecycle verb ran with no unit installed, or no logs were found |
+| `1` | Runtime failure - a target failed, a deletion failed, a check failed, a target was left locked, `start`/`stop`/`restart` ran with no unit installed, no logs were found, `init` found a config already in the way, a root-only verb ran without root, or `jail status` found the script missing or outdated |
 | `2` | Config error |
 | `3` | Lock held - try again later |
 | `64` | Bad usage - unknown flag, subcommand, or target |
@@ -184,5 +263,6 @@ Everything else is plain text, aligned with padding - no table library and no AN
 ## Related
 
 - [Getting Started](/getting-started) - these commands in setup order
-- [Daemon Setup](/daemon-setup) - the service lifecycle in depth
+- [Run It Yourself](/run-it-yourself) - `start` as a whole mode: your config, your keys
+- [Run It as a Service](/daemon-setup) - the service lifecycle in depth
 - [Configuration Reference](/configuration) - the config every command reads

@@ -3,9 +3,16 @@
  * names in the whole codebase. A guard test fails the build if any competing
  * timestamp pattern appears outside this file. `runId` reuses this codec.
  *
- * Name form: UTC ISO-basic without colons, e.g. "2026-08-10T031502Z".
- * Lexical sort order equals chronological order by construction.
+ * Name form: UTC ISO-basic without colons, e.g. "2026-08-10T031502Z" - the
+ * human-facing `formatUtc` timestamp with the colons stripped, because `:` is
+ * an illegal filename character on exFAT/NTFS/SMB destinations (a USB backup
+ * drive, a NAS share). Lexical sort order equals chronological order by
+ * construction, and seconds are load-bearing: the name is the uniqueness key,
+ * so a minute-resolution form would make two runs in the same minute collide
+ * at promote time - after a full transfer.
  */
+
+import { formatUtc } from "./format.js";
 
 /**
  * The one snapshot-name regex: `^\d{4}-\d{2}-\d{2}T\d{6}Z$` with capture
@@ -15,28 +22,13 @@
  */
 export const SNAPSHOT_NAME_REGEX: RegExp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2})(\d{2})(\d{2})Z$/;
 
-/** Left-pad a non-negative integer with zeros to the given width. */
-function pad(value: number, width: number): string {
-    return String(value).padStart(width, "0");
-}
-
 /**
  * Format a Date as a snapshot name: UTC, truncated to whole seconds,
- * e.g. "2026-08-10T031502Z".
+ * e.g. "2026-08-10T031502Z". Derived from `formatUtc` so the filename form
+ * and the displayed form cannot drift apart.
  */
 export function formatSnapshotName(date: Date): string {
-    return (
-        pad(date.getUTCFullYear(), 4) +
-        "-" +
-        pad(date.getUTCMonth() + 1, 2) +
-        "-" +
-        pad(date.getUTCDate(), 2) +
-        "T" +
-        pad(date.getUTCHours(), 2) +
-        pad(date.getUTCMinutes(), 2) +
-        pad(date.getUTCSeconds(), 2) +
-        "Z"
-    );
+    return formatUtc(date).replaceAll(":", "");
 }
 
 /**

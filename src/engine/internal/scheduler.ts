@@ -11,6 +11,7 @@
 import type { ResolvedTarget } from "../../config/types.js";
 import type { Logger } from "../../shared/logger.js";
 import { isBackupkitError } from "../../shared/errors.js";
+import { formatUtc } from "../../shared/format.js";
 import { parseSnapshotName } from "../../shared/snapshot-name.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
@@ -95,7 +96,7 @@ export class BackoffTracker {
             const failures = current.failures + 1;
             this.state.set(target, { failures, anchor: finishedAt });
             const delayMs = backoffDelayMs(failures);
-            const nextAttemptAt = new Date(finishedAt.getTime() + delayMs).toISOString();
+            const nextAttemptAt = formatUtc(new Date(finishedAt.getTime() + delayMs));
             const phase = failures === 1 ? "entering" : delayMs >= BACKOFF_CAP_MS ? "at ceiling for" : "extending";
             this.log.error(`${phase} failure backoff`, { target, failures, nextAttemptAt });
             return;

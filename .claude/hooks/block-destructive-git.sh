@@ -6,7 +6,7 @@
 # at once. Every command below throws that work away or moves it somewhere the other sessions cannot
 # see, and each one does it INSTANTLY, with no confirmation and no undo that git will offer you.
 #
-# It exists because the documentation did not work. `.agent/` memory and CLAUDE.md have both carried
+# It exists because the documentation did not work. `.agentstore/` memory and CLAUDE.md have both carried
 # "never run git stash here" for weeks, and it was run anyway - twice - each time as a reflex while
 # chasing something else ("are these test failures mine?"). A rule you have to remember is a rule you
 # forget exactly when you are busy, so this is the same rule enforced by the harness instead.

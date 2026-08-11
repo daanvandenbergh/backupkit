@@ -5,6 +5,7 @@
  */
 
 import type { TargetStatus } from "../../../engine/types.js";
+import { formatUtc } from "../../../shared/format.js";
 import type { CliDeps } from "../context.js";
 import { alignRows, parseFlags, selectTargets } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -19,7 +20,8 @@ export function formatStatusRows(rows: TargetStatus[]): string[] {
         rows.map((row) => [
             row.target,
             row.lastSnapshot ?? "-",
-            row.nextDueAt ?? "-",
+            // The struct carries strict ISO-8601 for --json; humans get formatUtc.
+            row.nextDueAt === null ? "-" : formatUtc(new Date(row.nextDueAt)),
             row.lastResult ?? "-",
             String(row.consecutiveFailures),
             row.lockHeld ? "held" : "-",

@@ -1,6 +1,6 @@
 ---
 title: "Getting Started"
-description: "Install backupkit, write a config, check it, and start the daemon - the three commands that get you from nothing to scheduled backups."
+description: "Install backupkit, write a config, check it, and start the scheduler - in your own session or as a service - to get from nothing to scheduled backups."
 tab: "Guide"
 group: "Start"
 order: 1
@@ -14,9 +14,11 @@ image: "/assets/docs/getting-started/hero.en.jpg"
 updated: "2026-08-11"
 ---
 
-By the end of this page you will have backupkit installed, a config that passes validation, and a daemon taking dated snapshots on a schedule. Three commands do the setup: `init`, `check`, `service install`.
+By the end of this page you will have backupkit installed, a config that passes validation, and a scheduler taking dated snapshots.
 
-**You need:** Node.js 20+, plus `rsync` 3.2.5+ and `ssh` on this machine and on every machine you back up. Step 3 checks the versions for you.
+The setup is the same for everyone up to the last step, where it forks into the **two ways to run backupkit** - [yourself, in your own session](/run-it-yourself), or [as a root service](/daemon-setup). They are genuinely different setups: different commands, different config files, different state directories, and only one of them accepts a key with a passphrase. `backupkit check` ends by telling you which are open to your config, so you do not have to decide before you get there.
+
+**You need:** Node.js 20+, plus `rsync` 3.2.5+ and `ssh` on this machine and on every machine you back up. Step 3 checks the rsync version for you, here and on every remote.
 
 ## Install backupkit
 
@@ -30,28 +32,47 @@ It has no runtime dependencies beyond Node itself. Check that the binary is on y
 backupkit --version
 ```
 
-Run `backupkit` with no arguments any time and it prints the three setup steps again.
+Run `backupkit` with no arguments any time for the full command list; it ends with the same three setup steps.
+
+## Which of the two modes are you heading for?
+
+You do not have to commit yet, but it decides one thing right away - **whether you run the setup commands under `sudo` or as yourself** - because that is what decides where the config lands.
+
+| | [Run it yourself](/run-it-yourself) | [Run it as a service](/daemon-setup) |
+| --- | --- | --- |
+| Scheduler command | `backupkit start` | `sudo backupkit service install` + `start` |
+| Runs as | you, in a terminal | root, supervised by systemd/launchd |
+| Config it reads | `~/.backupkit/config.jsonc` | `/etc/backupkit/config.jsonc` |
+| State dir default | `$XDG_STATE_HOME/backupkit`, else `~/.local/state/backupkit` | `/var/lib/backupkit` (`/var/db/backupkit` on macOS) |
+| Key with a passphrase | **yes** - prompts once per key | **no** - refuses to start |
+| Needs root | no | yes, for every verb but `status` |
+| Survives logout / reboot | no | yes |
+| Where its logs go | this terminal (plus `logging.file`) | journald / `/var/log/backupkit`, via `backupkit logs` |
+
+If your key has a passphrase, only the left column is open to you. If this is an always-on server, you want the right one. You can start on the left, watch a few runs, and move right later - it is the same scheduler either way.
+
+The commands below are written for the **service** track (`sudo`, `/etc/backupkit`). For the session track, drop every `sudo` and the config lands in `~/.backupkit/` instead.
 
 ## Step 1: write a starter config
 
-`backupkit init` writes a `config.jsonc` full of comments and stops. It will not overwrite an existing file unless you pass `--force`.
+`backupkit init` writes a `config.jsonc` full of comments and stops. It will not overwrite an existing file unless you pass `--force`, and it refuses just the same when the other spelling - `config.json` - is already sitting in that directory, because a directory holding both is a hard error at load time. Pass `--config <path>` to write somewhere other than the default location.
 
 ```bash
-sudo backupkit init --config /etc/backupkit/config.jsonc
+sudo backupkit init
 ```
 
 It prints three lines: where it wrote the file, and the next two commands. The explanations are in the file itself, so open it next.
 
-Every command looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `~/.backupkit/`. Pick one location and stick with it.
+`init` writes where the config lookup would land for whoever ran it: **`sudo backupkit init` creates `/etc/backupkit/config.jsonc`**, the shared, root-owned location a service finds by itself, and **`backupkit init` as yourself creates `~/.backupkit/config.jsonc`**, yours alone.
 
-`init` writes where that same lookup would land: `sudo backupkit init` creates the shared `/etc/backupkit/config.jsonc`, and `backupkit init` as yourself creates `~/.backupkit/config.jsonc` for you alone. The daemon runs as root and cannot see your home directory's config on its own, so if you keep it there, install the service with `--config` - see [Root service, per-user config](/daemon-setup).
+Every command then looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `~/.backupkit/`. Pick one location and stick with it - and note that `/etc/backupkit/` is probed first for *every* user, so a system config shadows a personal one. Where both exist, name yours with `--config`.
 
 ## Step 2: edit the config
 
 The starter ships with one example remote and one example target. At minimum you set:
 
-- a **remote** - the machine to connect to. Either spell it out with `host`, `user`, and `identityFile`, or point at an entry in your `~/.ssh/config` with `{ "alias": "myserver" }`.
-- a **target** - what to back up. It needs a `direction` (use `"pull"` unless you have a reason not to), a `source`, a `destination`, and a `schedule`.
+- a **remote** - the machine to connect to. Either spell it out with `host`, `user`, and `identityFile`, or point at an entry in your `~/.ssh/config` with `{ "alias": "myserver" }`. An alias resolves through the ssh_config of whoever runs the scheduler, so a root service uses root's, not yours - on the service track, prefer an explicit remote.
+- a **target** - what to back up. It needs a `direction` (use `"pull"` unless you have a reason not to), a `remote`, a `source`, and a `destination`. `schedule` is optional and defaults to once a day at 00:00 UTC.
 
 A minimal pull target:
 
@@ -76,28 +97,40 @@ A minimal pull target:
 }
 ```
 
-The file is JSONC, so `//` and `/* */` comments and a trailing comma are fine. A duplicate key is an error rather than a silently overwritten target.
+The file is JSONC, so `//` and `/* */` comments and a trailing comma are fine. A duplicate key is an error rather than a silently overwritten target, and so is a key the schema does not know - a typo'd field is never quietly ignored.
+
+That `identityFile` has to exist before the next step: backupkit checks key permissions before it opens a single connection, and a missing key stops `check` cold. Make one and put its public half on the remote:
+
+```bash
+sudo mkdir -p /etc/backupkit/keys
+sudo ssh-keygen -t ed25519 -N "" -f /etc/backupkit/keys/example_ed25519
+sudo ssh-copy-id -i /etc/backupkit/keys/example_ed25519.pub backup-reader@10.0.0.11
+```
+
+The key must be mode `0600` and owned by you or root - `ssh-keygen` writes it that way, and `check` tells you the exact `chmod` if it is not.
 
 See the [Configuration Reference](/configuration) for every field, and [Push vs Pull](/push-vs-pull) for why pull is the default.
 
 ## Step 3: check it
 
-`backupkit check` is the gate you run before trusting anything. Run it in a terminal, because it is the only command allowed to record host keys and ask for key passphrases.
+`backupkit check` is the gate you run before trusting anything. Run it in a terminal, because it is the only command that will record a host key it has not seen before.
 
 ```bash
-sudo backupkit check --config /etc/backupkit/config.jsonc
+sudo backupkit check
 ```
 
-It validates the config, checks your local `rsync` and `ssh` versions, loads your keys, and opens a test connection to each remote. On a terminal it also records the host key of any remote you have not connected to before. For push targets it prints the `authorized_keys` line to install on the archive server.
+It validates the config, checks your local `rsync` version against the 3.2.5 floor (and every remote's), confirms `ssh` runs, loads your keys, and opens a test connection to each remote. On a terminal it also records the host key of any remote you have not connected to before. For push targets it prints the `authorized_keys` jail line to install on the archive server - unless that target sets `"jail": false`, which gets a warning instead.
 
-Fix whatever it reports and run it again until it is clean. It exits `2` on a config error and `1` if a connection check fails.
+Fix whatever it reports and run it again until it is clean. It exits `2` on a config error and `1` if any check fails - an unusable local `rsync` or `ssh`, a key that will not load, or an unreachable remote.
+
+Its last lines are the fork in the road - the two ways to schedule *this* config, with the `--config` path already filled in where one is needed, and the service line replaced by `NOT POSSIBLE` (naming the key) when a passphrase-protected key rules it out.
 
 ## Step 4: take one snapshot by hand
 
-Before you hand the job to a daemon, run one pass yourself:
+Before you hand the job to a scheduler, run one pass yourself:
 
 ```bash
-sudo backupkit run --config /etc/backupkit/config.jsonc
+sudo backupkit run
 ```
 
 That backs up every target that is due. Add `--force` to run a target whether or not it is due, or `--dry-run` to see what would move without writing anything.
@@ -105,29 +138,44 @@ That backs up every target that is due. Add `--force` to run a target whether or
 Then look at what landed:
 
 ```bash
-backupkit list
+sudo backupkit list
 ```
 
 Each finished snapshot is a dated directory under `<destination>/<target>/`. Files that did not change are hard-linked to the previous snapshot, so keeping history costs very little disk.
 
-## Step 5: start the daemon
+## Step 5: pick a mode and schedule it
 
-Install the OS service (systemd on Linux, launchd on macOS) and start it:
+This is where the two tracks part. Both run the same scheduler - one snapshot per due window, then a prune against your retention policy - so what you are choosing is who supervises it and where its config, state, and logs live.
+
+**[Run it yourself](/run-it-yourself)** - in this terminal, as you. The only mode that accepts a key with a passphrase:
+
+```bash
+backupkit start
+```
+
+It unlocks every key into backupkit's ssh-agent (prompting once per key file), schedules until Ctrl-C, and dies with the process. Add `--force` to back up every target once immediately and then schedule.
+
+**[Run it as a service](/daemon-setup)** - as root, under systemd or launchd, surviving logout and reboot. Only for keys with no passphrase:
 
 ```bash
 sudo backupkit service install
 sudo backupkit service start
 ```
 
-The daemon now runs the scheduler: one snapshot per due window, then a prune against your retention policy. Check on it whenever:
+Add `--config <path>` to both if your config is not in `/etc/backupkit`; `check` prints the exact command with the path already filled in.
+
+Either way, watch it from any terminal:
 
 ```bash
-backupkit status          # last run and next due, per target
-backupkit logs            # tail the daemon's log
+sudo backupkit status     # last run and next due, per target
+sudo backupkit logs       # the service's log (a session scheduler logs to its own terminal)
 ```
+
+Run `status` as the **same user** that runs the scheduler, or set an explicit `stateDir` in the config so both identities read the same directory - the report directory it reads follows the identity, not the config file, so a plain `backupkit status` against a root service prints `-` in every column rather than an error. `backupkit logs` reads the service's log and needs root on macOS, where those files are root-owned.
 
 ## Related
 
+- [Run It Yourself](/run-it-yourself) - the session scheduler, passphrases, and surviving a logout
+- [Run It as a Service](/daemon-setup) - the service lifecycle and what happens after a reboot
 - [Configuration Reference](/configuration) - every config field and its default
-- [Daemon Setup](/daemon-setup) - the service lifecycle and what happens after a reboot
 - [Security Model](/security-model) - keys, host keys, and the push jail

@@ -1,6 +1,6 @@
 {
     "name": "@daanvandenbergh/backupkit",
-    "version": "0.1.0",
+    "version": "1.0.0",
     "description": "Backup toolkit for Node.js/TypeScript projects.",
     "license": "UNLICENSED",
     "type": "module",
@@ -28,7 +28,7 @@
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
         "prepublishOnly": "npm run build",
-        "push-and-publish": "npm run build && npm publish",
+        "push-and-publish": "git add -A && git commit -m 'Updates' && git push -u origin main && npm run build && npm publish",
         "docs": "npm run build && npm --prefix docs run dev",
         "docs:build": "npm run build && npm --prefix docs run build"
     },
@@ -36,7 +36,7 @@
         "node": ">=20"
     },
     "devDependencies": {
-        "@daanvandenbergh/claudekit": "^1.2.0",
+        "@daanvandenbergh/claudekit": "^1.3.0",
         "@daanvandenbergh/scribekit": "^1.7.2",
         "@types/node": "^22.20.1",
         "typescript": "^5.6.0",

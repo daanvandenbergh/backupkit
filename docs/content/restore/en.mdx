@@ -3,7 +3,7 @@ title: "Restoring a Backup"
 description: "Copy a snapshot back out with backupkit restore, restore the latest one, and optionally checksum-verify the copy."
 tab: "Guide"
 group: "Operate"
-order: 2
+order: 3
 icon: "check"
 keywords:
     - restore
@@ -28,7 +28,14 @@ backupkit restore var-www 2026-08-10T031500Z --output /tmp/restored-www
 
 On success it prints one line naming the target, the snapshot, and where it landed.
 
-The copy runs `rsync -a --sparse -H`, so permissions, sparse files, and hard links inside the snapshot are preserved. Symlinks are copied as symlinks and never followed. `--delete` is never passed - restore only ever writes into a fresh path.
+The copy runs `rsync -a --sparse -H --numeric-ids --chmod=ug-s`, plus `--no-devices --no-specials` unless the target sets `rsync.preserveDevices`, and `-e <ssh>` when the archive lives on a remote. So modes, ownership (by numeric id), sparse files, and hard links inside the snapshot come back intact - with two deliberate exceptions:
+
+- **setuid and setgid bits are stripped.** `--chmod=ug-s` is unconditional: a snapshot holding a setuid-root binary must not be faithfully recreated by a root `backupkit restore`, because the output path is forced outside every archive root and therefore outside any `nosuid` mount. Re-`chmod` such a file by hand if you really need it back.
+- **device nodes, fifos, and sockets are skipped**, exactly as they were on the way in, unless that target sets `"preserveDevices": true` in its [rsync options](/configuration).
+
+Symlinks are copied as symlinks and never followed. `--delete` is never passed - restore only ever writes into a fresh path.
+
+Restoring a **push** target works the same way: the snapshot is pulled back from the remote archive over ssh onto the machine you run the command on. Restore probes the remote rsync first and refuses with `remote rsync check failed for <remote> - refusing to restore` if it is missing or below 3.2.5, because a restore is the one path where the server is the sender.
 
 ## Restore the latest snapshot
 
@@ -38,17 +45,19 @@ Pass `latest` instead of a name to get the newest complete snapshot. The CLI and
 backupkit restore var-www latest --output /tmp/restored-www
 ```
 
-Name a snapshot that does not exist or is not complete, and restore refuses and tells you the newest complete snapshot for that target, so you can retry with a valid name.
+Name a snapshot that does not exist or is not complete, and restore refuses, naming the newest complete snapshot for that target so you can retry with a valid name. On an archive with no complete snapshots at all it just says so - there is nothing to point you at.
 
 ## Where you can restore to
 
 The `--output` path must not already exist - there is no restore-into-existing mode.
 
-Its parent directory does have to exist, and that parent must not resolve inside any configured destination root. Restoring on top of, or inside, an archive is refused outright, so a restore can never overwrite the snapshots it is reading from. Pick an output path outside every archive.
+Its parent directory does have to exist, and that parent must not resolve inside any configured **local** destination root - `output <path> resolves inside the archive root <root> - choose a path outside every archive`. Restoring on top of, or inside, a local archive is refused outright, so a restore can never overwrite the snapshots it is reading from. (A push archive lives on another host, so a local output path cannot collide with it.)
 
 ## Verify the copy
 
-Add `--verify` for an integrity check after the copy. It runs a checksum comparison between the snapshot and the restored tree; if any file differs, the restore fails and lists the differing paths.
+Add `--verify` for an integrity check after the copy. It runs a second `rsync --checksum --dry-run --itemize-changes` pass over the snapshot and the restored tree; if anything differs, the restore fails and lists up to 20 of the differing entries as rsync itemize lines. (Files that vanished from the source mid-pass are tolerated, not treated as a mismatch.)
+
+The verify pass runs **after** the copy is on disk, and a failure cleans nothing up: the restored tree stays where it is, so delete it or pick a new `--output` before retrying - restore refuses an existing path.
 
 ```bash
 backupkit restore var-www latest --output /tmp/restored-www --verify
@@ -56,7 +65,7 @@ backupkit restore var-www latest --output /tmp/restored-www --verify
 
 A clean pass marks the output line as verified.
 
-It is opt-in because it re-reads both sides in full. Skip it for a routine restore; use it when you need proof the copy is bit-for-bit identical.
+It is opt-in because it re-reads both sides in full. Skip it for a routine restore; use it when you need proof the copy is bit-for-bit identical. It is per-invocation and has nothing to do with a target's `rsync.verify` config field, which governs the pre-promote pass on a backup run - a config with `"verify": true` still produces unverified restores unless you pass this flag.
 
 ## Restoring from the library
 

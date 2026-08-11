@@ -235,6 +235,22 @@ describe("explicit remotes", () => {
             "remotes.r1.knownHostsFile",
         );
     });
+
+    // The explicit branch used to accept `restrictedShell` into the allow-list
+    // and then never read it, so it resolved to false and every remote command
+    // went out quoted - the exact failure the flag exists to avoid, silently.
+    it("carries restrictedShell through on an explicit remote", () => {
+        const result = validate(base({ remotes: { r1: { ...REMOTE, restrictedShell: true } } }));
+        const remote = result.remotes[0].remote;
+        expect("restrictedShell" in remote && remote.restrictedShell).toBe(true);
+    });
+
+    it("rejects a non-boolean restrictedShell on an explicit remote", () => {
+        expectFail(
+            base({ remotes: { r1: { ...REMOTE, restrictedShell: "yes" } } }),
+            "remotes.r1.restrictedShell",
+        );
+    });
 });
 
 describe("alias remotes (alias XOR explicit)", () => {
@@ -264,6 +280,29 @@ describe("alias remotes (alias XOR explicit)", () => {
             }),
             `remotes.m.${key}`,
             "alias remotes take no other fields - host, user, key, and port come from ssh_config; use an explicit remote for per-field control",
+        );
+    });
+
+    // The one legal companion: it describes the remote's SHELL (a Storage Box
+    // parses no quoting), which ssh_config has no way to express.
+    it("accepts alias + restrictedShell", () => {
+        const result = validate(
+            base({
+                remotes: { m: { alias: "m", restrictedShell: true } },
+                targets: { t1: { ...TARGET, remote: "m" } },
+            }),
+        );
+        expect(result.remotes[0].remote).toEqual({ alias: "m", restrictedShell: true });
+    });
+
+    it("rejects a non-boolean restrictedShell", () => {
+        expectFail(
+            base({
+                remotes: { m: { alias: "m", restrictedShell: "yes" } },
+                targets: { t1: { ...TARGET, remote: "m" } },
+            }),
+            "remotes.m.restrictedShell",
+            "expected a boolean",
         );
     });
 
@@ -653,6 +692,45 @@ describe("top-level settings", () => {
 });
 
 describe("cross-field rules", () => {
+    // restrictedShell sends every remote argv element as a BARE word, while the
+    // jail script's case arms match only the single-quoted forms. Since `jail`
+    // defaults to true on push, the pair used to validate happily and then have
+    // every mkdir/mv/rm answered with a bare `backupkit-remote: rejected` while
+    // rsync itself kept working - a mystery failure, at run time, on a live
+    // archive. It has to be refused here or nowhere.
+    it("rejects a restrictedShell remote serving a jailed push target", () => {
+        expectFail(
+            base({
+                remotes: { box: { alias: "box", restrictedShell: true } },
+                targets: { nas: { ...TARGET, direction: "push", remote: "box", destination: "/home/backups" } },
+            }),
+            "targets.nas.jail",
+            'set "jail": false on this target, or drop restrictedShell',
+        );
+    });
+
+    it("accepts a restrictedShell remote on an UNJAILED push target", () => {
+        const result = validate(
+            base({
+                remotes: { box: { alias: "box", restrictedShell: true } },
+                targets: {
+                    nas: { ...TARGET, direction: "push", remote: "box", destination: "/home/backups", jail: false },
+                },
+            }),
+        );
+        expect(result.targets[0].target.jail).toBe(false);
+    });
+
+    it("accepts a restrictedShell remote on a pull target, which has no jail", () => {
+        const result = validate(
+            base({
+                remotes: { box: { alias: "box", restrictedShell: true } },
+                targets: { t1: { ...TARGET, remote: "box" } },
+            }),
+        );
+        expect(result.targets[0].target.direction).toBe("pull");
+    });
+
     it("rejects a snapshot root nested inside another target's snapshot root", () => {
         expectFail(
             base({

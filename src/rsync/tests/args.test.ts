@@ -23,6 +23,7 @@ function explicitRemote(path: string, host = "10.0.0.11"): Endpoint {
         kind: "remote",
         remote: {
             kind: "explicit",
+            restrictedShell: false,
             name: "example",
             host,
             user: "backup",
@@ -37,7 +38,7 @@ function explicitRemote(path: string, host = "10.0.0.11"): Endpoint {
 
 /** An alias-remote endpoint via ssh_config alias "myserver". */
 function aliasRemote(path: string): Endpoint {
-    return { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path };
+    return { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path };
 }
 
 /** A local endpoint. */

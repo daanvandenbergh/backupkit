@@ -13,6 +13,7 @@ import { posix } from "node:path";
 
 import type { ExecResult } from "../../exec/exec.js";
 import { SnapshotStoreError } from "../../shared/errors.js";
+import { formatUtc } from "../../shared/format.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
 import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
@@ -191,9 +192,9 @@ class RemoteLockBackend implements LockBackend {
             // marker the client's clock could not have written is stale.
             const ageMs = this.now().getTime() - created.getTime();
             if (Math.abs(ageMs) > LOCK_TTL_MS) {
-                return stale(`created ${name}, past the 24h TTL`);
+                return stale(`created ${formatUtc(created)}, past the 24h TTL`);
             }
-            return { stale: false, pid: null, hostname: null, detail: `created ${name}` };
+            return { stale: false, pid: null, hostname: null, detail: `created ${formatUtc(created)}` };
         }
         return { stale: false, pid: null, hostname: null, detail: "no creation marker yet (assuming freshly acquired)" };
     }

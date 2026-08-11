@@ -61,6 +61,7 @@ function other(mode: number, uid: number): FileStatInfo {
 /** The explicit remote fixture. */
 const EXPLICIT: ResolvedRemote = {
     kind: "explicit",
+    restrictedShell: false,
     name: "example",
     host: "10.0.0.11",
     user: "backup",
@@ -71,7 +72,7 @@ const EXPLICIT: ResolvedRemote = {
 };
 
 /** The alias remote fixture. */
-const ALIAS: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+const ALIAS: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
 
 /** A baseline input where every always-row passes for euid 501. */
 function baseInput(remotes: ResolvedRemote[], loggingFile: string | null = null): PermissionPreflightInput {

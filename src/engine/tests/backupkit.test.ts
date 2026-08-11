@@ -379,7 +379,7 @@ describe("Backupkit", () => {
         const fixture = track(
             await makeKit({
                 target: {
-                    src: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/data" },
+                    src: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/data" },
                 },
                 deps: {
                     probeRemote: async () => "3.2.7",
@@ -435,6 +435,7 @@ describe("Backupkit", () => {
                                 path: "/srv/data",
                                 remote: {
                                     kind: "explicit",
+                                    restrictedShell: false,
                                     name: "srv",
                                     host: "10.0.0.1",
                                     user: "backup",
@@ -587,7 +588,7 @@ describe("Backupkit", () => {
                     stateDir: fixture.stateDir,
                     targets: [fixture.target],
                 }),
-                remotes: { srv: { kind: "alias", name: "srv", alias: "myserver" } },
+                remotes: { srv: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" } },
             },
             {
                 now: () => fixture.clock.now,
@@ -660,7 +661,7 @@ describe("Backupkit", () => {
             await makeKit({
                 target: {
                     direction: "push",
-                    dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+                    dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/backups" },
                     destination: "/srv/backups",
                 },
             }),
@@ -679,7 +680,7 @@ describe("Backupkit", () => {
                 target: {
                     direction: "push",
                     jail: false,
-                    dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+                    dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/backups" },
                     destination: "/srv/backups",
                 },
             }),
@@ -702,6 +703,7 @@ describe("Backupkit", () => {
                 kind: "remote",
                 remote: {
                     kind: "explicit",
+                    restrictedShell: false,
                     name: "srv",
                     host: "10.0.0.1",
                     user: "backup",
@@ -742,7 +744,7 @@ describe("Backupkit", () => {
             await makeKit({
                 target: {
                     direction: "push",
-                    dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: destination },
+                    dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: destination },
                     destination,
                 },
             }),
@@ -851,7 +853,7 @@ describe("Backupkit", () => {
                         stateDir: fixture.stateDir,
                         targets: [fixture.target],
                     }),
-                    remotes: { srv: { kind: "alias", name: "srv", alias: "myserver" } },
+                    remotes: { srv: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" } },
                     sshBin: fakeSsh,
                 },
                 {
@@ -898,7 +900,7 @@ describe("Backupkit", () => {
         const fixture = track(
             await makeKit({
                 target: {
-                    src: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/data" },
+                    src: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/data" },
                 },
                 deps: {
                     probeRemote: async () => {
@@ -946,7 +948,7 @@ describe("Backupkit", () => {
     // the second's, and the second's binary - the one its transfer actually
     // uses - was never checked against the floor (invariant 11).
     it("probes each remoteRsyncBin on a shared remote: an old binary is refused even after a modern sibling passed", async () => {
-        const remote: ResolvedRemote = { kind: "alias", name: "srv", alias: "myserver" };
+        const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" };
         const probed: (string | null)[] = [];
         const fixture = track(
             await makeKit({
@@ -992,6 +994,7 @@ describe("Backupkit", () => {
         const fixture = track(await makeKit());
         const remote: ResolvedRemote = {
             kind: "explicit",
+            restrictedShell: false,
             name: "srv",
             host: "10.0.0.9",
             user: "backup",

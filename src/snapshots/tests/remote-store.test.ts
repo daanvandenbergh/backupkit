@@ -417,6 +417,9 @@ describe("RemoteSnapshotStore", () => {
 
         it("unlock: clears a leaked lock a killed run left behind (the 24h-TTL trap)", async () => {
             const leaked = "2026-08-10T021502Z";
+            // The MARKER is the colon-free filename form; the operator-facing
+            // detail renders it through `formatUtc` like every other timestamp.
+            const leakedShown = "created 2026-08-10T02:15:02Z";
             const { runner, calls } = fakeRunner((argv) => {
                 if (argv[0] === "mkdir" && argv[1] === "--") {
                     return { exitCode: 1, stderr: "mkdir: File exists" };
@@ -429,11 +432,11 @@ describe("RemoteSnapshotStore", () => {
             const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
             // Within the TTL it is a LIVE lock, so the default refuses it: no
             // pid exists remotely to prove the holder is dead.
-            await expect(store.unlock(false)).resolves.toEqual({ status: "held", detail: `created ${leaked}` });
+            await expect(store.unlock(false)).resolves.toEqual({ status: "held", detail: leakedShown });
             expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
             // --force is the operator saying "that run is gone" - the only cure
             // that used to require an ssh session and a hand-typed rm -rf.
-            await expect(store.unlock(true)).resolves.toEqual({ status: "removed", detail: `created ${leaked}` });
+            await expect(store.unlock(true)).resolves.toEqual({ status: "removed", detail: leakedShown });
             expect(calls.filter((argv) => argv[0] === "rm")).toEqual([["rm", "-rf", "--", LOCK]]);
         });
 

@@ -260,8 +260,11 @@ class Validator {
     private validateRemote(node: JsoncNode, path: string): RemoteConfig {
         const obj = this.expectObject(node, path);
         if (obj.entries.has("alias")) {
+            // `restrictedShell` is the one companion field: it describes the
+            // remote's SHELL (which ssh_config cannot express), not an ssh
+            // option, so the "put it in ssh_config" answer does not apply.
             for (const [key, valueNode] of obj.entries) {
-                if (key !== "alias") {
+                if (key !== "alias" && key !== "restrictedShell") {
                     this.fail(
                         valueNode,
                         `${path}.${key}`,
@@ -279,9 +282,21 @@ class Validator {
                 );
             }
             const remote: AliasRemoteConfig = { alias };
+            const aliasShellNode = obj.entries.get("restrictedShell");
+            if (aliasShellNode !== undefined) {
+                remote.restrictedShell = this.expectBool(aliasShellNode, `${path}.restrictedShell`);
+            }
             return remote;
         }
-        this.rejectUnknownKeys(obj, path, ["host", "user", "port", "identityFile", "passphrase", "knownHostsFile"]);
+        this.rejectUnknownKeys(obj, path, [
+            "host",
+            "user",
+            "port",
+            "identityFile",
+            "passphrase",
+            "knownHostsFile",
+            "restrictedShell",
+        ]);
         for (const required of ["host", "user", "identityFile"]) {
             if (!obj.entries.has(required)) {
                 this.fail(obj, `${path}.${required}`, "required field missing");
@@ -334,6 +349,10 @@ class Validator {
         const knownHostsNode = obj.entries.get("knownHostsFile");
         if (knownHostsNode !== undefined) {
             remote.knownHostsFile = this.expectPath(knownHostsNode, `${path}.knownHostsFile`, true);
+        }
+        const shellNode = obj.entries.get("restrictedShell");
+        if (shellNode !== undefined) {
+            remote.restrictedShell = this.expectBool(shellNode, `${path}.restrictedShell`);
         }
         return remote;
     }
@@ -644,6 +663,38 @@ class Validator {
         }
     }
 
+    /**
+     * Cross-field rule: a `restrictedShell` remote cannot serve a JAILED push
+     * target. The jail's grammar matches the single-quoted lifecycle commands
+     * (`'mkdir' '-p' '--' '...'`), while a restricted shell is sent bare words -
+     * so every mkdir/mv/rm is answered with a bare `backupkit-remote: rejected`
+     * while rsync itself keeps working, which reads as a mystery failure rather
+     * than a misconfiguration. `jail` defaults to true on push, so the pair has
+     * to be refused here or it fails silently at run time.
+     */
+    private checkRestrictedShellJail(
+        targets: ValidatedTarget[],
+        remotes: { name: string; remote: RemoteConfig }[],
+        nodes: Map<string, JsoncNode>,
+    ): void {
+        const restricted = new Set(
+            remotes.filter(({ remote }) => remote.restrictedShell === true).map(({ name }) => name),
+        );
+        for (const { name, target } of targets) {
+            if (target.direction !== "push" || (target.jail ?? true) === false) {
+                continue;
+            }
+            if (restricted.has(target.remote)) {
+                this.fail(
+                    nodes.get(name)!,
+                    `targets.${name}.jail`,
+                    `remote "${target.remote}" sets restrictedShell, whose bare-word commands the jail's ` +
+                        'quoted grammar rejects - set "jail": false on this target, or drop restrictedShell',
+                );
+            }
+        }
+    }
+
     /** Validate the whole document. */
     validate(root: JsoncNode): ValidatedConfig {
         const obj = this.expectObject(root, "config");
@@ -706,6 +757,7 @@ class Validator {
             targetNodes.set(key, valueNode);
         }
         this.checkSnapshotRoots(result.targets, targetNodes);
+        this.checkRestrictedShellJail(result.targets, result.remotes, targetNodes);
 
         const retentionNode = obj.entries.get("retention");
         if (retentionNode !== undefined) {

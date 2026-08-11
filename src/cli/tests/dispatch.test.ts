@@ -19,22 +19,30 @@ import { isEntryPoint, main } from "../main.js";
 import { fakeDeps } from "./fakes.js";
 
 describe("bare invocation and global flags", () => {
-    it("prints the 3-step help and exits 0 with no arguments", async () => {
+    it("prints the setup help and exits 0 with no arguments", async () => {
         const h = fakeDeps();
         expect(await main([], h.deps)).toBe(0);
         const text = h.out.join("\n");
-        expect(text).toContain("Setup (3 steps):");
+        expect(text).toContain("Setup:");
         expect(text).toContain("1. backupkit init");
         expect(text).toContain("2. backupkit check");
-        expect(text).toContain("3. backupkit service install");
+        // Step 3 offers BOTH schedulers: a config with an encrypted key can
+        // never be a service, so the help must not present one as the only way.
+        expect(text).toContain("backupkit start");
+        expect(text).toContain("backupkit service install");
         expect(text).toContain("alias: ls");
-        expect(text).toContain("backupkit <command> --help for details.");
+        expect(text).toContain("Usage: backupkit [options] [command]");
+        expect(text).toContain("backupkit <command> --help");
+        // The setup steps are a COLUMN layout, not prose: re-flowing them runs
+        // each command into its own description ("1. backupkit init write a
+        // commented starter config"), which is unreadable.
+        expect(text).toContain("  1. backupkit init             write a commented starter config");
     });
 
     it.each([["--help"], ["-h"], ["help"]])("prints the same help for %s", async (flag) => {
         const h = fakeDeps();
         expect(await main([flag], h.deps)).toBe(0);
-        expect(h.out.join("\n")).toContain("Setup (3 steps):");
+        expect(h.out.join("\n")).toContain("Setup:");
     });
 
     it("prints the package version for --version", async () => {

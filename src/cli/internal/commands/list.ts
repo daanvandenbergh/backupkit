@@ -4,6 +4,7 @@
  * view over `Backupkit.listSnapshots()`.
  */
 
+import { formatUtc } from "../../../shared/format.js";
 import type { CliDeps } from "../context.js";
 import { alignRows, parseFlags, selectTargets } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -32,7 +33,7 @@ export async function listCommand(argv: string[], deps: CliDeps): Promise<number
     }
     const lines = alignRows(
         ["TARGET", "SNAPSHOT", "CREATED (UTC)"],
-        infos.map((info) => [info.target, info.name, info.createdAt.toISOString()]),
+        infos.map((info) => [info.target, info.name, formatUtc(info.createdAt)]),
     );
     for (const line of lines) {
         deps.stdout(line);

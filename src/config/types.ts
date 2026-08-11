@@ -62,6 +62,8 @@ export interface ExplicitRemoteConfig {
     passphrase?: string;
     /** Override the dedicated known_hosts file path. Default: <configDir>/known_hosts. */
     knownHostsFile?: string;
+    /** This host's shell does not parse quotes - see {@link AliasRemoteConfig.restrictedShell}. Default false. */
+    restrictedShell?: boolean;
 }
 
 /**
@@ -73,8 +75,23 @@ export interface ExplicitRemoteConfig {
  * overrides ssh_config, so the no-hang and strict-host-key guarantees survive.
  */
 export interface AliasRemoteConfig {
-    /** Host alias exactly as written in ssh_config. /^[a-z0-9_][a-z0-9._-]*$/i, max 64 - no whitespace, quotes, ':', '@', '/', or leading '-'. Required, and the only allowed key. */
+    /** Host alias exactly as written in ssh_config. /^[a-z0-9_][a-z0-9._-]*$/i, max 64 - no whitespace, quotes, ':', '@', '/', or leading '-'. Required. */
     alias: string;
+    /**
+     * True when this host runs an appliance shell that does NOT parse shell
+     * quoting - a Hetzner Storage Box reads `'mkdir' '-p'` as a command
+     * literally named `'mkdir'` and answers "Command not found", so every
+     * snapshot-lifecycle command fails while rsync itself still works.
+     * backupkit then sends each remote command as bare words and REFUSES to
+     * send any element that is not already one inert shell word
+     * (`[A-Za-z0-9._/@:=+,-]` only) rather than escaping it. Only set it for a
+     * host you know parses no quotes: on a normal POSIX shell it removes a
+     * defence in depth for no gain. Default false.
+     *
+     * This is the one field that may accompany `alias` - it describes the
+     * remote's SHELL, which ssh_config cannot express, not an ssh option.
+     */
+    restrictedShell?: boolean;
 }
 
 /**

@@ -15,6 +15,7 @@ const FAST: RetryPolicy = { attempts: 3, baseDelayMs: 1, capMs: 2 };
 /** The explicit remote fixture. */
 const EXPLICIT: ResolvedRemote = {
     kind: "explicit",
+    restrictedShell: false,
     name: "example",
     host: "10.0.0.11",
     user: "backup",
@@ -25,7 +26,7 @@ const EXPLICIT: ResolvedRemote = {
 };
 
 /** The alias remote fixture. */
-const ALIAS: ResolvedRemote = { kind: "alias", name: "myserver", alias: "myserver" };
+const ALIAS: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
 
 describe("runRemote (fake ssh)", () => {
     let fake: FakeBinDir;
@@ -75,6 +76,32 @@ describe("runRemote (fake ssh)", () => {
         expect(argv).not.toContain("-i");
         expect(argv).not.toContain("-p");
         expect(argv.some((t) => t.includes("UserKnownHostsFile"))).toBe(false);
+    });
+
+    // A Hetzner Storage Box parses no quoting at all: it reads `'mkdir'` as a
+    // command literally named `'mkdir'` and answers "Command not found" (exit
+    // 8), so a quoted lifecycle command fails every run while rsync still
+    // works. `restrictedShell` sends bare words instead - and refuses anything
+    // that is not already one inert word, since no escaping would help there.
+    describe("restrictedShell remotes", () => {
+        const RESTRICTED: ResolvedRemote = { kind: "alias", restrictedShell: true, name: "box", alias: "box" };
+
+        it("sends bare words, never single-quoted ones", async () => {
+            await runRemote(RESTRICTED, ["mkdir", "-p", "--", "/home/backupkit"], options([{ exit: 0 }]));
+            expect((await fake.calls())[0].argv.at(-1)).toBe("mkdir -p -- /home/backupkit");
+        });
+
+        it("refuses to send an element that is not one inert word - nothing is spawned", async () => {
+            await expect(
+                runRemote(RESTRICTED, ["mkdir", "-p", "--", "/home/my backups"], options([{ exit: 0 }])),
+            ).rejects.toThrowError(/unquotable/);
+            expect(await fake.calls()).toHaveLength(0);
+        });
+
+        it("still quotes for a remote that did not opt in", async () => {
+            await runRemote(ALIAS, ["mkdir", "-p", "--", "/home/backupkit"], options([{ exit: 0 }]));
+            expect((await fake.calls())[0].argv.at(-1)).toBe("'mkdir' '-p' '--' '/home/backupkit'");
+        });
     });
 
     it("interactive context reaches the spawn as StrictHostKeyChecking=accept-new", async () => {

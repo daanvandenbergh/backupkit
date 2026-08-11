@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { isBackupkitError } from "../../shared/errors.js";
-import { quoteShellArg } from "../internal/quote.js";
+import { bareShellArg, quoteShellArg } from "../internal/quote.js";
 
 describe("quoteShellArg", () => {
     it.each([
@@ -30,6 +30,50 @@ describe("quoteShellArg", () => {
         expect(() => quoteShellArg(input)).toThrowError(/NUL or newline/);
         try {
             quoteShellArg(input);
+        } catch (error) {
+            expect(isBackupkitError(error) && error.code === "ssh").toBe(true);
+        }
+    });
+});
+
+// The restricted-shell quoter cannot make a value safe (the appliance shell
+// strips nothing and honours no escape), so it must REFUSE anything that is not
+// already one inert word. Every element backupkit sends bare is narrower than
+// this charset by construction, so a rejection here means a bug upstream, not a
+// legitimate path the operator should work around.
+describe("bareShellArg", () => {
+    it.each([
+        ["absolute path", "/home/backupkit/persistance"],
+        ["snapshot name", "2026-08-11T031502Z.partial"],
+        ["flag", "--"],
+        ["short flag", "-Pk"],
+        ["rsync path form", "u625054@host:/home/x"],
+        ["option with value", "--maxdepth=1"],
+        ["dotted", "..backupkit.lock"],
+    ])("passes %s through unchanged", (_label, input) => {
+        expect(bareShellArg(input)).toBe(input);
+    });
+
+    it.each([
+        ["a space", "/home/my backups"],
+        ["a single quote", "/home/it's"],
+        ["a double quote", '/home/"x"'],
+        ["a dollar", "$HOME"],
+        ["a backtick", "`id`"],
+        ["a semicolon", "x;rm"],
+        ["a pipe", "a|b"],
+        ["a glob", "/home/*"],
+        ["a redirect", "a>b"],
+        ["a backslash", "a\\b"],
+        ["a newline", "a\nb"],
+        ["a NUL", "a\0b"],
+        ["a tab", "a\tb"],
+        ["non-ascii", "snäpshot"],
+        ["the empty string", ""],
+    ])("refuses %s rather than escaping it", (_label, input) => {
+        expect(() => bareShellArg(input)).toThrowError(/unquotable/);
+        try {
+            bareShellArg(input);
         } catch (error) {
             expect(isBackupkitError(error) && error.code === "ssh").toBe(true);
         }

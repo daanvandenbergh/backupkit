@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 /**
  * The backupkit CLI entry (`bin` = dist/cli/main.js): static subcommand
- * dispatch over node:util parseArgs commands, the bare-invocation 3-step
- * help, --version, per-command --help, and the exit-code mapping
+ * dispatch over node:util parseArgs commands, the help surface (bare
+ * invocation, -h/--help, `help [command]`, and `<command> -h/--help` - all
+ * rendered from internal/help.ts), -v/--version, and the exit-code mapping
  * (0 success, 1 runtime failure, 2 config error, 3 lock held, 64 bad usage).
  * Errors print to stderr as `Error: message` - the machine-readable part is the
  * exit code, not a prefix a person has to read past; stack traces appear only
@@ -31,7 +32,7 @@ import { statusCommand } from "./internal/commands/status.js";
 import { unlockCommand } from "./internal/commands/unlock.js";
 import type { CliDeps } from "./internal/context.js";
 import { UsageError } from "./internal/context.js";
-import { ROOT_HELP } from "./internal/help.js";
+import { COMMAND_HELP, ROOT_HELP } from "./internal/help.js";
 import { serviceCommand } from "./internal/service/lifecycle.js";
 import { logsCommand } from "./internal/service/logs.js";
 
@@ -55,6 +56,14 @@ const COMMANDS: Record<string, Command> = {
     init: initCommand,
     jail: jailCommand,
 };
+
+/** Command aliases, resolved before a `help <topic>` lookup (`ls` -> `list`). */
+const ALIASES: Record<string, string> = { ls: "list" };
+
+/** The message for a name that is not a command: what was typed, and what is. */
+function unknownCommand(name: string): string {
+    return `unknown command "${name}" (valid: ${Object.keys(COMMANDS).join(", ")}). See: backupkit --help`;
+}
 
 /** The package version, read from the adjacent package.json. */
 function packageVersion(): string {
@@ -140,7 +149,8 @@ function reportError(error: unknown, deps: CliDeps): number {
 
 /**
  * The CLI: dispatch `argv` (without the node/script prefix) and return the
- * exit code. Bare invocation and --help print the 3-step help and exit 0.
+ * exit code. Bare invocation, -h/--help, and `help` print the root page and
+ * exit 0; `help <command>` prints that command's page.
  */
 export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promise<number> {
     const [first, ...rest] = argv;
@@ -155,10 +165,20 @@ export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promi
             }
         }
         if (first === undefined || first === "--help" || first === "-h" || first === "help") {
+            // `help <command>` / `--help <command>` prints exactly what
+            // `<command> --help` prints - the same page, either way round.
+            const topic = rest[0] === undefined ? undefined : ALIASES[rest[0]] ?? rest[0];
+            if (topic !== undefined && Object.hasOwn(COMMAND_HELP, topic)) {
+                deps.stdout(COMMAND_HELP[topic]);
+                return 0;
+            }
+            if (topic !== undefined) {
+                throw new UsageError(unknownCommand(topic));
+            }
             deps.stdout(ROOT_HELP);
             return 0;
         }
-        if (first === "--version") {
+        if (first === "--version" || first === "-v") {
             deps.stdout(deps.version);
             return 0;
         }
@@ -169,9 +189,7 @@ export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promi
         // member instead of the usage error.
         const command = Object.hasOwn(COMMANDS, first) ? COMMANDS[first] : undefined;
         if (command === undefined) {
-            throw new UsageError(
-                `unknown command "${first}" (valid: ${Object.keys(COMMANDS).join(", ")})`,
-            );
+            throw new UsageError(unknownCommand(first));
         }
         return await command(rest, deps);
     } catch (error) {

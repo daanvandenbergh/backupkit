@@ -105,6 +105,7 @@ describe("resolveConfig defaults", () => {
         const remote = resolve(minimal()).remotes.r1;
         expect(remote).toEqual({
             kind: "explicit",
+            restrictedShell: false,
             name: "r1",
             host: "10.0.0.11",
             user: "backup-reader",
@@ -138,7 +139,7 @@ describe("resolveConfig defaults", () => {
             remotes: { m: { alias: "myserver" } },
             targets: { t1: { ...TARGET, remote: "m" } },
         });
-        expect(result.remotes.m).toEqual({ kind: "alias", name: "m", alias: "myserver" });
+        expect(result.remotes.m).toEqual({ kind: "alias", restrictedShell: false, name: "m", alias: "myserver" });
         expect(result.targets[0].remoteRef).toBe(result.remotes.m);
     });
 });

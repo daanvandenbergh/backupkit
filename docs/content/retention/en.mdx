@@ -19,7 +19,9 @@ Every run leaves behind a dated snapshot. Retention decides how many of those yo
 
 ## Every run is a hard-linked snapshot
 
-A target's snapshots live at `<destination>/<target>/<timestamp>/`, one directory per run, named with a UTC timestamp.
+A target's snapshots live at `<destination>/<target>/<timestamp>/`, one directory per run, named with a UTC timestamp - `2026-08-10T031502Z`, colons dropped so the name is legal on exFAT, NTFS, and SMB.
+
+A run transfers into `<timestamp>.partial` and is renamed into place only once it completes, so an interrupted run never appears in history: the next run resumes or discards it. "Complete" is exactly that rename, which is why `backupkit list` and retention only ever see finished snapshots.
 
 Files that have not changed since the previous complete snapshot are hard-linked instead of copied - meaning the new snapshot points at the same data on disk rather than duplicating it. So an unchanged tree costs almost nothing, and only changed and new files take up space.
 
@@ -34,13 +36,13 @@ Each rule keeps one tier, and a snapshot is kept if **any** rule claims it:
 | Rule | Keeps |
 | --- | --- |
 | `keepLast` | The N newest snapshots, no other condition |
-| `keepHourly` | The newest snapshot of each of the N most recent UTC hours |
-| `keepDaily` | The newest snapshot of each of the N most recent UTC days |
-| `keepWeekly` | The newest snapshot of each of the N most recent ISO weeks (Monday-start) |
-| `keepMonthly` | The newest snapshot of each of the N most recent UTC months |
-| `keepYearly` | The newest snapshot of each of the N most recent UTC years |
+| `keepHourly` | The newest snapshot of each of the N most recent UTC hours that hold one |
+| `keepDaily` | The newest snapshot of each of the N most recent UTC days that hold one |
+| `keepWeekly` | The newest snapshot of each of the N most recent ISO weeks (Monday-start) that hold one |
+| `keepMonthly` | The newest snapshot of each of the N most recent UTC months that hold one |
+| `keepYearly` | The newest snapshot of each of the N most recent UTC years that hold one |
 
-Each tier walks the snapshots newest first, works out which hour, day, week, month, or year each one falls in, and keeps the first snapshot it sees in each of those buckets until it has kept N of them.
+Each tier walks the snapshots newest first, works out which hour, day, week, month, or year each one falls in, and keeps the first snapshot it sees in each of those buckets until it has kept N of them. It counts **buckets that contain a snapshot**, not clock windows: with `keepDaily: 3` over snapshots taken every third day, you keep three snapshots spanning six days, not whatever happens to fall in the last three days.
 
 A snapshot claimed by more than one tier records every reason - for example `last` and `daily=2026-08-10`.
 
@@ -65,16 +67,16 @@ Before any rule runs, the newest complete snapshot is kept with the reason `newe
 
 Counts are non-negative integers. There are two ways to keep everything, and the difference is deliberate:
 
-- **Omit the top-level `retention` object** to keep every snapshot of every target forever.
+- **Omit the top-level `retention` object** and every target that sets none of its own keeps all its snapshots forever. A target carrying its own `retention` still prunes.
 - **Set a target's `retention` to `false`** to keep everything for that one target, overriding the default.
 
-An empty object (`"retention": {}`) is rejected, because it would be ambiguous - `false` is the explicit spelling. A target's `retention` replaces the top-level default outright; the two are never merged.
+An empty object (`"retention": {}`) is rejected, because it would be ambiguous - `false` is the explicit spelling. A target's `retention` replaces the top-level default outright; the two are never merged. With retention off, `backupkit prune --dry-run` shows every snapshot as `keep-all`.
 
 Schedules and retention are independent of each other. The tiers work the same however often a target runs. For `minute` and `hour` schedules, `keepLast` and `keepHourly` are what control how dense sub-daily history stays.
 
 ## Applying retention
 
-The daemon prunes after each run, but you can do it by hand any time:
+Retention runs after every successful promote - `backupkit run`, `backupkit start`, and the service alike - and only after a promote, so a skipped or failed run prunes nothing. You can also do it by hand any time:
 
 ```bash
 backupkit prune              # apply retention to every target now
@@ -89,9 +91,9 @@ Pruning runs under the snapshot store lock, and deletion happens in two phases, 
 
 Retention picks snapshots by name and count, never by content. So a source that suddenly hands over a near-empty tree would produce near-empty snapshots, and retention would dutifully age out the ones holding your real data. That is how an archive gets destroyed from the source side without anyone running a delete.
 
-To catch it: when a promoted snapshot's file count collapses compared to the previous one, **the automatic prune after that run is skipped**.
+To catch it: when a promoted snapshot holds fewer than **half** the files of the previous trusted run, **the automatic prune after that run is skipped**. A run whose file count rsync did not report at all trips the wire too, as long as a baseline exists - an unmeasurable count counts as a collapse, deliberately, since a hostile source decides whether its rsync emits a parsable stats block. The first-ever run has no baseline and cannot trip it.
 
-The snapshot itself is still stored - the data has already crossed the wire, and throwing it away would be the more destructive choice. The archive just grows until a human looks. The run is logged at error level and the collapse is recorded on the run report, so it shows up in `backupkit status` instead of passing unnoticed.
+The snapshot itself is still stored - the data has already crossed the wire, and throwing it away would be the more destructive choice. The archive just grows until a human looks. The run is logged at error level and the collapse is recorded on that run's report, so it shows up in `backupkit logs` (or the journal). It does **not** show up in `backupkit status`, which still reports the run as a success - status carries the six columns it prints and nothing about collapse.
 
 The baseline it compares against is the newest run that did **not** itself trip the wire. That distinction is the whole guarantee: comparing against the newest run with any stats at all would mean the collapsed run became the new normal, so the next run would compare empty against empty, see nothing wrong, and prune on schedule - the tripwire would buy exactly one interval instead of holding until a human looks.
 
@@ -105,7 +107,7 @@ Retention selects on names, so anything that can create a snapshot-shaped direct
 
 Two guards cover the two directions a planted name can point.
 
-**Dated in the future**, a plant sorts newest and takes the top of every tier. Those names are separated out before retention plans, reported at error level, and pruned - unless *every* name in the archive is future-dated, in which case none are touched, because a host clock that stepped backwards makes real snapshots look future-dated and auto-pruning there would delete real data.
+**Dated in the future** - more than five minutes ahead of now, an allowance for ordinary NTP wander - a plant sorts newest and takes the top of every tier. Those names are separated out before retention plans and pruned, unless *every* name in the archive is future-dated, in which case none are touched, because a host clock that stepped backwards makes real snapshots look future-dated and auto-pruning there would delete real data. An automatic prune after a run logs the future-dated names at error level; `backupkit prune` lists them among the rows it is about to delete instead. With retention turned off for a target, runs never clear the plants either - a manual `backupkit prune` is the only thing that does.
 
 **Dated in the past**, a plant is invisible to that check - the planter picks the timestamp, and one dated a second after each real snapshot quietly takes every bucket. Counting catches it instead: backupkit only ever creates snapshots named for the current time, so the number of snapshots at or below any past point can shrink as retention removes them, but can never grow. Each run records how much history it saw; if the next run finds more sitting below that mark, names appeared underneath it, and **retention is skipped** and logged at error level exactly like a content collapse.
 

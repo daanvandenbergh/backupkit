@@ -139,7 +139,7 @@ describe("readWritePathsOf / hasAliasRemote", () => {
             stateDir: "/var/lib/backupkit",
             targets: [
                 makeTarget(),
-                makeTarget({ name: "push", dst: { kind: "remote", remote: { kind: "alias", name: "m", alias: "m" }, path: "/jail" } }),
+                makeTarget({ name: "push", dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "m", alias: "m" }, path: "/jail" } }),
             ],
         });
         expect(readWritePathsOf(config)).toEqual(["-/data/archive", "/var/lib/backupkit", "/etc/backupkit"]);
@@ -178,6 +178,7 @@ describe("readWritePathsOf / hasAliasRemote", () => {
         config.remotes = {
             r: {
                 kind: "explicit",
+                restrictedShell: false,
                 name: "r",
                 host: "h",
                 user: "u",
@@ -186,7 +187,7 @@ describe("readWritePathsOf / hasAliasRemote", () => {
                 passphrase: null,
                 knownHostsFile: "/etc/ssh/backupkit_known_hosts",
             },
-            a: { kind: "alias", name: "a", alias: "a" },
+            a: { kind: "alias", restrictedShell: false, name: "a", alias: "a" },
         };
         const paths = readWritePathsOf(config);
         expect(paths).toContain("-/root/.ssh");
@@ -202,6 +203,7 @@ describe("readWritePathsOf / hasAliasRemote", () => {
         config.remotes = {
             r: {
                 kind: "explicit",
+                restrictedShell: false,
                 name: "r",
                 host: "h",
                 user: "u",
@@ -248,10 +250,10 @@ describe("readWritePathsOf / hasAliasRemote", () => {
     it("detects alias remotes from the resolved remotes record", () => {
         const explicit = makeConfig({ configPath: "/c/config.jsonc", stateDir: "/s", targets: [makeTarget()] });
         explicit.remotes = {
-            r: { kind: "explicit", name: "r", host: "h", user: "u", port: 22, identityFile: "/k", passphrase: null, knownHostsFile: "/kh" },
+            r: { kind: "explicit", restrictedShell: false, name: "r", host: "h", user: "u", port: 22, identityFile: "/k", passphrase: null, knownHostsFile: "/kh" },
         };
         expect(hasAliasRemote(explicit)).toBe(false);
-        explicit.remotes.a = { kind: "alias", name: "a", alias: "a" };
+        explicit.remotes.a = { kind: "alias", restrictedShell: false, name: "a", alias: "a" };
         expect(hasAliasRemote(explicit)).toBe(true);
     });
 });
