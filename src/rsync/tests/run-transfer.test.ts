@@ -164,6 +164,21 @@ describe("runTransfer: retry wiring", () => {
         expect(outcome.ok?.status).toBe("success");
     });
 
+    it("255 whose stderr tail holds rsync EACCES lines stays transient and is retried", async () => {
+        const stderr = [
+            'rsync: [sender] send_files failed to open "/var/www/secret.txt": Permission denied (13)',
+            "rsync: [sender] write error: Broken pipe (32)",
+            "rsync error: unexplained error (code 255) at io.c(231) [sender=3.4.1]",
+        ].join("\n");
+        const { fn, calls } = queuedExec([res({ exitCode: 255, stderr }), res()]);
+        const { log } = captureLogger();
+        const outcome = await settle(
+            runTransfer({ rsyncBin: "/bin/rsync", spec: localSpec(), retryAttempts: 5, log, execFn: fn }),
+        );
+        expect(calls).toHaveLength(2);
+        expect(outcome.ok?.status).toBe("success");
+    });
+
     it("exit 23 -> single attempt, promote with warning, skipped paths extracted with the exclude hint", async () => {
         const stderr = [
             'rsync: [sender] send_files failed to open "/var/www/secret.txt": Permission denied (13)',

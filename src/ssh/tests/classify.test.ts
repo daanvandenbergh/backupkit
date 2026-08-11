@@ -39,6 +39,14 @@ describe("matchPermanentSshPattern / isPermanentSshStderr", () => {
         ["timeout text", "Connection timed out during banner exchange"],
         ["connection refused", "connect to host 10.0.0.11 port 22: Connection refused"],
         ["permission denied without paren (not the auth pattern)", "Permission denied"],
+        // rsync writes EACCES in ssh's own shape for every unreadable source
+        // file. Reading it as an auth failure makes a network drop over a tree
+        // holding one root-owned file permanent, so the run is never retried.
+        [
+            "rsync EACCES on a source file (errno, not an ssh method list)",
+            'rsync: [sender] send_files failed to open "/var/www/secret.txt": Permission denied (13)\n' +
+                "rsync error: unexplained error (code 255) at io.c(231)",
+        ],
         ["random binary-ish noise", "partial"],
     ])("%s is transient", (_label, stderr) => {
         const tail = sshStderrTail(stderr);

@@ -12,11 +12,23 @@ import { sanitize } from "../shared/sanitize.js";
 /** The three failure classes that make an ssh transport error permanent. */
 export type PermanentSshPattern = "auth-failure" | "host-key-verification" | "host-key-changed";
 
-/** The exact fixed substrings, one per permanent class - never extended casually. */
-const PATTERNS: readonly { pattern: PermanentSshPattern; needle: string }[] = [
-    { pattern: "auth-failure", needle: "Permission denied (" },
-    { pattern: "host-key-verification", needle: "Host key verification failed" },
-    { pattern: "host-key-changed", needle: "REMOTE HOST IDENTIFICATION HAS CHANGED" },
+/**
+ * The exact fixed patterns, one per permanent class - never extended casually.
+ *
+ * The auth-failure pattern requires ssh's METHOD LIST inside the parentheses
+ * (`Permission denied (publickey,password).`) and not merely the parenthesis.
+ * rsync writes an errno in the same shape for every unreadable source file -
+ * `send_files failed to open "/x": Permission denied (13)` - so the bare
+ * `Permission denied (` substring turned a network drop over a tree holding one
+ * root-owned file into "ssh authentication failed - permanent, not retried":
+ * the transfer died at exit 255 with those file errors still in the 2 KiB
+ * stderr tail, and the retry loop stopped on an auth failure that never
+ * happened. Method names are lowercase letters, `-` and `,`; an errno is digits.
+ */
+const PATTERNS: readonly { pattern: PermanentSshPattern; needle: RegExp }[] = [
+    { pattern: "auth-failure", needle: /Permission denied \([a-z][a-z,-]*\)/ },
+    { pattern: "host-key-verification", needle: /Host key verification failed/ },
+    { pattern: "host-key-changed", needle: /REMOTE HOST IDENTIFICATION HAS CHANGED/ },
 ];
 
 /**
@@ -34,7 +46,7 @@ export function sshStderrTail(stderr: string): string {
  */
 export function matchPermanentSshPattern(stderrTail: string): PermanentSshPattern | null {
     for (const { pattern, needle } of PATTERNS) {
-        if (stderrTail.includes(needle)) {
+        if (needle.test(stderrTail)) {
             return pattern;
         }
     }
