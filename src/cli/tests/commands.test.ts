@@ -171,7 +171,10 @@ describe("prune", () => {
             ],
         };
         expect(await main(["prune", "--dry-run"], h.deps)).toBe(0);
-        expect(h.engine.calls[0]).toEqual({ method: "prune", options: { targets: undefined, dryRun: true } });
+        expect(h.engine.calls[0]).toEqual({
+            method: "prune",
+            options: { targets: undefined, dryRun: true, force: false },
+        });
         expect(h.out).toEqual([
             "Target web:",
             "    keep   2026-08-10T031500Z  (newest, last)",

@@ -12,7 +12,7 @@ import { COMMAND_HELP } from "../help.js";
 export async function pruneCommand(argv: string[], deps: CliDeps): Promise<number> {
     const { values, positionals } = parseFlags(
         argv,
-        { "dry-run": { type: "boolean" }, config: { type: "string" } },
+        { "dry-run": { type: "boolean" }, force: { type: "boolean" }, config: { type: "string" } },
         true,
     );
     if (values.help === true) {
@@ -22,7 +22,7 @@ export async function pruneCommand(argv: string[], deps: CliDeps): Promise<numbe
     const dryRun = values["dry-run"] === true;
     const { config, engine } = deps.loadContext(values.config as string | undefined);
     const targets = selectTargets(positionals, config);
-    const report = await engine.prune({ targets, dryRun });
+    const report = await engine.prune({ targets, dryRun, force: values.force === true });
     let failed = false;
     for (const entry of report.targets) {
         deps.stdout(`Target ${entry.target}:`);

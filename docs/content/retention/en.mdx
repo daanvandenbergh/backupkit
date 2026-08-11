@@ -93,7 +93,32 @@ To catch it: when a promoted snapshot's file count collapses compared to the pre
 
 The snapshot itself is still stored - the data has already crossed the wire, and throwing it away would be the more destructive choice. The archive just grows until a human looks. The run is logged at error level and the collapse is recorded on the run report, so it shows up in `backupkit status` instead of passing unnoticed.
 
+The baseline it compares against is the newest run that did **not** itself trip the wire. That distinction is the whole guarantee: comparing against the newest run with any stats at all would mean the collapsed run became the new normal, so the next run would compare empty against empty, see nothing wrong, and prune on schedule - the tripwire would buy exactly one interval instead of holding until a human looks.
+
+A sustained collapse therefore keeps retention off run after run. That is bounded rather than permanent: run reports rotate at 50 per target, so once every pre-collapse report has aged out the wire stops tripping on its own and scheduled retention resumes.
+
 `backupkit prune` never consults the tripwire. Once you have confirmed the shrink was real - you did delete half the source, or the application moved its data directory - run it by hand and retention applies as normal.
+
+## The planted-snapshot guard
+
+Retention selects on names, so anything that can create a snapshot-shaped directory in the archive can influence what retention keeps. A push client can do exactly that: `mkdir` of a snapshot-shaped name is a legal jail command, by design.
+
+Two guards cover the two directions a planted name can point.
+
+**Dated in the future**, a plant sorts newest and takes the top of every tier. Those names are separated out before retention plans, reported at error level, and pruned - unless *every* name in the archive is future-dated, in which case none are touched, because a host clock that stepped backwards makes real snapshots look future-dated and auto-pruning there would delete real data.
+
+**Dated in the past**, a plant is invisible to that check - the planter picks the timestamp, and one dated a second after each real snapshot quietly takes every bucket. Counting catches it instead: backupkit only ever creates snapshots named for the current time, so the number of snapshots at or below any past point can shrink as retention removes them, but can never grow. Each run records how much history it saw; if the next run finds more sitting below that mark, names appeared underneath it, and **retention is skipped** and logged at error level exactly like a content collapse.
+
+An operator restoring an old snapshot into the archive by hand trips this too. That is intended - it is indistinguishable from a plant by design, and it costs a skipped prune rather than data.
+
+`backupkit prune` applies the same check, because it is the one command that would otherwise act on a poisoned list and delete the real snapshots to make room for the planted ones. It **refuses by default** and tells you how many names appeared and where to look. `--dry-run` still prints the full plan, since that is how you see what would have been deleted. Once you have looked and removed anything that is not yours, `--force` prunes anyway:
+
+```bash
+backupkit prune --dry-run     # what would happen, and what looks wrong
+backupkit prune --force       # I have looked; go ahead
+```
+
+One honest limit: the check knows *how many* snapshots appeared, not *which*. It lists the names no recorded run created, but run reports only go back 50 runs, so a genuine snapshot older than that looks unattested too. Treat that list as a place to start, not a verdict - which is exactly why nothing deletes based on it.
 
 ## Related
 

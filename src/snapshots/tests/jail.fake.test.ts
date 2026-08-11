@@ -466,9 +466,13 @@ describe("backupkit-remote jail script", () => {
             ["--remove-source-files deletes through the sender", "--remove-source-files"],
             // Writes THROUGH a --link-dest hardlink, mutating promoted snapshots.
             ["--inplace writes through a --link-dest hardlink", "--inplace"],
-            // Default-deny: an option nobody has measured must not pass merely
-            // for lacking an absolute path or "..".
-            ["an option no capture has ever produced", "--some-future-option"],
+            // A value that can name a file is refused whatever the option is
+            // called - this is what replaced a pure allowlist, which would have
+            // broken every push the first time an rsync upgrade forwarded a new
+            // option (invariant 24's hazard, arriving via a dependency bump).
+            ["an unknown option carrying an absolute path", "--future-opt=/etc/shadow"],
+            ["an unknown option carrying a traversal", "--future-opt=../escape"],
+            ["a path-valued option in its bare, space-separated spelling", "--temp-dir /tmp/x"],
             ["a non-numeric --timeout value", "--timeout=abc"],
             ["a non-numeric --bwlimit value", "--bwlimit=x"],
             // rsync reads 0 as "unlimited" for both, so a zero is not a tighter
@@ -482,6 +486,33 @@ describe("backupkit-remote jail script", () => {
         ])("rejects %s", async (_label, option) => {
             await expectRejected(`rsync --server ${option} --numeric-ids . ${DEST()}`);
             expect(await fake.calls()).toEqual([]);
+        });
+    });
+
+    describe("an rsync upgrade that forwards a new option must not break every push", () => {
+        // The counterweight to the deny list. A pure allowlist is the safer
+        // shape in the abstract and the wrong one here: the jail is a copy
+        // deployed out-of-band, so the first rsync that forwards an option we
+        // never measured would reject every push on every archive host at once,
+        // with a bare "rejected" and nothing connecting it to an rsync bump.
+        // What makes an option dangerous is naming a path, executing something,
+        // following a symlink, or moving the file args off the command line -
+        // not being unfamiliar. So unknown-but-shapeless is allowed, and the
+        // destination pinning is what bounds it.
+        const DEST = () => `${jailRoot}/web/${SNAP}.partial`;
+
+        it.each([
+            ["a valueless option no capture has produced", "--some-future-option"],
+            ["an unknown option with a numeric value", "--future-opt=42"],
+            ["an unknown option with a token value", "--future-opt=SOME_MODE"],
+            ["--iconv, which rsync forwards when configured", "--iconv=utf-8"],
+            ["--compress-level, a future default", "--compress-level=9"],
+        ])("still accepts %s", async (_label, option) => {
+            const dest = DEST();
+            const result = await jail(`rsync --server -logDtpre.iLsfxC ${option} --numeric-ids . ${dest}`);
+
+            expect(result.exitCode).toBe(0);
+            expect(await fake.calls()).toHaveLength(1);
         });
     });
 

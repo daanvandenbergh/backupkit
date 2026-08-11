@@ -66,7 +66,7 @@ Then `backupkit run` performs one pass over every due target; the daemon does it
 | `backupkit status [TARGET...]` | One row per target: last run, next due, consecutive failures, lock state (`--json`). |
 | `backupkit list [TARGET...]` | Complete snapshots, oldest first (alias `ls`, `--json`). |
 | `backupkit restore TARGET SNAP` | Copy a snapshot (`--snapshot latest`) to a fresh `--output` path; never overwrites, never deletes. |
-| `backupkit prune [TARGET...]` | Apply retention now (`--dry-run` prints the keep/prune plan). |
+| `backupkit prune [TARGET...]` | Apply retention now (`--dry-run` prints the keep/prune plan; `--force` overrides the planted-snapshot guard). |
 | `backupkit service <verb>` | `install`/`uninstall`/`start`/`stop`/`restart`/`status` the systemd unit or launchd job. |
 | `backupkit logs [-f] [-n N]` | Tail the daemon logs (journald on Linux, log files on macOS). |
 | `backupkit daemon` | Foreground scheduler loop (what the installed service runs). |
@@ -102,17 +102,6 @@ const snaps = await kit.listSnapshots(); // complete snapshots, oldest first
 await kit.prune({ dryRun: true });       // retention plan without deleting
 await kit.restore({ target: "web1-www", snapshot: "latest", output: "/tmp/restored" });
 ```
-
-## Development
-
-```bash
-npm run typecheck   # tsc --noEmit
-npm test            # vitest
-npm run build       # emit dist/
-npm run docs:build  # build the docs site (docs/out)
-```
-
-`scripts/smoke-test.sh` is an interactive two-host release-gate test; run it before first production use.
 
 ## License
 

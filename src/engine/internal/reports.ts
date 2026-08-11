@@ -156,6 +156,84 @@ export function newestStats(reports: readonly TargetRunReport[]): RunStats | nul
     return null;
 }
 
+/** A known point in a target's history: how much of it existed, and up to which name. */
+export interface HistoryMark {
+    /** Newest complete snapshot name at that point. */
+    newest: string;
+    /** How many complete snapshots existed at that point. */
+    count: number;
+}
+
+/**
+ * The newest recorded history mark - the most recent report that recorded both
+ * the snapshot it created and how many complete snapshots existed when it
+ * finished - or null when no such run is on record (a first run, a fresh state
+ * dir, or reports written before the field existed).
+ *
+ * Unlike `newestStats` this does NOT skip tripped runs: the count is a factual
+ * observation of the archive, not a judgement about it, and a run that tripped a
+ * tripwire still counted the snapshots correctly. Skipping them would let a
+ * second plant hide behind the first.
+ */
+export function newestHistoryMark(reports: readonly TargetRunReport[]): HistoryMark | null {
+    for (const report of reports) {
+        if (typeof report.snapshot === "string" && typeof report.completeCount === "number") {
+            return { newest: report.snapshot, count: report.completeCount };
+        }
+    }
+    return null;
+}
+
+/**
+ * The insertion detail when complete snapshots have APPEARED at or below the
+ * previous run's newest name, else null. Null `mark` (no run on record) is
+ * always null - there is nothing to compare against.
+ *
+ * This client only ever creates snapshots named for the current time, so the
+ * number of names at or below a fixed past point can shrink as retention removes
+ * them, or hold, but never grow. Growth means something else wrote into the
+ * archive. It is the past-dated counterpart to `splitFutureSnapshots`, which
+ * cannot see a plant whose timestamp the planter chose to put in the past.
+ *
+ * ONE owner, called by both the run pipeline and `prune`. The run path and the
+ * prune path drifting apart is the single most repeated bug shape in this
+ * codebase - a guard added where the bug was noticed and its sibling left open -
+ * so the comparison lives here rather than inline at either call site.
+ */
+export function detectHistoryInsertion(
+    complete: readonly string[],
+    mark: HistoryMark | null,
+): { previousNewest: string; previousCount: number; count: number } | null {
+    if (mark === null) {
+        return null;
+    }
+    const count = complete.filter((name) => name <= mark.newest).length;
+    if (count <= mark.count) {
+        return null;
+    }
+    return { previousNewest: mark.newest, previousCount: mark.count, count };
+}
+
+/**
+ * Complete snapshot names at or below `mark.newest` that no run report claims -
+ * the likely plants, for an operator to eyeball.
+ *
+ * BEST EFFORT, and it must be presented that way: reports rotate at
+ * REPORTS_KEPT, so a genuine snapshot older than the report window is unattested
+ * too. This narrows the operator's search; it is never grounds to delete
+ * anything, which is why nothing acts on it.
+ */
+export function unattestedBelow(
+    complete: readonly string[],
+    reports: readonly TargetRunReport[],
+    mark: HistoryMark,
+): string[] {
+    const attested = new Set(
+        reports.map((report) => report.snapshot).filter((name): name is string => typeof name === "string"),
+    );
+    return complete.filter((name) => name <= mark.newest && !attested.has(name));
+}
+
 /** Backoff bookkeeping derived from one target's reports. */
 export interface DerivedBackoff {
     /** Consecutive `failed` runs from the newest report, ignoring `aborted` and `skipped`, stopping at the first success/warning. */

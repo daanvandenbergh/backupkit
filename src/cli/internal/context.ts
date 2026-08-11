@@ -42,7 +42,7 @@ export interface EngineLike {
     /** Copy one snapshot ("latest" accepted) to a non-existent output path. */
     restore(options: { target: string; snapshot: string; output: string; verify?: boolean }): Promise<RestoreReport>;
     /** Apply retention now. */
-    prune(options?: { targets?: string[]; dryRun?: boolean }): Promise<PruneReport>;
+    prune(options?: { targets?: string[]; dryRun?: boolean; force?: boolean }): Promise<PruneReport>;
     /** Validate config, probe binaries and hosts, produce jail-line data. */
     check(): Promise<CheckReport>;
 }

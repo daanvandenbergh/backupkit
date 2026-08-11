@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { Backupkit, defaultRuntimeDir } from "../backupkit.js";
+import { writeTargetReport } from "../internal/reports.js";
 import { ConfigError, TransferError } from "../../shared/errors.js";
 import type { ResolvedRemote } from "../../shared/types.js";
 import {
@@ -219,6 +220,116 @@ describe("Backupkit", () => {
         expect(existsSync(join(fixture.destination, "web", "2026-08-01T000000Z"))).toBe(false);
         expect(existsSync(join(fixture.destination, "web", "2026-08-02T000000Z"))).toBe(false);
         expect(existsSync(join(fixture.destination, "web", "2026-08-03T000000Z"))).toBe(true);
+    });
+
+    // Retention selects on names, so anything that can create a snapshot-shaped
+    // directory steers what prune keeps. The future-dated guard cannot see a
+    // plant whose timestamp the planter chose to put in the PAST - and dating one
+    // a second after each real snapshot takes every retention bucket, so prune
+    // deletes the real history and keeps the plants (measured: 10 of 11).
+    describe("prune: the past-dated insertion guard", () => {
+        /** A fixture whose archive holds `names` and whose report history says `count` existed up to `newest`. */
+        async function plantedFixture(names: string[], mark: { newest: string; count: number }) {
+            const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
+            for (const name of names) {
+                await mkdir(join(fixture.destination, "web", name), { recursive: true });
+            }
+            await writeTargetReport(fixture.stateDir, {
+                runId: `${mark.newest}_web`,
+                target: "web",
+                direction: "pull",
+                snapshot: mark.newest,
+                status: "success",
+                reason: null,
+                startedAt: "2026-08-03T00:00:00.000Z",
+                finishedAt: "2026-08-03T00:00:10.000Z",
+                attempts: [],
+                stats: null,
+                skippedFiles: [],
+                error: null,
+                completeCount: mark.count,
+            });
+            return fixture;
+        }
+
+        const REAL_PLUS_PLANTS = [
+            "2026-08-01T000000Z",
+            "2026-08-01T000001Z", // planted, one second later - same bucket, sorts newer
+            "2026-08-02T000000Z",
+            "2026-08-02T000001Z", // planted
+            "2026-08-03T000000Z",
+        ];
+
+        it("refuses to prune when snapshots appeared below the last run's newest, and deletes nothing", async () => {
+            const fixture = await plantedFixture(REAL_PLUS_PLANTS, { newest: "2026-08-03T000000Z", count: 3 });
+
+            const report = await fixture.kit.prune();
+
+            expect(report.targets[0].executed).toBe(false);
+            expect(report.targets[0].errors[0]).toContain("2 snapshot(s) appeared at or below");
+            // Every name still on disk - including the real history prune would
+            // otherwise have deleted to make room for the plants.
+            for (const name of REAL_PLUS_PLANTS) {
+                expect(existsSync(join(fixture.destination, "web", name))).toBe(true);
+            }
+        });
+
+        it("names the likely plants, clearly marked best-effort, so the operator knows where to look", async () => {
+            const fixture = await plantedFixture(REAL_PLUS_PLANTS, { newest: "2026-08-03T000000Z", count: 3 });
+
+            const report = await fixture.kit.prune();
+
+            const message = report.targets[0].errors[0];
+            expect(message).toContain("best effort");
+            expect(message).toContain("2026-08-01T000001Z");
+            expect(message).toContain("2026-08-02T000001Z");
+        });
+
+        it("--dry-run STILL prints the plan, because that is the review step the refusal sends you to", async () => {
+            const fixture = await plantedFixture(REAL_PLUS_PLANTS, { newest: "2026-08-03T000000Z", count: 3 });
+
+            const report = await fixture.kit.prune({ dryRun: true });
+
+            expect(report.targets[0].executed).toBe(false);
+            expect(report.targets[0].errors).toHaveLength(1);
+            // The plan is what shows the operator that REAL snapshots are queued
+            // for deletion - a refusal that also refuses to explain is a dead end.
+            expect(report.targets[0].plan.prune.length).toBeGreaterThan(0);
+        });
+
+        it("--force prunes anyway: the guard informs the operator, it does not overrule them", async () => {
+            const fixture = await plantedFixture(REAL_PLUS_PLANTS, { newest: "2026-08-03T000000Z", count: 3 });
+
+            const report = await fixture.kit.prune({ force: true });
+
+            expect(report.targets[0].executed).toBe(true);
+            expect(report.targets[0].errors).toEqual([]);
+        });
+
+        it("prunes normally when no names appeared - the count may shrink, it just may not grow", async () => {
+            const fixture = await plantedFixture(["2026-08-02T000000Z", "2026-08-03T000000Z"], {
+                newest: "2026-08-03T000000Z",
+                count: 9,
+            });
+
+            const report = await fixture.kit.prune();
+
+            expect(report.targets[0].executed).toBe(true);
+            expect(report.targets[0].errors).toEqual([]);
+            expect(existsSync(join(fixture.destination, "web", "2026-08-02T000000Z"))).toBe(false);
+        });
+
+        it("prunes normally when there is no recorded run to count against", async () => {
+            const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
+            for (const name of ["2026-08-01T000000Z", "2026-08-02T000000Z"]) {
+                await mkdir(join(fixture.destination, "web", name), { recursive: true });
+            }
+
+            const report = await fixture.kit.prune();
+
+            expect(report.targets[0].executed).toBe(true);
+            expect(report.targets[0].errors).toEqual([]);
+        });
     });
 
     // A future-dated complete snapshot - one jail-accepted `mkdir -p --` from a

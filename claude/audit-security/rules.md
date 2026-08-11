@@ -352,3 +352,49 @@ partial fix, it is a false sense of security plus a test that reads as green.
     head) and sets `truncated`. A new capture path that accumulates without a cap re-opens it.
     *graduated: `src/exec/tests/exec.test.ts` ("caps captured stdout ... keeps the HEAD", "caps
     captured stderr ... keeps the TAIL").*
+40. The content-collapse baseline is the newest TRUSTED run, never merely the newest run with
+    stats. A collapsed run persists its own (tiny) stats, so taking "the newest report that
+    completed a transfer" made the tripwire disarm itself after exactly ONE run: run N tripped and
+    skipped its prune, run N+1 compared empty against empty, saw no collapse, and pruned on
+    schedule. Measured end-to-end: run 3 deleted the last two genuine snapshots and by run 7 the
+    archive was two empty snapshots - i.e. invariant 27's guarantee, and the README sentence
+    promising retention stays off "until you confirm the shrink is real", were both worth one
+    schedule interval. `newestStats` skips any report carrying `contentCollapse`. The cost is
+    bounded rather than permanent: reports rotate at `REPORTS_KEPT`, so once every pre-collapse
+    report has aged out the wire stops tripping and scheduled retention resumes; `backupkit prune`
+    stays the operator's immediate override. Note also the asymmetry inside the comparison - NO
+    BASELINE (a first run) means "nothing to compare", but NO CURRENT STATS with a baseline on
+    record means the wire cannot do its job, and the destructive path used to score that as "no
+    collapse" while its read-only sibling `dryRunStats` THREW on the same unparsable output. A
+    hostile source picks whether its rsync emits a parsable stats block, so it picked the branch.
+    *graduated: `src/engine/tests/reports.test.ts` ("newestStats - the content-collapse baseline",
+    5 rows incl. the rotation bound), `src/engine/tests/target-runner.test.ts` ("trips when this
+    run's file count cannot be measured at all, rather than pruning blind").*
+41. A planted snapshot name is not always a FUTURE-dated one. `splitFutureSnapshots` (invariant 26)
+    only separates names dated ahead of now - and the party planting names chooses the timestamp, so
+    dating each plant one second AFTER a real snapshot puts a planted name in every retention bucket
+    while the future-split reports nothing at all. Measured: 10 of 11 real snapshots went into the
+    delete list and `newestUndeletable` ended up protecting a PLANTED name, with no log line, because
+    the `future.length > 0` branch never fired. Counting is what catches it: this client only ever
+    creates snapshots named for the current time, so the number of complete snapshots AT OR BELOW a
+    fixed past point can shrink (retention) or hold, but never grow. Each run records
+    `completeCount`, and the next run compares against it; growth means names appeared underneath us,
+    and is treated exactly like a content collapse (promote, skip retention, log at error) because
+    the safe direction is identical. The listing counted and the listing retention plans over must be
+    the SAME listing - re-listing between them reopens the window for the very party the check exists
+    to catch. `prune` runs the SAME check through the same owner (`detectHistoryInsertion`) - the run
+    path and the prune path drifting apart is this codebase's most repeated bug shape, so the
+    comparison has one home and two callers. Prune cannot merely refuse, because it is the documented
+    way to clear the state the run path trips into: it refuses BY DEFAULT and takes `--force`, and
+    `--dry-run` still prints the full plan because that is the review step the refusal sends the
+    operator to. What it must never do is quietly proceed.
+    RESIDUAL, deliberately: the guard reports HOW MANY names appeared, never WHICH. Naming them
+    exactly needs complete attestation, and run reports rotate at `REPORTS_KEPT`, so a genuine
+    snapshot older than the report window is unattested exactly like a plant. `unattestedBelow` is
+    therefore offered as best-effort context and labelled as such - nothing in the code acts on it,
+    because acting on it would delete real history on any archive older than 50 runs.
+    *graduated: `src/engine/tests/target-runner.test.ts` ("PAST-dated planted names trip the
+    insertion guard...", plus the shrink/own-snapshot/no-baseline controls) and
+    `src/engine/tests/backupkit.test.ts` ("prune: the past-dated insertion guard", 6 rows incl.
+    --force and --dry-run) - expect: at least one reject row and three accept rows in each, so
+    neither guard can be satisfied by tripping on everything.*

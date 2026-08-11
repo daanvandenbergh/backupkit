@@ -22,7 +22,7 @@ import { planRetention } from "../../retention/retention.js";
 import type { SnapshotStore } from "../../snapshots/store.js";
 import { splitFutureSnapshots } from "../../snapshots/types.js";
 import { evaluateDiskGuard } from "./disk-guard.js";
-import { runIdFor } from "./reports.js";
+import { detectHistoryInsertion, type HistoryMark, runIdFor } from "./reports.js";
 import type { RunStats, TargetRunReport } from "../types.js";
 
 /** The exec/ spawn function shape (re-declared to avoid importing the value module). */
@@ -58,6 +58,12 @@ export interface TargetRunnerDeps {
      * tripwire. Called at most once per run, after the transfer.
      */
     previousStats: () => Promise<RunStats | null>;
+    /**
+     * How much history existed at this target's newest recorded run, or null
+     * when there is no such run - the baseline for the past-dated-insertion
+     * check. Called at most once per run, after the transfer.
+     */
+    previousHistory: () => Promise<HistoryMark | null>;
 }
 
 /** Per-run options. */
@@ -125,17 +131,30 @@ const COLLAPSE_FRACTION = 0.5;
 
 /**
  * The collapse detail when `current` holds fewer than COLLAPSE_FRACTION of
- * `previous`'s files, else null. Missing stats on either side (a first run, or
- * an rsync whose stats block did not parse) never trip the wire - the tripwire
- * only ever skips a prune, so a false negative costs one retention cycle while a
- * false positive would cost disk.
+ * `previous`'s files - or when `current` could not be measured at all - else
+ * null.
+ *
+ * The two missing-stats cases are NOT symmetric, and treating them as one was a
+ * fail-open. No baseline (`previous === null`, a first run) genuinely means
+ * "nothing to compare against", so retention proceeds. But no CURRENT stats,
+ * with a baseline on record, means the wire cannot do its job - and the sibling
+ * read-only path (`dryRunStats`) already throws on exactly that unparsable
+ * output while this, the path that goes on to DELETE, silently scored it as
+ * "no collapse" and pruned. A hostile source picks whether its rsync emits a
+ * parsable stats block, so it also picked which branch ran.
+ *
+ * The direction is deliberate and one-way: an unnecessary trip costs disk (a
+ * skipped prune), a missed trip costs the archive.
  */
 function collapseAgainst(
     previous: RunStats | null,
     current: RunStats | null,
-): { previousFiles: number; files: number } | null {
-    if (previous === null || current === null || previous.totalFiles <= 0) {
+): { previousFiles: number; files: number | null } | null {
+    if (previous === null || previous.totalFiles <= 0) {
         return null;
+    }
+    if (current === null) {
+        return { previousFiles: previous.totalFiles, files: null };
     }
     if (current.totalFiles >= Math.ceil(previous.totalFiles * COLLAPSE_FRACTION)) {
         return null;
@@ -170,6 +189,8 @@ export async function runTarget(
     let stats: RunStats | null = null;
     let skippedFiles: string[] = [];
     let contentCollapse: TargetRunReport["contentCollapse"] = null;
+    let historyInsertion: TargetRunReport["historyInsertion"] = null;
+    let completeCount: number | null = null;
 
     /** Assemble the final report from the pipeline outcome. */
     const report = (status: TargetRunReport["status"], reason: string | null, error: string | null): TargetRunReport => ({
@@ -186,6 +207,8 @@ export async function runTarget(
         skippedFiles,
         error,
         contentCollapse,
+        historyInsertion,
+        completeCount,
     });
 
     try {
@@ -374,20 +397,55 @@ export async function runTarget(
             const previous = await deps.previousStats();
             contentCollapse = collapseAgainst(previous, stats);
             if (contentCollapse !== null) {
-                deps.log.error("content collapse: this snapshot holds far fewer files than the previous run - retention skipped", {
-                    previousFiles: contentCollapse.previousFiles,
-                    files: contentCollapse.files,
-                    hint: "verify the source, then run `backupkit prune` once you are satisfied the shrink is real",
+                deps.log.error(
+                    contentCollapse.files === null
+                        ? "content collapse guard: this run's file count could not be measured - retention skipped"
+                        : "content collapse: this snapshot holds far fewer files than the previous run - retention skipped",
+                    {
+                        previousFiles: contentCollapse.previousFiles,
+                        files: contentCollapse.files ?? "unmeasured",
+                        hint: "verify the source, then run `backupkit prune` once you are satisfied the shrink is real",
+                    },
+                );
+            }
+
+            // The past-dated twin of the future-dated guard below. That guard
+            // only separates names dated AHEAD of now - and the party planting
+            // names picks the timestamp, so dating each plant one second after a
+            // real snapshot put a planted name in every retention bucket while
+            // `splitFutureSnapshots` reported nothing unusual at all. Measured:
+            // 10 of 11 real snapshots went into the delete list, and
+            // `newestUndeletable` ended up protecting a PLANTED name.
+            //
+            // Counting is what catches it, because this client only ever creates
+            // snapshots named for the current time: the number of complete
+            // snapshots at or below a fixed past point can shrink (retention) or
+            // hold, never grow. Growth means names appeared underneath us.
+            //
+            // Treated exactly like a content collapse - promote, skip retention,
+            // log loudly - because the safe direction is identical: an
+            // unnecessary skip costs disk, a missed one costs the archive. An
+            // operator restoring an old snapshot into the archive by hand trips
+            // this too, and `backupkit prune` is their override.
+            const completeNow = await deps.store.listComplete();
+            completeCount = completeNow.length;
+            historyInsertion = detectHistoryInsertion(completeNow, await deps.previousHistory());
+            if (historyInsertion !== null) {
+                deps.log.error("snapshots appeared BELOW the previous run's newest - this client never back-dates; retention skipped", {
+                    previousNewest: sanitize(historyInsertion.previousNewest),
+                    previousCount: historyInsertion.previousCount,
+                    count: historyInsertion.count,
+                    hint: "the source may have planted snapshot-shaped directories; review with `backupkit prune --dry-run`",
                 });
             }
 
             // Retention after every successful promote. The floor against
             // deleting everything is NOT here: it is the store's newest-complete
-            // guard (`newestUndeletable`) plus the tripwire above - planRetention
+            // guard (`newestUndeletable`) plus the tripwires above - planRetention
             // always claims a "newest", so a "keep is empty" check would be dead
             // code.
             let retentionError: string | null = null;
-            if (target.retention !== null && contentCollapse === null) {
+            if (target.retention !== null && contentCollapse === null && historyInsertion === null) {
                 try {
                     // Future-dated names get exactly the treatment
                     // `Backupkit.planFor` (the `prune` path) gives them, for the
@@ -409,8 +467,11 @@ export async function runTarget(
                     // all the way down (a clock that stepped backwards mid-run
                     // makes real snapshots look future-dated) is kept untouched
                     // rather than auto-deleted (invariant 26).
+                    // The SAME listing the insertion check counted - re-listing
+                    // here would reopen a window between the count and the plan
+                    // for the very party the check exists to catch.
                     const at = deps.now();
-                    const { genuine, future } = splitFutureSnapshots(await deps.store.listComplete(), at);
+                    const { genuine, future } = splitFutureSnapshots(completeNow, at);
                     const plan = planRetention(genuine, target.retention, at);
                     if (future.length > 0) {
                         deps.log.error("future-dated snapshot names appeared during this run - they are not ours; pruning them", {

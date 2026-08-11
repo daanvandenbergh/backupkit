@@ -63,10 +63,46 @@ export interface TargetRunReport {
      * when it did not fire. Optional so older persisted reports still parse.
      */
     contentCollapse?: {
-        /** File count of the previous run that completed a transfer. */
+        /** File count of the newest previous run that completed a transfer WITHOUT tripping this wire. */
         previousFiles: number;
-        /** File count of this run. */
-        files: number;
+        /**
+         * File count of this run, or null when it could not be measured at all
+         * (rsync's stats block did not parse). Unmeasurable is treated as a trip,
+         * not as a pass: with a baseline on record, "this run moved far less than
+         * the last one" and "we cannot tell what this run moved" are the same
+         * answer as far as deleting history goes.
+         */
+        files: number | null;
+    } | null;
+    /**
+     * Number of COMPLETE snapshots in the archive when this run finished, or
+     * null/absent when the run never got far enough to list them. Persisted for
+     * one reason: it is the only record of how much history existed at a known
+     * point, and `historyInsertion` compares against it. Optional so older
+     * persisted reports still parse.
+     */
+    completeCount?: number | null;
+    /**
+     * Set when snapshots APPEARED in the archive below the previous run's newest
+     * name - which this client never does, since it only ever creates snapshots
+     * named for the current time. The snapshot was promoted but RETENTION WAS
+     * SKIPPED. Absent or null when it did not fire.
+     *
+     * This is the past-dated twin of the future-dated guard. `splitFutureSnapshots`
+     * only separates names dated AHEAD of now, and the party planting names picks
+     * the timestamp - so dating a plant one second after each real snapshot put a
+     * planted name in every retention bucket while `splitFutureSnapshots` reported
+     * nothing unusual. Counting is what catches it: retention only ever removes
+     * names, so the number of snapshots at or below a fixed past point can shrink
+     * or hold, never grow.
+     */
+    historyInsertion?: {
+        /** Newest complete snapshot recorded by the previous run. */
+        previousNewest: string;
+        /** How many complete snapshots existed then. */
+        previousCount: number;
+        /** How many now sit at or below `previousNewest` - greater than `previousCount` is the trip. */
+        count: number;
     } | null;
 }
 

@@ -30,7 +30,16 @@ import { planRetention, type RetentionPlan } from "../retention/retention.js";
 import { openStore, type SnapshotStore } from "../snapshots/store.js";
 import { splitFutureSnapshots, type SnapshotInfo } from "../snapshots/types.js";
 import { isDue } from "../shared/time.js";
-import { deriveBackoff, newestStats, readTargetReports, runIdFor, writeTargetReport } from "./internal/reports.js";
+import {
+    deriveBackoff,
+    detectHistoryInsertion,
+    newestHistoryMark,
+    newestStats,
+    readTargetReports,
+    runIdFor,
+    unattestedBelow,
+    writeTargetReport,
+} from "./internal/reports.js";
 import { backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "./internal/scheduler.js";
 import { runTarget, type TargetRunnerDeps } from "./internal/target-runner.js";
 import type {
@@ -749,6 +758,8 @@ export class Backupkit {
                 diskLowTargets: this.diskLowTargets,
                 previousStats: async () =>
                     newestStats(await readTargetReports(this.config.stateDir, target.name, this.log)),
+                previousHistory: async () =>
+                    newestHistoryMark(await readTargetReports(this.config.stateDir, target.name, this.log)),
             };
             try {
                 report = await runTarget(target, deps, options);
@@ -1137,7 +1148,7 @@ export class Backupkit {
      * that tripped it promotes but prunes nothing, and `prune` is what clears
      * the backlog once a human has confirmed the shrink is real.
      */
-    async prune(options: { targets?: string[]; dryRun?: boolean } = {}): Promise<PruneReport> {
+    async prune(options: { targets?: string[]; dryRun?: boolean; force?: boolean } = {}): Promise<PruneReport> {
         // Before any ssh: this verb DELETES, so invariant 8's "fail closed on
         // permissive modes before any network I/O" matters here more than
         // anywhere. See listSnapshots for the sibling-path history.
@@ -1146,8 +1157,62 @@ export class Backupkit {
         for (const target of this.selectTargets(options.targets)) {
             const store = this.storeFor(target, "unattended");
             const errors: string[] = [];
+
+            // The past-dated-insertion guard, on the operator's path too.
+            //
+            // The run pipeline skips retention when names appear below the
+            // previous run's newest, but `prune` is the documented way to clear
+            // that state - so it cannot simply refuse, or an operator would be
+            // left with a tripwire and no way out. It also cannot quietly
+            // proceed: retention selects on names, so a poisoned listing makes
+            // prune delete the REAL history (measured: 10 of 11) while the
+            // planted names take every keep slot.
+            //
+            // So: detect, refuse by default, and require `--force`. The operator
+            // reviews `--dry-run` (which prints the full keep/prune plan and
+            // therefore SHOWS real snapshots queued for deletion), then decides.
+            // That turns a silent deletion into an authorised one.
+            //
+            // Deliberately NOT "delete the unattested names and keep the rest":
+            // run reports rotate, so a genuine snapshot older than the report
+            // window is unattested exactly like a plant. The count knows HOW MANY
+            // names appeared, never WHICH - so naming suspects is best-effort
+            // context for a human, never grounds for the machine to delete.
+            const complete = await store.listComplete();
+            const targetReports = await readTargetReports(this.config.stateDir, target.name, this.log);
+            const mark = newestHistoryMark(targetReports);
+            const insertion = detectHistoryInsertion(complete, mark);
+            if (insertion !== null && options.force !== true) {
+                const suspects = mark === null ? [] : unattestedBelow(complete, targetReports, mark);
+                this.log.error("refusing to prune: snapshots appeared below the previous run's newest", {
+                    target: target.name,
+                    previousNewest: sanitize(insertion.previousNewest),
+                    previousCount: insertion.previousCount,
+                    count: insertion.count,
+                });
+                errors.push(
+                    `${insertion.count - insertion.previousCount} snapshot(s) appeared at or below ` +
+                        `${sanitize(insertion.previousNewest)} since the last run recorded ${insertion.previousCount} ` +
+                        `there - this client only ever creates snapshots dated now, so something else wrote into the ` +
+                        `archive. Retention selects on names, so pruning now may delete real history instead of the ` +
+                        `additions.` +
+                        (suspects.length === 0
+                            ? ""
+                            : ` Not created by any recorded run (best effort - reports rotate): ` +
+                              `${suspects.slice(0, 10).map(sanitize).join(", ")}.`) +
+                        ` Review with \`backupkit prune --dry-run\`, remove anything that is not yours, then re-run ` +
+                        `with --force to prune anyway.`,
+                );
+                // --dry-run must still SHOW the plan: it is the review step this
+                // very message sends the operator to, and a refusal that also
+                // refuses to explain itself is a dead end.
+                const plan = options.dryRun === true ? this.planFor(complete, target) : { keep: [], prune: [] };
+                reports.push({ target: target.name, plan, executed: false, errors });
+                continue;
+            }
+
             if (options.dryRun === true) {
-                const plan = this.planFor(await store.listComplete(), target);
+                const plan = this.planFor(complete, target);
                 reports.push({ target: target.name, plan, executed: false, errors });
                 continue;
             }

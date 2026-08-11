@@ -64,10 +64,11 @@ Copy one snapshot to a non-existent output path.
     --output P   fresh path to restore into (required)
     --verify     post-copy checksum verification pass
     --config P   config file path`,
-    prune: `backupkit prune [TARGET...] [--dry-run] [--config P]
+    prune: `backupkit prune [TARGET...] [--dry-run] [--force] [--config P]
 
 Apply retention now.
     --dry-run    print the retention plan (keeps with reasons) and stop
+    --force      prune even when snapshots appeared that no run created
     --config P   config file path`,
     check: `backupkit check [--config P]
 

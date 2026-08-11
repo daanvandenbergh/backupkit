@@ -347,17 +347,55 @@ validate_rsync() {
             # the validated argv operand is not the operand that governs the
             # transfer - which nullifies every path check at once; rsync's own
             # rrsync wrapper refuses it for exactly this reason). A deny list
-            # cannot be complete against a tool that keeps adding options, so the
-            # polarity is inverted here: the set below is what rsync 3.4.4 was
-            # MEASURED to send for backupkit's five real invocations (transfer,
-            # incremental transfer, estimate, verify, restore-read), and the
-            # parity test feeds those captured argv strings to this script.
+            # cannot be complete against a tool that keeps adding options. But a
+            # pure allowlist has the opposite failure: the FIRST time an rsync
+            # upgrade forwards a new option, every push dies with a bare
+            # "rejected" and no operator can tell why - invariant 24's hazard,
+            # arriving via a dependency bump nobody connected to backupkit.
             #
-            # A future rsync that forwards a new option fails LOUDLY (a bare
-            # "rejected") rather than silently widening the jail - the correct
-            # direction for a default-deny boundary, and the reason the parity
-            # test must capture real argv rather than a hand-written string.
+            # So the rule is shaped by what actually makes an option dangerous
+            # rather than by whether we have seen it before. Three explicit
+            # groups are refused (below): options that NAME A PATH, options that
+            # EXECUTE something, options that FOLLOW SYMLINKS, and options that
+            # make the argv non-authoritative. Everything else is allowed if it
+            # is valueless or carries a value with no path characters in it -
+            # because with the destination pinned to the run's own
+            # `<snap>.partial` (check_rsync_path), an option that cannot name a
+            # file cannot reach outside that directory.
+            #
+            # Measured on rsync 3.4.4 across backupkit's five real invocations
+            # (transfer, incremental, estimate, verify, restore-read), the
+            # forwarded set is: --sender --numeric-ids --delete --force --partial
+            # --timeout=N --bwlimit=N --info=X --log-format=%i --link-dest ../X.
+            # The parity test feeds those captured argv strings to this script;
+            # they are documentation of the happy path, not the security boundary.
+            #
+            # The residual this accepts, stated plainly: a future rsync could add
+            # a VALUELESS destructive option and it would pass. That is why the
+            # deny list below still has to be maintained, and why the three
+            # already known (--remove-source-files, --inplace, --append) are named
+            # there rather than left to shape inference.
             --numeric-ids | --delete | --force | --partial | --sparse | --stats)
+                ;;
+            # Path-naming, command-executing, symlink-following, and
+            # argv-defeating options. Both the `=value` and the bare
+            # (space-separated) spellings are listed: the bare form is refused
+            # here, and its value token then has nowhere to go anyway - a bare
+            # `/tmp/x` falls through to the final `*)` arm.
+            --rsync-path | --rsync-path=* | --rsh | --rsh=* | -e | --daemon \
+                | --copy-links | --copy-unsafe-links | --copy-dirlinks | --keep-dirlinks \
+                | --munge-links | --no-munge-links \
+                | --protect-args | --secluded-args \
+                | --files-from | --files-from=* | --read-batch | --read-batch=* \
+                | --write-batch | --write-batch=* | --only-write-batch | --only-write-batch=* \
+                | --temp-dir | --temp-dir=* | -T | --partial-dir | --partial-dir=* \
+                | --compare-dest | --compare-dest=* | --copy-dest | --copy-dest=* \
+                | --backup-dir | --backup-dir=* | --log-file | --log-file=* \
+                | --config | --config=* | --exclude-from | --exclude-from=* \
+                | --include-from | --include-from=* \
+                | --remove-source-files | --remove-sent-files \
+                | --inplace | --append | --append-verify)
+                return 1
                 ;;
             # Both must be a NONZERO number: rsync reads 0 as "unlimited" for
             # each, so `--timeout=0` lets a jailed client pin a server-side rsync
@@ -373,10 +411,19 @@ validate_rsync() {
                 case $nval in "" | *[!0-9]*) return 1 ;; esac
                 case $nval in *[1-9]*) ;; *) return 1 ;; esac
                 ;;
-            --info=*)
-                case ${1#--info=} in "" | *[!A-Za-z0-9,]*) return 1 ;; esac
-                ;;
-            --log-format=%i)
+            # Any other long option, known or not. A valueless flag cannot
+            # redirect I/O. A value is allowed only when it CANNOT NAME A FILE:
+            # no "/", no "..", and nothing outside a conservative token charset,
+            # which admits --info=STATS2, --log-format=%i, --iconv=utf-8 and
+            # whatever an rsync upgrade invents next, while refusing
+            # --anything=/etc/shadow and --anything=../escape.
+            --*)
+                case $1 in
+                    *=*)
+                        oval=${1#*=}
+                        case $oval in "" | *..* | *[!A-Za-z0-9_,.:%+-]*) return 1 ;; esac
+                        ;;
+                esac
                 ;;
             # The compact short-flag bundle. Exactly `-<letters>` or
             # `-<letters>.<letters>`: the pre-"." letters are the active flags and

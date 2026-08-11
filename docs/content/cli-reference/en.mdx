@@ -56,7 +56,7 @@ backupkit logs      [-f|--follow] [-n N|--lines N] [--config P]
 backupkit list      [TARGET...] [--json] [--config P]        (alias: ls)
 backupkit status    [TARGET...] [--json] [--config P]
 backupkit restore   TARGET SNAPSHOT|latest --output PATH [--verify] [--config P]
-backupkit prune     [TARGET...] [--dry-run] [--config P]
+backupkit prune     [TARGET...] [--dry-run] [--force] [--config P]
 backupkit check     [--config P]
 backupkit init      [--force] [--config P]
 backupkit jail      install|status [--path P]
@@ -103,6 +103,8 @@ Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can 
 ### prune
 
 Apply retention now. `--dry-run` prints the plan - what is kept and why, then what would be deleted - and stops without deleting anything.
+
+`prune` refuses if snapshots have appeared in the archive that no run created (see [the planted-snapshot guard](/retention#the-planted-snapshot-guard)), because retention picks by name and a list with extra names in it would have it delete the real snapshots. Review with `--dry-run`, remove anything that is not yours, then `--force` to prune anyway.
 
 ### check
 

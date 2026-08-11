@@ -60,6 +60,7 @@ function makeDeps(store: FakeStore, overrides: Partial<TargetRunnerDeps> = {}): 
         totalBytes: async () => null,
         diskLowTargets: new Set(),
         previousStats: async () => null,
+        previousHistory: async () => null,
         ...overrides,
     };
 }
@@ -364,6 +365,105 @@ describe("runTarget pipeline", () => {
             );
             expect(report.contentCollapse).toBeNull();
             expect(store.calls.filter((call) => call.startsWith("remove:")).length).toBeGreaterThan(0);
+        });
+
+        it("trips when this run's file count cannot be measured at all, rather than pruning blind", async () => {
+            // The read-only sibling (dryRunStats) THROWS on unparsable rsync
+            // stats; this path used to score the same input as "no collapse" and
+            // go on to delete. A hostile source chooses whether its rsync emits a
+            // parsable stats block, so it also chose which branch ran.
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z"];
+            const { log, lines } = captureLogger("error");
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    log,
+                    previousStats: async () => ({
+                        filesTransferred: 5,
+                        bytesTransferred: 500,
+                        totalFiles: 1000,
+                        deltaBytes: 500,
+                    }),
+                    transfer: fakeTransfer(makeTransferResult({ stats: null })),
+                }),
+            );
+
+            expect(report.contentCollapse).toEqual({ previousFiles: 1000, files: null });
+            expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("could not be measured"))).toBe(true);
+        });
+
+        it("PAST-dated planted names trip the insertion guard, so retention never runs on a poisoned listing", async () => {
+            // The demonstrated bypass of the future-dated guard: the planter
+            // picks the timestamp, so it dates each plant one second AFTER a real
+            // snapshot. splitFutureSnapshots reports nothing (none are ahead of
+            // now), every plant takes its bucket, and the real history is what
+            // gets pruned. Counting catches it - this client never back-dates, so
+            // the number of names at or below a fixed past point cannot grow.
+            const store = new FakeStore();
+            store.names = [
+                "2026-08-01T000000Z",
+                "2026-08-01T000001Z", // planted, one second later
+                "2026-08-02T000000Z",
+                "2026-08-02T000001Z", // planted
+                "2026-08-03T000000Z",
+            ];
+            const { log, lines } = captureLogger("error");
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    log,
+                    previousHistory: async () => ({ newest: "2026-08-03T000000Z", count: 3 }),
+                }),
+            );
+
+            expect(report.status).toBe("success");
+            expect(report.historyInsertion).toEqual({
+                previousNewest: "2026-08-03T000000Z",
+                previousCount: 3,
+                count: 5,
+            });
+            // Promoted, but nothing pruned - the real history survives.
+            expect(store.names).toContain(SNAP);
+            expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("appeared BELOW"))).toBe(true);
+        });
+
+        it("records how much history existed, so the next run has a baseline to count against", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z"];
+            const report = await runTarget(makeTarget({ retention: null }), makeDeps(store));
+
+            // Two existing plus the one this run promoted.
+            expect(report.completeCount).toBe(3);
+        });
+
+        it("does not trip when retention has REMOVED names since the mark (a count may shrink, never grow)", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-02T000000Z", "2026-08-03T000000Z"];
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    previousHistory: async () => ({ newest: "2026-08-03T000000Z", count: 9 }),
+                }),
+            );
+
+            expect(report.historyInsertion).toBeNull();
+            expect(store.calls.filter((call) => call.startsWith("remove:")).length).toBeGreaterThan(0);
+        });
+
+        it("does not trip on this run's OWN new snapshot, which is newer than the mark", async () => {
+            const store = new FakeStore();
+            store.names = ["2026-08-01T000000Z", "2026-08-02T000000Z", "2026-08-03T000000Z"];
+            const report = await runTarget(
+                makeTarget({ retention: null }),
+                makeDeps(store, {
+                    previousHistory: async () => ({ newest: "2026-08-03T000000Z", count: 3 }),
+                }),
+            );
+
+            expect(report.historyInsertion).toBeNull();
         });
 
         it("a first run with no baseline never trips the wire", async () => {

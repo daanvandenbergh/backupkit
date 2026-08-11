@@ -534,8 +534,12 @@ step1_verify_hosts() {
 # ever learns a read-only `--sender` mode, force that command here.
 pull_key_prefix() {
     local addr
+    # cut does the field split, NOT the remote shell: a zsh login shell does not
+    # word-split unquoted $SSH_CLIENT, so `set -- $SSH_CLIENT` there yields the
+    # whole "<ip> <cport> <sport>" string as $1 - which lands in from="..." as a
+    # malformed host pattern and gets the key refused. cut is shell-agnostic.
     addr=$(ssh -o BatchMode=yes -o ConnectTimeout=8 -p "$SRC_PORT" "$SRC_USER@$SRC_HOST" \
-        'set -- $SSH_CLIENT; printf "%s" "${1:-}"' 2>/dev/null) || addr=""
+        'printf "%s" "$SSH_CLIENT" | cut -d" " -f1' 2>/dev/null) || addr=""
     if [ -n "$addr" ]; then
         printf 'restrict,from="%s"' "$addr"
     else
