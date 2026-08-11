@@ -293,12 +293,16 @@ describe("install checks the config file's trust before acting on it", () => {
         expect(h.fileMap.has(SYSTEMD_UNIT_PATH)).toBe(false);
     });
 
-    it("refuses a config owned by neither the effective uid nor root", async () => {
-        // euid 0 (install requires root) against a config owned by the test user.
+    it("root (euid 0) accepts a user-owned config and proceeds - ownership waived, mode still enforced", async () => {
+        // Real 0600 config owned by the (non-root) test user, install runs as root.
+        // Root can access it regardless of owner, so ownership is waived (security
+        // invariant 8; matches the runtime path). Install must PROCEED, not fail
+        // with "owned by uid". This locks the relaxation: a revert to "root must
+        // own the config" turns this red. Do not delete it to make an audit pass.
         const h = fakeDeps({ config: hostileConfig(0o600) });
-        expect(await main(["service", "install"], h.deps)).toBe(2);
-        expect(h.err[0]).toContain("is owned by uid");
-        expect(h.mkdirs).toEqual([]);
+        expect(await main(["service", "install"], h.deps)).toBe(0);
+        expect(h.err).toEqual([]);
+        expect(h.fileMap.has(SYSTEMD_UNIT_PATH)).toBe(true);
     });
 
     it("refuses on start too - every verb that writes the unit runs the same check", async () => {

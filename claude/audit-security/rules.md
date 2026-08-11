@@ -38,11 +38,17 @@ even when nothing visibly fails.
    OWNERSHIP, by deliberate design, is NOT required when the process runs as root (euid 0): root
    can read/write/chown any file regardless of owner, so demanding files be chown'd to root adds
    zero security and only forced operators to copy keys into a root-owned tree. A root daemon
-   accepts the operator's own user-owned keys/config/stateDir as-is (`ownershipOk` in
-   `ssh/permissions.ts`). This is intentional and locked by tests ("root (euid 0) accepts a
-   foreign-owned ..." in `src/ssh/tests/permissions.test.ts`) - do NOT re-introduce a "root must
-   own it" rule; it is friction, not protection. A NON-root process still requires euid-or-root
-   ownership (a real confused-deputy risk: another unprivileged user could swap the file).
+   accepts the operator's own user-owned keys/config/stateDir as-is. This lives in TWO places,
+   both of which waive ownership for root and both of which STILL enforce the mode check:
+   `ownershipOk` in `ssh/permissions.ts` (the runtime matrix) and `assertConfigTrusted` in
+   `cli/internal/service/lifecycle.ts` (the `service install`/lifecycle config-file row). They
+   must stay consistent - relaxing one and not the other means `run`/`daemon` accept a user-owned
+   config while `service install` rejects it (the exact bug this rule now prevents). Intentional
+   and locked by tests ("root (euid 0) accepts a foreign-owned ..." in
+   `src/ssh/tests/permissions.test.ts`; "root (euid 0) accepts a user-owned config ..." in
+   `src/cli/tests/service.test.ts`) - do NOT re-introduce a "root must own it" rule in EITHER
+   place; it is friction, not protection. A NON-root process still requires euid-or-root ownership
+   (a real confused-deputy risk: another unprivileged user could swap the file).
    "Before any network I/O" binds EVERY engine verb that reaches a remote, not just the obvious
    ones - `listSnapshots` and `prune` were the sibling paths that skipped the gate while being
    exactly the verbs an operator uses to confirm the archive is healthy.

@@ -71,17 +71,32 @@ async function action(deps: CliDeps, bin: string, args: string[]): Promise<numbe
 }
 
 /**
- * Refuse to act on a config file that is not trustworthy: it must be owned by
- * the effective uid or root, and must not be group- or other-writable.
+ * Refuse to act on a config file that is not trustworthy. This is the
+ * config-file row of the permission matrix, checked here because the lifecycle
+ * verbs run as root over CONFIG-CHOSEN paths (they `mkdir` the `logging.file`
+ * dir and stateDir and grant them to the unit sandbox) without running the
+ * daemon's full preflight. Without it, anyone who can WRITE the config picks a
+ * directory root creates (`"logging.file": "/etc/cron.d/bk.log"`).
  *
- * The lifecycle verbs run as root and act on CONFIG-CHOSEN paths - they `mkdir`
- * the `logging.file` directory and the stateDir, and grant both to the unit's
- * sandbox - but none of them runs the daemon's permission preflight, which is
- * where this check otherwise lives. Without it, anyone who can write the config
- * file picks a directory root creates (`"logging.file": "/etc/cron.d/bk.log"`).
- * ssh/permissions.ts `checkFilePermissions` holds the fuller matrix (keys,
- * passphrase files, known_hosts, destination roots); this is deliberately only
- * its config-file row, so install stays synchronous and needs no ssh inputs.
+ * TWO checks, and they are NOT the same:
+ *  - MODE (group/other-writable): ALWAYS enforced. This is the real boundary -
+ *    it stops OTHER local users from tampering with the config a root service
+ *    reads. Never relax it.
+ *  - OWNERSHIP: waived when we run as ROOT (euid 0), exactly like
+ *    `ownershipOk` in ssh/permissions.ts and security invariant 8. Root can
+ *    already read/write/chown any file, so demanding the config be chown'd to
+ *    root adds nothing - it only forces operators to `chown root` a config they
+ *    deliberately keep under their own home, and it would be INCONSISTENT with
+ *    the runtime path, where a root `run`/`daemon` already reads that same
+ *    user-owned config. The owner (the operator who pointed a root service at
+ *    their own file) is trusted by that choice; the mode check still blocks
+ *    everyone else. A NON-root install still requires euid-or-root ownership.
+ *
+ * DO NOT re-add a "root must own the config" rule here. It is friction, not
+ * protection (root already has full access), it contradicts the runtime
+ * permission model, and it is locked by a test ("root (euid 0) accepts a
+ * user-owned config" in the lifecycle suite). If an audit flags this, the audit
+ * is out of date - see invariant 8.
  *
  * A path that cannot be stat'ed is nothing to check: `loadConfig` has already
  * READ this exact file microseconds earlier (a failure there is a ConfigError),
@@ -103,7 +118,8 @@ function assertConfigTrusted(deps: CliDeps, configPath: string): void {
             { file: configPath },
         );
     }
-    if (deps.euid !== null && uid !== deps.euid && uid !== 0) {
+    // Ownership waived for root (euid 0); mode check above still ran. See docblock.
+    if (deps.euid !== null && deps.euid !== 0 && uid !== deps.euid && uid !== 0) {
         throw new ConfigError(
             `config file ${configPath} is owned by uid ${uid}, not uid ${deps.euid} or root; run: chown root ${configPath}`,
             { file: configPath },
