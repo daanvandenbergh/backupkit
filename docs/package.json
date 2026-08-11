@@ -14,5 +14,9 @@
         "next-mdx-remote": "^6.0.0",
         "react": "^19.0.0",
         "react-dom": "^19.0.0"
+    },
+    "devDependencies": {
+        "@types/node": "^26.2.0",
+        "typescript": "^7.0.2"
     }
 }
