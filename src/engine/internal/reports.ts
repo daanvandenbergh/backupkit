@@ -3,8 +3,10 @@
  * JSON per run at `<stateDir>/runs/<target>/<runId>.json`, written atomically
  * (tmp + rename, 0600), newest 50 kept per target. There is no state file -
  * backoff counters, `lastResult`, and restart recovery all derive from these
- * reports. A corrupt report file is renamed aside and ignored (treat as
- * absent, never block).
+ * reports. A report that reads fine but is unparseable/wrong-shaped is renamed
+ * aside to `.corrupt` and ignored (treat as absent, never block). A report that
+ * cannot be READ (permission, transient I/O) is left untouched - a read failure
+ * is not corruption, and renaming it would destroy valid history.
  */
 
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
@@ -87,9 +89,25 @@ export async function readTargetReports(stateDir: string, target: string, log: L
     const reports: TargetRunReport[] = [];
     for (const name of names.filter((entry) => entry.endsWith(".json")).sort().reverse()) {
         const path = join(dir, name);
+        // Split READ failure from CORRUPTION. A failed read is NOT corruption:
+        // a permission error (reports written by a root daemon, read by a
+        // non-root `status`), a transient EMFILE/EIO, or a concurrent unlink.
+        // The old code caught reads and parses in one catch and renamed the file
+        // to `.corrupt` - so an unreadable-but-valid report was destroyed, and a
+        // transient error could wipe EVERY report (history + backoff state).
+        // Only rename aside when the file READ fine but is not a valid report.
+        let text: string;
+        try {
+            text = await readFile(path, "utf8");
+        } catch (error) {
+            if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+                log.warn("could not read run report - left in place, not treated as corrupt", { file: path });
+            }
+            continue;
+        }
         let parsed: unknown;
         try {
-            parsed = JSON.parse(await readFile(path, "utf8"));
+            parsed = JSON.parse(text);
         } catch {
             parsed = null;
         }
@@ -104,12 +122,33 @@ export async function readTargetReports(stateDir: string, target: string, log: L
 }
 
 /**
- * Stats of the newest report that completed a transfer (reports newest first,
+ * Stats of the newest TRUSTED run - the newest report that completed a transfer
+ * AND did not itself trip the content-collapse tripwire (reports newest first,
  * as `readTargetReports` returns them), or null when no such run is on record.
- * The baseline the content-collapse tripwire compares this run against.
+ * The baseline the tripwire compares this run against.
+ *
+ * Skipping the collapsed reports is what makes the tripwire mean anything.
+ * Taking the newest report with ANY stats made the wire disarm itself after
+ * exactly one run: the collapsed run persists its own (tiny) stats, so the next
+ * run compared empty against empty, saw no collapse, and pruned normally. A
+ * source presenting an empty tree therefore lost one prune cycle and then aged
+ * the real history out on schedule - the archive-destruction path invariant 27
+ * exists to close, reopened by the baseline rather than by the comparison.
+ * Measured before the fix: run 2 tripped and pruned nothing, run 3 deleted the
+ * last two genuine snapshots, and by run 7 the archive was two empty snapshots.
+ *
+ * A sustained collapse therefore keeps retention off run after run, which is the
+ * intended direction (a false trip costs disk, a missed trip is permanent) and
+ * is bounded rather than permanent: reports rotate at REPORTS_KEPT, so
+ * once every pre-collapse report has aged out this returns null, the wire stops
+ * tripping, and scheduled retention resumes. `backupkit prune` remains the
+ * operator's immediate override - it never consults the tripwire at all.
  */
 export function newestStats(reports: readonly TargetRunReport[]): RunStats | null {
     for (const report of reports) {
+        if (report.contentCollapse !== null && report.contentCollapse !== undefined) {
+            continue;
+        }
         if (report.stats !== null && report.stats !== undefined) {
             return report.stats;
         }

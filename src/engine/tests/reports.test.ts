@@ -3,13 +3,14 @@
  * the newest 50, corrupt-file quarantine, and the backoff derivation tables.
  */
 
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
     deriveBackoff,
+    newestStats,
     readTargetReports,
     reportDir,
     REPORTS_KEPT,
@@ -106,6 +107,25 @@ describe("report persistence", () => {
         expect(names).not.toContain("2026-08-11T000000Z_web.json");
     });
 
+    it("leaves an UNREADABLE report in place - a read failure is not corruption, never renamed", async () => {
+        // A directory at the .json path forces readFile to fail with EISDIR - a
+        // read error (like the EACCES a non-root `status` hits on a root daemon's
+        // 0600 reports), reproducible on every platform and uid, unlike chmod 000
+        // which root ignores. It must NOT be renamed to .corrupt or valid history
+        // is destroyed (and a transient error could wipe every report at once).
+        const { log: warnLog, lines } = captureLogger("warn");
+        await writeTargetReport(stateDir, makeReport());
+        const unreadable = join(reportDir(stateDir, "web"), "2026-08-11T000000Z_web.json");
+        await mkdir(unreadable);
+        const read = await readTargetReports(stateDir, "web", warnLog);
+        expect(read).toHaveLength(1); // the valid report still read
+        const names = await readdir(reportDir(stateDir, "web"));
+        expect(names).toContain("2026-08-11T000000Z_web.json"); // NOT renamed aside
+        expect(names).not.toContain("2026-08-11T000000Z_web.json.corrupt");
+        expect(lines.some((line) => line.includes("could not read run report"))).toBe(true);
+        expect(lines.some((line) => line.includes("corrupt run report"))).toBe(false);
+    });
+
     it("skips a wrong-shaped report file (valid JSON, missing fields)", async () => {
         const bad = join(reportDir(stateDir, "web"), "2026-08-11T000000Z_web.json");
         await writeTargetReport(stateDir, makeReport());
@@ -150,5 +170,70 @@ describe("deriveBackoff", () => {
             seq("success", "2026-08-09T11:00:00.000Z", "2026-08-09T110000Z"),
         ]);
         expect(derived.lastSnapshot).toBe("2026-08-10T110000Z");
+    });
+});
+
+describe("newestStats - the content-collapse baseline", () => {
+    /** A report that completed a transfer with `totalFiles` files. */
+    function withFiles(totalFiles: number, overrides: Partial<TargetRunReport> = {}): TargetRunReport {
+        return makeReport({
+            stats: { filesTransferred: 1, bytesTransferred: 1, totalFiles, deltaBytes: 1 },
+            ...overrides,
+        });
+    }
+
+    it("never takes a run that TRIPPED the wire as the baseline (the wire must not disarm itself)", () => {
+        // Reports are newest first. The newest one is the collapsed run: it
+        // persists its own tiny stats, so taking "the newest report with any
+        // stats" made the next run compare 0 against 0, see no collapse, and
+        // prune the real history away one interval later.
+        const stats = newestStats([
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: 0 } }),
+            withFiles(120_433),
+        ]);
+
+        expect(stats?.totalFiles).toBe(120_433);
+    });
+
+    it("skips EVERY consecutive collapsed run, so a sustained collapse never becomes normal", () => {
+        const stats = newestStats([
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: 0 } }),
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: 0 } }),
+            withFiles(3, { contentCollapse: { previousFiles: 120_433, files: 3 } }),
+            withFiles(120_433),
+        ]);
+
+        expect(stats?.totalFiles).toBe(120_433);
+    });
+
+    it("also skips a run whose file count could not be measured at all", () => {
+        const stats = newestStats([
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: null } }),
+            withFiles(120_433),
+        ]);
+
+        expect(stats?.totalFiles).toBe(120_433);
+    });
+
+    it("returns null once every pre-collapse report has rotated away, so retention can resume", () => {
+        // The bound on "retention stays off": reports rotate at REPORTS_KEPT, so
+        // a sustained collapse stops tripping after the last trusted run ages
+        // out rather than pausing retention forever.
+        const stats = newestStats([
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: 0 } }),
+            withFiles(0, { contentCollapse: { previousFiles: 120_433, files: 0 } }),
+        ]);
+
+        expect(stats).toBeNull();
+    });
+
+    it("ignores reports that completed no transfer, and takes the newest trusted one", () => {
+        const stats = newestStats([
+            makeReport({ status: "failed", stats: null }),
+            withFiles(120_433),
+            withFiles(99),
+        ]);
+
+        expect(stats?.totalFiles).toBe(120_433);
     });
 });
