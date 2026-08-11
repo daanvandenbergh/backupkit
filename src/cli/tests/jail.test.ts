@@ -106,6 +106,47 @@ describe("jail status", () => {
     });
 });
 
+describe("jail drift warning (every command)", () => {
+    it("warns on stderr when an installed copy differs from the shipped script", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["list"], h.deps)).toBe(0);
+        expect(h.err[0]).toContain(`jail script at ${DEST} does not match`);
+        expect(h.err[0]).toContain("sudo backupkit jail install");
+    });
+
+    it("warns even on --version, and only on stderr", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["--version"], h.deps)).toBe(0);
+        expect(h.out).toEqual(["0.1.0-test"]);
+        expect(h.err[0]).toContain("does not match");
+    });
+
+    it("stays silent when no script is installed", async () => {
+        const h = jailDeps();
+        expect(await main(["list"], h.deps)).toBe(0);
+        expect(h.err).toEqual([]);
+    });
+
+    it("stays silent when the installed copy is up to date", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv2\n" } });
+        expect(await main(["list"], h.deps)).toBe(0);
+        expect(h.err).toEqual([]);
+    });
+
+    it("stays silent when the package's own script is missing (nothing to compare)", async () => {
+        const h = fakeDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["list"], h.deps)).toBe(0);
+        expect(h.err).toEqual([]);
+    });
+
+    it("is skipped for the jail command itself", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["jail", "status"], h.deps)).toBe(1);
+        expect(h.err).toEqual([]);
+        expect(h.out[0]).toContain("differs");
+    });
+});
+
 describe("jail usage", () => {
     it("rejects a missing or unknown verb and extra positionals", async () => {
         for (const argv of [["jail"], ["jail", "wipe"], ["jail", "install", "status"]]) {

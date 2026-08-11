@@ -99,6 +99,28 @@ function status(deps: CliDeps, dest: string): number {
     return 0;
 }
 
+/**
+ * The passive drift check `main()` runs on EVERY invocation: non-null exactly
+ * when a jail script IS installed at the well-known path but differs from the
+ * one this package ships. A machine with no installed script (not an archive
+ * server, or a hand-placed copy elsewhere) gets no warning, and any read
+ * error is treated as "nothing to say" - a nag must never break a command.
+ */
+export function jailDriftWarning(deps: CliDeps): string | null {
+    try {
+        if (!deps.files.exists(JAIL_INSTALL_PATH)) {
+            return null;
+        }
+        const shipped = shippedScriptPath(deps);
+        if (!deps.files.exists(shipped) || deps.files.read(JAIL_INSTALL_PATH) === deps.files.read(shipped)) {
+            return null;
+        }
+        return `Warning: the jail script at ${JAIL_INSTALL_PATH} does not match the version this backupkit ships (${deps.version}) - an old copy rejects every push to this server. Update it with: sudo backupkit jail install`;
+    } catch {
+        return null;
+    }
+}
+
 /** The `backupkit jail <verb>` command entry. */
 export async function jailCommand(argv: string[], deps: CliDeps): Promise<number> {
     const { values, positionals } = parseFlags(argv, { path: { type: "string" } }, true);

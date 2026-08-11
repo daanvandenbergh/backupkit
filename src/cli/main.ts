@@ -20,7 +20,7 @@ import { isBackupkitError } from "../shared/errors.js";
 import { checkCommand } from "./internal/commands/check.js";
 import { daemonCommand } from "./internal/commands/daemon.js";
 import { initCommand } from "./internal/commands/init.js";
-import { jailCommand } from "./internal/commands/jail.js";
+import { jailCommand, jailDriftWarning } from "./internal/commands/jail.js";
 import { listCommand } from "./internal/commands/list.js";
 import { pruneCommand } from "./internal/commands/prune.js";
 import { restoreCommand } from "./internal/commands/restore.js";
@@ -140,6 +140,15 @@ function reportError(error: unknown, deps: CliDeps): number {
 export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promise<number> {
     const [first, ...rest] = argv;
     try {
+        // Passive jail-drift nag on every invocation (stderr, so --json stdout
+        // stays parseable). Skipped for `jail` itself, whose verbs report the
+        // same state precisely.
+        if (first !== "jail") {
+            const drift = jailDriftWarning(deps);
+            if (drift !== null) {
+                deps.stderr(drift);
+            }
+        }
         if (first === undefined || first === "--help" || first === "-h" || first === "help") {
             deps.stdout(ROOT_HELP);
             return 0;
