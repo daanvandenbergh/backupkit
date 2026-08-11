@@ -7,9 +7,9 @@
          * Coordinates are in the mark's own 96 space (the group transform applies to them too).
          -->
         <linearGradient id="bk-mark" gradientUnits="userSpaceOnUse" x1="13" y1="10" x2="83" y2="86">
-            <stop offset="0" stop-color="#26B0B2" />
-            <stop offset="55%" stop-color="#186C96" />
-            <stop offset="100%" stop-color="#0E2E5C" />
+            <stop offset="0" stop-color="#2563EB" />
+            <stop offset="55%" stop-color="#6D5DF6" />
+            <stop offset="100%" stop-color="#8A54D8" />
         </linearGradient>
     </defs>
     <rect width="128" height="128" rx="30" fill="#fff" />

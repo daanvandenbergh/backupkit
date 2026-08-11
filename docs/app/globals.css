@@ -6,20 +6,10 @@
     box-sizing: border-box;
 }
 
-/* The brand palette. The package styles every accent through these vars (its own defaults are an
-   indigo/violet ramp), so recolouring the docs UI is this block alone - the same teal -> deep
-   blue-teal -> navy ramp as the logo tile (assets/logo/logo-tile.svg) and the hero gradients
-   (claude/scribekit-hero/readme/hero.settings.js). Keep the three in step. */
-:root {
-    --scribekit-primary: #186c96; /* links, active nav/toc, focus - the ramp's mid stop, readable on white */
-    --scribekit-violet: #26b0b2; /* the second stop the package pairs with primary in its gradients */
-    --scribekit-primary-soft: #a5d8e0; /* hover/active borders */
-    --scribekit-primary-subtle: #eaf6f9; /* pill and active-nav backgrounds */
-    --scribekit-focus-ring: rgba(24, 108, 150, 0.18);
-    --scribekit-code-ink: #a8dde0; /* inline code on the dark code background */
-    --scribekit-hero-rule: linear-gradient(90deg, #26b0b2, #186c96 55%, #0e2e5c);
-    --scribekit-hero-cta: linear-gradient(120deg, #26b0b2, #186c96 62%, #0e2e5c);
-}
+/* The brand palette is the package's own blue -> violet -> purple ramp (`--scribekit-*` defaults in
+   its stylesheet), so there is nothing to override here. The logo (assets/logo/*.svg, docs/app/icon.svg)
+   and the hero gradients (claude/scribekit-hero/readme/hero.settings.js, docs/content/hero.settings.js)
+   are coloured off that same ramp - keep them in step. */
 
 body {
     margin: 0;

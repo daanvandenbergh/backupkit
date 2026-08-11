@@ -32,13 +32,13 @@
  * @prop c.violetDeep {string} The base ramp's darkest violet (`R, G, B`); keep it dark so white text stays legible.
  */
 const c = {
-    pink: "86, 200, 196", // mint
-    lilac: "104, 174, 226", // sky
-    peach: "120, 210, 186", // sea green (the "safe" hue)
-    blue: "78, 186, 226", // cyan
-    violet: "38, 176, 178", // base ramp - teal
-    violetMid: "24, 108, 150", // base ramp - deep blue-teal
-    violetDeep: "14, 46, 92", // base ramp - navy; kept dark so white text stays legible
+    pink: "232, 196, 255", // orchid
+    lilac: "196, 186, 255", // lilac
+    peach: "255, 214, 196", // peach
+    blue: "158, 196, 255", // periwinkle
+    violet: "109, 93, 246", // base ramp - violet
+    violetMid: "82, 66, 206", // base ramp - deep violet
+    violetDeep: "52, 40, 150", // base ramp - indigo; kept dark so white text stays legible
 };
 
 /**
@@ -96,7 +96,7 @@ export const brand = {
     // ramp). `bare` because the tile carries its own rounded background; the badge's default white
     // tile would box it twice.
     badge: { src: new URL("../../assets/logo/logo-tile-light.svg", import.meta.url).href, bare: true },
-    accent: "24, 108, 150",
+    accent: "109, 93, 246",
     eyebrow: "BACKUPKIT",
     texture: { dots: 0.12, grain: 0.06 },
     // The white tile carries its own contrast against the gradient, so it needs only a shadow to
