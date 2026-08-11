@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -22,6 +22,40 @@ const SNAP = "2026-08-10T031502Z";
 
 /** An older snapshot name for mv/link-dest cases. */
 const BASE = "2026-08-01T000000Z";
+
+/**
+ * The `rsync --server` argv rsync 3.4.4 REALLY sends for each of backupkit's
+ * modes, captured by pointing `-e` at a recorder script - never hand-written
+ * (security invariant 24: a grammar written from the client's intent passes
+ * every synthetic test and refuses every real push with a bare "rejected").
+ * `<ROOT>` is substituted with the fixture jail root at run time.
+ *
+ * Note what the wire does NOT carry: `--chmod=ug-s`, `--xattrs`, `--no-D`,
+ * `--no-owner`, `--dry-run`, `--checksum`, `--itemize-changes` and
+ * `--exclude=` are all absent as long options - rsync either folds them into
+ * the short bundle (`X`, the missing `D`/`o`/`g`, `n`, `c`), rewrites them
+ * (`--itemize-changes` -> `--log-format=%i`) or sends them over the protocol
+ * stream instead. A jail test that feeds them by hand tests nothing real.
+ */
+const CAPTURED_ARGV: ReadonlyArray<readonly [string, string]> = [
+    ["first push", `rsync --server -logtprze.iLsfxCIvu --numeric-ids . <ROOT>/web/${SNAP}.partial`],
+    [
+        "incremental push",
+        `rsync --server -logtprze.iLsfxCIvu --numeric-ids --link-dest ../${BASE} . <ROOT>/web/${SNAP}.partial`,
+    ],
+    [
+        "full production push",
+        `rsync --server -lHtpXrSze.iLsfxCIvu --timeout=600 --bwlimit=10240 --delete --force --partial ` +
+            `--numeric-ids --link-dest ../${BASE} --info=STATS2 . <ROOT>/web/${SNAP}.partial`,
+    ],
+    ["estimate (dry-run)", `rsync --server -nlogDtprze.iLsfxCIvu --stats --numeric-ids . <ROOT>/web/${SNAP}.partial`],
+    [
+        "verify (dry-run, checksum, itemize)",
+        `rsync --server -nlHogDtprcSe.iLsfxCIvu --log-format=%i --timeout=600 --delete --force --partial ` +
+            `--numeric-ids --info=STATS2 . <ROOT>/web/${SNAP}.partial`,
+    ],
+    ["restore read (--sender, complete snapshot)", `rsync --server --sender -logtpre.iLsfxCIvu --numeric-ids . <ROOT>/web/${BASE}/`],
+];
 
 describe("backupkit-remote jail script", () => {
     let jailRoot: string;
@@ -127,14 +161,15 @@ describe("backupkit-remote jail script", () => {
             const target = `${jailRoot}/web`;
             const lock = `${target}/.backupkit.lock`;
             await mkdir(`${target}/${BASE}`, { recursive: true });
+            await mkdir(`${target}/${SNAP}.partial`, { recursive: true });
             const shapes: string[][] = [
                 // A bare target dir and a lock marker: mkdir must still accept both.
                 ["mkdir", "-p", "--", target],
                 ["mkdir", "--", lock],
                 ["mkdir", "-p", "--", `${lock}/${SNAP}`],
-                // Both mv forms: promote a .partial, and retire a COMPLETE snapshot.
+                // Both mv forms: retire a COMPLETE snapshot, and promote a .partial.
                 ["mv", "--", `${target}/${BASE}`, `${target}/${BASE}.deleting`],
-                ["mv", "--", `${target}/${BASE}.deleting`, `${target}/${SNAP}.partial`],
+                ["mv", "--", `${target}/${SNAP}.partial`, `${target}/${SNAP}`],
                 // find and df name a bare target dir.
                 ["find", target, "-maxdepth", "1", "-mindepth", "1", "-print0"],
                 ["df", "-Pk", "--", target],
@@ -150,34 +185,150 @@ describe("backupkit-remote jail script", () => {
         });
     });
 
-    describe("allowed rsync forms (fake rsync records the argv)", () => {
-        it("permits the REAL captured rsync argv, whose --link-dest is space-separated", async () => {
-            // Captured off the wire from rsync 3.4.x: the value arrives as its own
-            // token, not `--link-dest=...`. Accepting only the `=` form made every
-            // real incremental push fail with a bare "rejected".
-            const dest = `${jailRoot}/web/${SNAP}.partial`;
-            const cmd =
-                `rsync --server -lHtprSe.iLsfxCIvu --timeout=600 --delete --force --partial ` +
-                `--numeric-ids --link-dest ../${BASE} --info=STATS2 . ${dest}`;
-            const result = await jail(cmd);
-            expect(result.stderr).not.toContain("backupkit-remote: rejected");
-            expect(result.exitCode).toBe(0);
-            const calls = await fake.calls();
-            expect(calls[0].argv).toEqual([
-                "--server",
-                "-lHtprSe.iLsfxCIvu",
-                "--timeout=600",
-                "--delete",
-                "--force",
-                "--partial",
-                "--numeric-ids",
-                "--link-dest",
-                `../${BASE}`,
-                "--info=STATS2",
-                ".",
-                dest,
-            ]);
+    describe("the mv PAIR is one of three real renames (closing the rename gadget)", () => {
+        // The Critical: the two operands were checked INDEPENDENTLY with
+        // check_component, which accepts a bare target name and .backupkit.lock.
+        // So `mv -- <root>/<target> <root>/<snap>.deleting` was legal, and the
+        // resulting `.deleting` leaf is precisely what `rm -rf` is allowed to
+        // remove: two permitted commands erased a target's entire archive
+        // history, defeating the narrowed rm -rf policy completely. Narrowing a
+        // VERB is not the same as enforcing the PROPERTY.
+        it.each([
+            [
+                "renames a whole target into a .deleting leaf that rm -rf may then remove",
+                () => [`${jailRoot}/web`, `${jailRoot}/${SNAP}.deleting`],
+            ],
+            [
+                "renames a target into a .deleting leaf beside itself",
+                () => [`${jailRoot}/web`, `${jailRoot}/web.deleting`],
+            ],
+            [
+                "moves the remote mutex aside so two pipelines run on one archive",
+                () => [`${jailRoot}/web/.backupkit.lock`, `${jailRoot}/web/${SNAP}`],
+            ],
+            [
+                "renames a snapshot into the lock directory to hide it",
+                () => [`${jailRoot}/web/${BASE}`, `${jailRoot}/web/.backupkit.lock`],
+            ],
+            [
+                "carries a snapshot across into another target's directory",
+                () => [`${jailRoot}/web/${SNAP}.partial`, `${jailRoot}/web2/${SNAP}.partial`],
+            ],
+            [
+                "nests a snapshot inside another snapshot instead of renaming it",
+                () => [`${jailRoot}/web/${SNAP}.partial`, `${jailRoot}/web/${BASE}/${SNAP}`],
+            ],
+        ])("rejects the mv that %s", async (_label, build) => {
+            const [src, dst] = build();
+            await mkdir(src, { recursive: true });
+            await expectRejected(quoted(["mv", "--", src, dst]));
+            expect(existsSync(src)).toBe(true);
+            expect(existsSync(dst)).toBe(false);
         });
+
+        it.each([
+            ["promote", () => [`${SNAP}.partial`, SNAP]],
+            ["delete phase 1", () => [BASE, `${BASE}.deleting`]],
+            ["partial re-claim", () => [`${BASE}.partial`, `${SNAP}.partial`]],
+        ])("still permits the %s rename the remote store issues", async (_label, build) => {
+            const [from, to] = build();
+            const target = `${jailRoot}/web`;
+            await mkdir(`${target}/${from}`, { recursive: true });
+            const result = await jail(quoted(["mv", "--", `${target}/${from}`, `${target}/${to}`]));
+            expect({ stderr: result.stderr, exit: result.exitCode }).toEqual({ stderr: "", exit: 0 });
+            expect(existsSync(`${target}/${to}`)).toBe(true);
+        });
+
+        it("the two-command gadget no longer erases real archived data (real mv, real rm)", async () => {
+            // End-to-end against the fixture jail root ONLY, with the script's
+            // real mv/rm: the exact sequence that used to destroy a target.
+            const target = `${jailRoot}/web`;
+            const payload = `${target}/${BASE}/data.txt`;
+            await mkdir(`${target}/${BASE}`, { recursive: true });
+            await writeFile(payload, "the only copy");
+
+            // Step 1: rename the whole target to a leaf rm -rf is allowed to take.
+            await expectRejected(quoted(["mv", "--", target, `${jailRoot}/${SNAP}.deleting`]));
+            // Step 2: the rm the gadget relied on. The jail permits this shape by
+            // design, but step 1 never produced its operand, so it removes nothing.
+            const step2 = await jail(quoted(["rm", "-rf", "--", `${jailRoot}/${SNAP}.deleting`]));
+            expect(step2.stderr).not.toContain("backupkit-remote: rejected");
+
+            expect(existsSync(payload)).toBe(true);
+            expect(existsSync(`${target}/${BASE}`)).toBe(true);
+        });
+    });
+
+    describe("a rename may not bury its source inside an existing directory", () => {
+        // POSIX `mv` does not replace an existing directory - it moves the source
+        // INSIDE it. So `mv <snap>.partial <snap>` against a complete snapshot
+        // that already exists writes into already-verified history, which the
+        // rsync destination policy refuses outright for a transfer. Both operands
+        // are snapshot-shaped siblings, so the pair policy alone lets it through;
+        // absence of the destination is the missing half. The client's promote()
+        // has a post-check for the nested outcome, but a compromised client just
+        // omits it, which is why the server has to enforce it.
+        it("refuses a promote onto a complete snapshot that already exists (a write into verified history)", async () => {
+            await mkdir(join(jailRoot, "web", BASE), { recursive: true });
+            await writeFile(join(jailRoot, "web", BASE, "verified.txt"), "already promoted\n");
+            await mkdir(join(jailRoot, "web", `${BASE}.partial`), { recursive: true });
+
+            await expectRejected(quoted(["mv", "--", `${jailRoot}/web/${BASE}.partial`, `${jailRoot}/web/${BASE}`]));
+
+            // The existing snapshot is untouched and nothing was buried in it.
+            expect(await readdir(join(jailRoot, "web", BASE))).toEqual(["verified.txt"]);
+        });
+
+        it("still allows the real promote, whose destination does not exist yet", async () => {
+            await mkdir(join(jailRoot, "web", `${SNAP}.partial`), { recursive: true });
+
+            const result = await jail(quoted(["mv", "--", `${jailRoot}/web/${SNAP}.partial`, `${jailRoot}/web/${SNAP}`]));
+
+            expect(result.exitCode).toBe(0);
+            expect(await readdir(join(jailRoot, "web"))).toContain(SNAP);
+        });
+    });
+
+    describe("the two-component rsync rule must not leak into the lifecycle verbs", () => {
+        it("keeps the three-deep lock marker, the marker listing, and the root mkdir working", async () => {
+            // The rsync destination policy is exactly two components under $ROOT.
+            // The LIFECYCLE policy is not: the lock marker lives three components
+            // deep (<target>/.backupkit.lock/<snap>), and copying the rsync rule
+            // across would make every remote lock acquisition fail.
+            const target = `${jailRoot}/web`;
+            const lock = `${target}/.backupkit.lock`;
+            const shapes: string[][] = [
+                ["mkdir", "-p", "--", target],
+                ["mkdir", "--", lock],
+                ["mkdir", "-p", "--", `${lock}/${SNAP}`],
+                ["find", lock, "-maxdepth", "1", "-mindepth", "1", "-print0"],
+            ];
+            for (const argv of shapes) {
+                const result = await jail(quoted(argv));
+                expect({ argv, stderr: result.stderr, exit: result.exitCode }).toEqual({
+                    argv,
+                    stderr: "",
+                    exit: 0,
+                });
+            }
+            const listing = await jail(quoted(["find", lock, "-maxdepth", "1", "-mindepth", "1", "-print0"]));
+            expect(listing.stdout).toContain(`${lock}/${SNAP}\0`);
+        });
+    });
+
+    describe("allowed rsync forms (fake rsync records the argv)", () => {
+        it.each(CAPTURED_ARGV)(
+            "a real %s is not refused with a bare \"rejected\" (grammar written from the wire, not from intent)",
+            async (_mode, template) => {
+                const cmd = template.replaceAll("<ROOT>", jailRoot);
+                const result = await jail(cmd);
+                expect({ cmd, stderr: result.stderr, exit: result.exitCode }).toEqual({ cmd, stderr: "", exit: 0 });
+                // Every token reaches rsync unchanged: the jail execs the argv it
+                // validated, it does not rebuild it.
+                const calls = await fake.calls();
+                expect(calls.map((call) => call.argv)).toEqual([cmd.split(" ").slice(1)]);
+            },
+        );
 
         it.each([
             ["the = form", () => `--link-dest=../${BASE}`],
@@ -241,16 +392,117 @@ describe("backupkit-remote jail script", () => {
             expect(result.exitCode).toBe(0);
         });
 
-        it("permits a real backupkit push --server line with the full long-option set", async () => {
-            // The server-side command rsync sends for a backupkit push transfer:
-            // the compact bundle plus the benign long options buildArgs induces
-            // (numeric-ids, delete, chmod, no-D, xattrs, timeout, link-dest).
-            const cmd =
-                `rsync --server -logDtpre.iLsfxC --numeric-ids --delete --force ` +
-                `--chmod=ug-s --no-D --xattrs --partial --timeout=600 ` +
-                `--link-dest=../${BASE} . ${jailRoot}/web/${SNAP}.partial`;
+        it("permits capital S (--sparse) inside a real measured bundle", async () => {
+            // S is sent on every production push (see CAPTURED_ARGV): a bundle
+            // rule that swept up capital letters would refuse every real run.
+            const cmd = `rsync --server -lHtpXrSze.iLsfxCIvu --numeric-ids . ${jailRoot}/web/${SNAP}.partial`;
+            expect((await jail(cmd)).exitCode).toBe(0);
+        });
+    });
+
+    describe("the rsync path operand is pinned to the run's own .partial (destination policy)", () => {
+        // The Critical: check_rsync_path used to accept ANY path under $ROOT with
+        // no "..", while the option grammar permits the --delete --force the real
+        // client sends on every run. `--delete --force` against the TARGET
+        // directory with an empty file list therefore erased every snapshot of
+        // that target in one permitted command, and a write could land in an
+        // already-verified snapshot or in a dot-directory like $ROOT/.ssh.
+        it.each([
+            [
+                "--delete --force aimed at the target dir erases a whole archive history in ONE command",
+                () =>
+                    `rsync --server -lHtpXrSze.iLsfxCIvu --delete --force --partial --numeric-ids . ${jailRoot}/web`,
+            ],
+            [
+                "--delete --force aimed at the jail root erases every target",
+                () => `rsync --server -lHtpXrSze.iLsfxCIvu --delete --force --partial --numeric-ids . ${jailRoot}`,
+            ],
+            [
+                "a write into a COMPLETE snapshot rewrites verified history",
+                () => `rsync --server -logtprze.iLsfxCIvu --numeric-ids . ${jailRoot}/web/${BASE}`,
+            ],
+            [
+                "a write into $ROOT/.ssh plants authorized_keys",
+                () => `rsync --server -logtprze.iLsfxCIvu --numeric-ids . ${jailRoot}/.ssh`,
+            ],
+            [
+                "a write into $ROOT/.ssh/<snap>.partial hides a dot-target behind a legal leaf",
+                () => `rsync --server -logtprze.iLsfxCIvu --numeric-ids . ${jailRoot}/.ssh/${SNAP}.partial`,
+            ],
+            [
+                "a three-component destination writes inside a snapshot instead of building one",
+                () => `rsync --server -logtprze.iLsfxCIvu --numeric-ids . ${jailRoot}/web/${SNAP}.partial/sub`,
+            ],
+            [
+                "a one-component destination names a bare target with no leaf at all",
+                () => `rsync --server -logtprze.iLsfxCIvu --numeric-ids . ${jailRoot}/${SNAP}.partial`,
+            ],
+        ])("rejects the write that %s", async (_label, build) => {
+            await expectRejected(build());
+            expect(await fake.calls()).toEqual([]);
+        });
+
+        it("still permits a --sender read of a COMPLETE snapshot, so restore keeps working", async () => {
+            // The policy is DIRECTION-aware: a complete snapshot is a legal read
+            // source and never a write destination. Pinning the leaf to .partial
+            // in both directions would break every restore.
+            const cmd = `rsync --server --sender -logtpre.iLsfxCIvu --numeric-ids . ${jailRoot}/web/${BASE}`;
             const result = await jail(cmd);
-            expect(result.exitCode).toBe(0);
+            expect({ stderr: result.stderr, exit: result.exitCode }).toEqual({ stderr: "", exit: 0 });
+        });
+    });
+
+    describe("unmeasured rsync options are refused by default (the option allowlist)", () => {
+        const DEST = () => `${jailRoot}/web/${SNAP}.partial`;
+
+        it.each([
+            // --protect-args moves the file arguments off the command line into
+            // the protocol stream, so the validated operand stops governing the
+            // transfer: it nullifies every path check at once.
+            ["--protect-args makes the validated path operand irrelevant", "--protect-args"],
+            ["-s (the short --protect-args) does the same from inside the bundle", "-logDtpres.iLsfxC"],
+            // The archive-side sender unlinks every file it sends: a delete
+            // primitive that never touches the `rm -rf` verb.
+            ["--remove-source-files deletes through the sender", "--remove-source-files"],
+            // Writes THROUGH a --link-dest hardlink, mutating promoted snapshots.
+            ["--inplace writes through a --link-dest hardlink", "--inplace"],
+            // Default-deny: an option nobody has measured must not pass merely
+            // for lacking an absolute path or "..".
+            ["an option no capture has ever produced", "--some-future-option"],
+            ["a non-numeric --timeout value", "--timeout=abc"],
+            ["a non-numeric --bwlimit value", "--bwlimit=x"],
+            // rsync reads 0 as "unlimited" for both, so a zero is not a tighter
+            // bound but the absence of one: --timeout=0 lets a jailed client pin
+            // a server-side rsync open indefinitely, and with the lock's 24 h TTL
+            // that denies the target its backups for a day per session. backupkit
+            // always sends a real ioTimeoutSec, so a zero never comes from it.
+            ["--timeout=0, which means no timeout at all", "--timeout=0"],
+            ["--bwlimit=0, which means unlimited", "--bwlimit=0"],
+            ["a leading-zero --timeout that is still zero", "--timeout=00"],
+        ])("rejects %s", async (_label, option) => {
+            await expectRejected(`rsync --server ${option} --numeric-ids . ${DEST()}`);
+            expect(await fake.calls()).toEqual([]);
+        });
+    });
+
+    describe("a short bundle may not smuggle an attached option VALUE (bundle grammar)", () => {
+        const DEST = () => `${jailRoot}/web/${SNAP}.partial`;
+
+        it.each([
+            // `pre=${pre%%.*}` discarded everything after the first dot, so the
+            // whole attached --temp-dir value vanished and only the letter "T"
+            // was checked: rsync then wrote its temp files outside the jail.
+            ["a bare -T with an attached out-of-jail --temp-dir value", "-T../../../../tmp"],
+            ["the same value attached to the end of a real bundle", "-logDtpreT../../tmp.iLsfxC"],
+            ["an attached value hidden after the capability dot", "-logDtpre.iLsfxC../../tmp"],
+            // L/K/k inside a REAL measured bundle: the existing rows use a
+            // synthetic bundle, these use one rsync actually sends.
+            ["copy-links L inside the measured production bundle", "-lHtpXrSzLe.iLsfxCIvu"],
+            ["keep-dirlinks K inside the measured production bundle", "-lHtpXrSzKe.iLsfxCIvu"],
+            ["copy-dirlinks k inside the measured production bundle", "-lHtpXrSzke.iLsfxCIvu"],
+        ])("rejects %s", async (_label, bundle) => {
+            await expectRejected(`rsync --server ${bundle} --numeric-ids . ${DEST()}`);
+            expect(await fake.calls()).toEqual([]);
         });
     });
 

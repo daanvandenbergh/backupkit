@@ -389,12 +389,43 @@ export async function runTarget(
             let retentionError: string | null = null;
             if (target.retention !== null && contentCollapse === null) {
                 try {
-                    // No future-dated handling here: a future-dated name always
-                    // trips the clock-skew guard above, so this path is only ever
-                    // reached with a plausibly-dated archive. `backupkit prune` is
-                    // the verb that clears a planted name.
-                    const plan = planRetention(await deps.store.listComplete(), target.retention, deps.now());
-                    for (const name of [...plan.prune].reverse()) {
+                    // Future-dated names get exactly the treatment
+                    // `Backupkit.planFor` (the `prune` path) gives them, for the
+                    // same reason: retention selects purely on names, so a name
+                    // dated in the future occupies every bucket it touches and
+                    // pushes the GENUINE snapshots into the prune list.
+                    //
+                    // The clock-skew guard above is NOT cover for this. It reads
+                    // the listing BEFORE the transfer while retention re-reads it
+                    // AFTER, and the party serving the transfer is exactly the
+                    // party that can plant snapshot-shaped names inside that
+                    // window with jail-legal `mkdir` commands - measured: ~46
+                    // planted names took all 24 keep slots and put 30 of 31 real
+                    // snapshots up for deletion.
+                    //
+                    // Policy, mirroring planFor: plan over the genuine names, and
+                    // the planted ones lead the prune list - but only while
+                    // genuine history exists, so a listing that is future-dated
+                    // all the way down (a clock that stepped backwards mid-run
+                    // makes real snapshots look future-dated) is kept untouched
+                    // rather than auto-deleted (invariant 26).
+                    const at = deps.now();
+                    const { genuine, future } = splitFutureSnapshots(await deps.store.listComplete(), at);
+                    const plan = planRetention(genuine, target.retention, at);
+                    if (future.length > 0) {
+                        deps.log.error("future-dated snapshot names appeared during this run - they are not ours; pruning them", {
+                            count: future.length,
+                            futureDated: future.slice(0, 10).map(sanitize).join(", "),
+                            hint:
+                                genuine.length === 0
+                                    ? "every name is future-dated: keeping all of them - check this host's clock"
+                                    : "check this host's clock; if it is correct the source planted these",
+                        });
+                    }
+                    // Newest first, like every RetentionPlan: the future-dated
+                    // names sort after everything genuine, so reversed they lead.
+                    const prune = genuine.length === 0 ? [] : [...[...future].reverse(), ...plan.prune];
+                    for (const name of [...prune].reverse()) {
                         await deps.store.remove(name);
                         deps.log.info("pruned snapshot", { snapshot: name });
                     }

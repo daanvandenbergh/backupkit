@@ -20,6 +20,8 @@ export interface ResolveEnvironment {
     env: Record<string, string | undefined>;
     /** The user's home directory. */
     homeDir: string;
+    /** Host platform, for the root stateDir default (Linux /var/lib vs macOS /var/db). */
+    platform: NodeJS.Platform;
 }
 
 /** Fill every schedule default: intervalCount 1, at "00:00", on "mon", dayOfMonth 1. */
@@ -33,10 +35,15 @@ export function resolveSchedule(input: ScheduleInput | undefined): ScheduleConfi
     };
 }
 
-/** The default stateDir: /var/lib/backupkit for root, else ${XDG_STATE_HOME:-~/.local/state}/backupkit. */
+/**
+ * The default stateDir for root: /var/lib/backupkit on Linux, /var/db/backupkit
+ * on macOS (which has no /var/lib - the same Linux-ism the runtime dir avoids;
+ * /var/db is macOS's own system-daemon data location). Non-root:
+ * ${XDG_STATE_HOME:-~/.local/state}/backupkit on both.
+ */
 function defaultStateDir(environment: ResolveEnvironment): string {
     if (environment.euid === 0) {
-        return "/var/lib/backupkit";
+        return environment.platform === "darwin" ? "/var/db/backupkit" : "/var/lib/backupkit";
     }
     const stateHome = environment.env.XDG_STATE_HOME ?? join(environment.homeDir, ".local", "state");
     return join(stateHome, "backupkit");

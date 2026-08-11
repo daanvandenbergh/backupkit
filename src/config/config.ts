@@ -32,6 +32,8 @@ export interface LoadConfigOptions extends ResolvePathOptions {
     euid?: number | null;
     /** Home directory for the stateDir default. Default: os.homedir(). */
     homeDir?: string;
+    /** Host platform for the root stateDir default (Linux /var/lib vs macOS /var/db). Default: process.platform. */
+    platform?: NodeJS.Platform;
 }
 
 /** The default probe directories for the given environment. */
@@ -53,10 +55,30 @@ function defaultProbeDirs(env: Record<string, string | undefined>): string[] {
  * with cwd `/` (a crash loop), and a cwd-dependent host-key store where an
  * interactive `check` from another directory pins a fresh key instead of
  * comparing against the pinned one.
+ *
+ * Whitespace and quotes are refused for the same reason `validate.ts` refuses
+ * them in `identityFile`, `knownHostsFile`, `rsyncBin`, `sshBin` and a push
+ * `destination` (its `checkPath`, `noWhitespaceQuotes` branch): the synthesized
+ * default `knownHostsFile` is `dirname(configPath)/known_hosts`, and that path
+ * lands inside rsync's `-e` value, which is a COMMAND STRING rsync word-splits
+ * before exec. `--config "/Volumes/My Disk/backupkit/config.jsonc"` therefore
+ * truncated `UserKnownHostsFile` and failed every remote transfer, estimate and
+ * restore while `check` (argv-spawned ssh) still reported the host reachable -
+ * and `--config "/tmp/a -o ProxyCommand=/tmp/evil/x/config.jsonc"` produced the
+ * token `-o ProxyCommand=/tmp/evil/x/known_hosts`, which ssh executes via
+ * `/bin/sh -c`: root code execution from a path that never reached the gate
+ * every explicitly-written path already passes through.
  */
 function normalizeConfigPath(value: string): string {
     if (/[\0\n\r]/.test(value)) {
         throw new ConfigError("config file path may not contain NUL or newline characters");
+    }
+    if (/[\s'"]/.test(value)) {
+        throw new ConfigError(
+            "config file path may not contain whitespace or quote characters - its directory becomes the " +
+                "default known_hosts location, which rsync word-splits out of its -e command string; " +
+                "move the config to a path without spaces or quotes",
+        );
     }
     return resolve(value);
 }
@@ -121,5 +143,6 @@ export function loadConfig(cliArg?: string, options?: LoadConfigOptions): Resolv
         euid: options?.euid !== undefined ? options.euid : (process.getuid?.() ?? null),
         env: options?.env ?? process.env,
         homeDir: options?.homeDir ?? homedir(),
+        platform: options?.platform ?? process.platform,
     });
 }

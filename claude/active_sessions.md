@@ -1,3 +1,1 @@
 # Active sessions
-
-(none)

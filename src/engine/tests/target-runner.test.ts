@@ -246,6 +246,77 @@ describe("runTarget pipeline", () => {
         expect(store.names).toEqual([SNAP]);
     });
 
+    // Retention selects purely on names, so a name dated in the future occupies
+    // every bucket it touches and pushes the GENUINE snapshots into the prune
+    // list. The clock-skew guard is no cover: it reads the listing BEFORE the
+    // transfer, retention re-reads it AFTER, and the party serving the transfer
+    // is exactly the party that can plant snapshot-shaped names inside that
+    // window with jail-legal `mkdir` commands (measured: 30 of 31 real
+    // snapshots put up for deletion).
+    describe("future-dated names planted during the transfer", () => {
+        const FUTURE = ["2099-01-01T000000Z", "2099-02-01T000000Z", "2099-03-01T000000Z"];
+        const GENUINE = ["2026-08-01T000000Z", "2026-08-02T000000Z", "2026-08-03T000000Z"];
+
+        /** A transfer that plants `FUTURE` in the store mid-flight, like a compromised source does. */
+        function plantingTransfer(store: FakeStore): typeof runTransfer {
+            return async (params) => {
+                store.names.push(...FUTURE);
+                return fakeTransfer(makeTransferResult())(params);
+            };
+        }
+
+        it("never capture retention buckets: every genuine snapshot survives", async () => {
+            const store = new FakeStore();
+            store.names = [...GENUINE];
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 3 } }),
+                makeDeps(store, { transfer: plantingTransfer(store) }),
+            );
+            expect(report.status).toBe("success");
+            // keepLast:3 over the genuine names keeps SNAP + the two newest;
+            // only the genuinely-oldest one is pruned.
+            expect(store.names.sort()).toEqual(["2026-08-02T000000Z", "2026-08-03T000000Z", SNAP]);
+        });
+
+        it("are pruned like `backupkit prune` does it, oldest genuine first, and logged loudly", async () => {
+            const store = new FakeStore();
+            store.names = [...GENUINE];
+            const { log, lines } = captureLogger("error");
+            await runTarget(
+                makeTarget({ retention: { keepLast: 3 } }),
+                makeDeps(store, { log, transfer: plantingTransfer(store) }),
+            );
+            expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([
+                // Oldest first, exactly like the genuine half - so the planted
+                // names (which sort after everything) go last.
+                "remove:2026-08-01T000000Z",
+                ...FUTURE.map((name) => `remove:${name}`),
+            ]);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("future"))).toBe(true);
+        });
+
+        it("are kept, never pruned, when nothing genuine survives them (a clock that stepped backwards)", async () => {
+            const store = new FakeStore();
+            store.names = [...GENUINE];
+            // The clock steps back past every existing name (including this run's
+            // own promoted one) between the run's start and retention: with a
+            // 2020 "now" the whole archive looks future-dated, and auto-deleting
+            // it would destroy real data (invariant 26).
+            let clockReads = 0;
+            const report = await runTarget(
+                makeTarget({ retention: { keepLast: 1 } }),
+                makeDeps(store, {
+                    now: () => {
+                        clockReads += 1;
+                        return clockReads === 1 ? NOW : new Date("2020-01-01T00:00:00.000Z");
+                    },
+                }),
+            );
+            expect(report.status).toBe("success");
+            expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
+        });
+    });
+
     // Every transfer runs `--delete --force` and retention selects purely on
     // names and counts, so a compromised source presenting an empty tree on each
     // scheduled run promotes empty snapshots and retention ages the real history

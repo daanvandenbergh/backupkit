@@ -140,10 +140,12 @@ export interface SchedulerDeps {
     /** Newest complete snapshot name for a target (called once per target, then cached from reports). */
     listNewest: (target: ResolvedTarget) => Promise<string | null>;
     /**
-     * Persist a report for a target that never entered the pipeline, and feed
-     * the backoff tracker with it. Used for the due-check failure below: without
-     * it a target whose archive host is unreachable would leave no record at
-     * all, so `status` would keep reporting the last success forever.
+     * Persist a report for a target whose run left no report of its own, and
+     * feed the backoff tracker with it. Used by BOTH failure paths in the tick -
+     * the due-check failure (`due-check-failed`) and an unexpected throw out of
+     * `runTarget` (`run-threw`): without it a target whose archive host is
+     * unreachable, or whose rsync is unusable, would leave no record at all, so
+     * `status` would keep reporting the last success forever.
      */
     recordOutcome: (target: ResolvedTarget, status: RunStatus, reason: string, error: string) => Promise<void>;
     /** The shared backoff tracker (rehydrated by the engine before the loop starts). */
@@ -265,9 +267,25 @@ export class Scheduler {
                     });
                     continue;
                 }
-                this.deps.log.error("target run threw unexpectedly", {
+                // Same silent failure as the due-check catch above, on its
+                // sibling path: this logged and wrote NO report, so
+                // consecutiveFailures stayed 0, backoff never engaged, and
+                // `status` reported the last success forever while nothing ran.
+                // Reachable whenever the local rsync becomes unusable
+                // (uninstalled, downgraded below the 3.2.5 floor, sandboxed away
+                // by ProtectSystem=strict), when the report write inside the
+                // pipeline fails, or on any unexpected throw.
+                const message = String(error);
+                this.deps.log.error("target run threw unexpectedly - recorded as failed", {
                     target: target.name,
-                    error: String(error),
+                    error: message,
+                });
+                // A failing state dir must never end the daemon loop.
+                await this.deps.recordOutcome(target, "failed", "run-threw", message).catch((writeError) => {
+                    this.deps.log.error("could not persist the unexpected-throw failure report", {
+                        target: target.name,
+                        error: String(writeError),
+                    });
                 });
             }
         }

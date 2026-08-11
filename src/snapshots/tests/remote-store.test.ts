@@ -121,6 +121,33 @@ describe("RemoteSnapshotStore", () => {
         });
     });
 
+    // exec() caps captured stdout at 1 MiB keeping the HEAD (invariant 28), so a
+    // listing over the cap comes back as a SHORT, entirely plausible list whose
+    // newest name is months stale - the schedule stops being honoured, the
+    // --link-dest points at an ancient base, and `newestUndeletable` protects the
+    // wrong snapshot. A push client drives the root over the cap with jail-legal
+    // `mkdir` commands, so the flag must be a loud failure, never a short list.
+    describe("truncated remote output", () => {
+        it("refuses a truncated listing instead of treating the head as the whole archive", async () => {
+            const { runner } = fakeRunner((argv) =>
+                argv[0] === "find" ? { stdout: findOutput(ROOT, [OLD, MID]), truncated: true } : {},
+            );
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.listComplete()).rejects.toThrow(/truncated/);
+            await expect(store.listComplete()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
+
+        it("refuses truncated df output too (same chokepoint)", async () => {
+            const { runner } = fakeRunner((argv) =>
+                argv[0] === "df"
+                    ? { stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 5 1 4 21% /\n", truncated: true }
+                    : {},
+            );
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.freeBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
+    });
+
     describe("claimPartial", () => {
         it("sweeps .deleting entries, deletes extra partials, and mv-renames the newest partial", async () => {
             const { runner, calls } = fakeRunner(
@@ -448,20 +475,30 @@ describe("RemoteSnapshotStore", () => {
             }
         });
 
-        it("a lock whose directory cannot be listed is treated as stale", async () => {
-            let lockMkdirs = 0;
-            const { runner } = fakeRunner((argv) => {
+        // "We could not read the lock at all" is strictly LESS information than
+        // "the lock has no marker", which is deliberately treated as HELD - so it
+        // must not be treated as more conclusive. Judging it stale deletes a LIVE
+        // holder's lock and runs two pipelines against one archive root, which is
+        // the single thing this lock exists to prevent.
+        it("a lock whose directory cannot be listed is treated as HELD, never stolen", async () => {
+            const { runner, calls } = fakeRunner((argv) => {
                 if (argv[0] === "mkdir" && argv[1] === "--") {
-                    lockMkdirs += 1;
-                    return { exitCode: lockMkdirs === 1 ? 1 : 0 };
+                    return { exitCode: 1, stderr: "mkdir: File exists" };
                 }
                 if (argv[0] === "find" && argv[1] === LOCK) {
-                    return { exitCode: 1, stderr: "find: no such file" };
+                    return { exitCode: 1, stderr: "find: Permission denied" };
                 }
                 return {};
             });
             const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
-            await expect(store.withLock(async () => "ok")).resolves.toBe("ok");
+            let ran = false;
+            await expect(
+                store.withLock(async () => {
+                    ran = true;
+                }),
+            ).rejects.toBeInstanceOf(LockHeldError);
+            expect(ran).toBe(false);
+            expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
         });
 
         it("second EEXIST after a stale removal is live contention", async () => {

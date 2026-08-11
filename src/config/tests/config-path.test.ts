@@ -170,6 +170,27 @@ describe("resolveConfigPath", () => {
             expect(() => resolvePath(undefined, { BACKUPKIT_CONFIG: value })).toThrow("NUL or newline");
         },
     );
+
+    // ROOT CODE EXECUTION regression. `dirname(configPath)` is where the default
+    // `knownHostsFile` is synthesized - DOWNSTREAM of validate.ts, so it never
+    // saw the no-whitespace rule every other `-e` token obeys. rsync's `-e` value
+    // is a COMMAND STRING it word-splits before exec, so
+    // `--config "/tmp/a -o ProxyCommand=/tmp/evil/x/config.jsonc"` produced the
+    // token `-o ProxyCommand=/tmp/evil/x/known_hosts`, which ssh then executed
+    // through /bin/sh. The benign half is just as fatal: a config on
+    // "/Volumes/My Disk" truncated UserKnownHostsFile and failed every remote
+    // transfer while `check` still reported the host reachable.
+    it.each([
+        ["/tmp/a -o ProxyCommand=/tmp/evil/x/config.jsonc"],
+        ["/Volumes/My Disk/backupkit/config.jsonc"],
+        ["/etc/backupkit/con\tfig.jsonc"],
+        ["/etc/backupkit/'config'.jsonc"],
+        ['/etc/backupkit/"config".jsonc'],
+    ])("rejects a config path containing whitespace or a quote character: %j", (value) => {
+        expect(() => resolvePath(value)).toThrow(ConfigError);
+        expect(() => resolvePath(value)).toThrow("whitespace or quote characters");
+        expect(() => resolvePath(undefined, { BACKUPKIT_CONFIG: value })).toThrow("whitespace or quote characters");
+    });
 });
 
 describe("loadConfig", () => {

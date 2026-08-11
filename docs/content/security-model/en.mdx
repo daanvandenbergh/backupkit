@@ -128,6 +128,10 @@ For each **explicit** remote it also checks the private key and any `file:` pass
 
 **Alias** remotes add nothing to that list. The `ssh_config` files and the keys they name are ssh's own territory, and ssh already refuses a world-readable key. Skipping ssh's files is not a reason to skip backupkit's own.
 
+### Ownership when running as root
+
+The *mode* check (no group or other access) always runs - it is what keeps other unprivileged users out of your keys. The *ownership* check is different: when backupkit runs as **root**, it does **not** require these files to be owned by root. Root can already read, write, and change the owner of any file, so demanding you `chown` your keys to root would add no security - it would only force you to copy them into a root-owned directory for nothing. So a root daemon happily uses your own user-owned keys, config, and state directory exactly where they already live (for example `~/.ssh/id_ed25519`, or an alias remote that reuses your `~/.ssh/config`). When backupkit runs as a **non-root** user, ownership is still enforced: a process using a file owned by a *different* unprivileged user is a real risk, because that user could swap the file out from under it.
+
 Passphrases never appear in a config value, an environment variable, argv, or a log. There are exactly two ways one is ever carried: ssh-add's own terminal prompt (`passphrase: "prompt"`, refused when there is no terminal), or a `0600` askpass file (`passphrase: "file:/abs/path"`). An alias remote cannot carry a passphrase at all - the field is not part of its shape.
 
 ## Harden the archive filesystem

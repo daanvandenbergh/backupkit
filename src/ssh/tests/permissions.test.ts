@@ -24,8 +24,16 @@ function makeDeps(euid: number, entries: Record<string, FileStatInfo>): { deps: 
         created,
         deps: {
             stat: async (path) => entries[path] ?? null,
+            // The real dep is `fsMkdir(path, { recursive: true, mode })`, so it
+            // MATERIALIZES the path and every missing ancestor at that mode -
+            // recording the call without adding the entries modelled a mkdir
+            // that creates nothing, and a later stat of what was just created
+            // would wrongly come back null.
             mkdir: async (path, mode) => {
                 created.push({ path, mode, kind: "dir" });
+                for (let at = path; at !== "/" && at !== "."; at = at.slice(0, at.lastIndexOf("/")) || "/") {
+                    entries[at] ??= dir(mode, euid);
+                }
             },
             createFile: async (path, mode) => {
                 created.push({ path, mode, kind: "file" });
@@ -87,6 +95,7 @@ function goodEntries(euid: number): Record<string, FileStatInfo> {
         "/": dir(0o755, 0),
         "/cfg": dir(0o755, euid),
         "/run": dir(0o755, 0),
+        "/srv": dir(0o755, 0),
         "/keys": dir(0o700, euid),
         "/var/log/backupkit": dir(0o755, euid),
         "/cfg/config.jsonc": file(0o644, euid),
@@ -180,11 +189,31 @@ describe("checkFilePermissions - failing rows", () => {
         await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(message);
     });
 
-    it("root branch: euid 0 rejects a key owned by a non-root uid", async () => {
+    // Intentional exception (security invariant 8): a root process (euid 0) can
+    // read/write/chown any file, so requiring files be chown'd to root is pure
+    // friction. Ownership is waived for root; the MODE check still runs. These
+    // two tests LOCK that - a revert to a "root must own it" rule turns the first
+    // red. Do not delete them to make an audit "pass".
+    it("root (euid 0) accepts a foreign-owned key, config, and stateDir (mode still enforced)", async () => {
         const entries = goodEntries(0);
+        // Everything owned by the operator's normal user (501), not root, good modes.
         entries["/keys/id_ed25519"] = file(0o600, 501);
+        entries["/keys/id_ed25519.pub"] = file(0o644, 501);
+        entries["/keys/id.pass"] = file(0o600, 501);
+        entries["/cfg/config.jsonc"] = file(0o644, 501);
+        entries["/cfg/known_hosts"] = file(0o600, 501);
+        entries["/state"] = dir(0o700, 501);
+        entries["/run/backupkit"] = dir(0o700, 501);
+        entries["/srv/backups"] = dir(0o755, 501);
         const { deps } = makeDeps(0, entries);
-        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(/owned by uid 501/);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).resolves.toBeUndefined();
+    });
+
+    it("root (euid 0) still fails closed on a permissive MODE (ownership waived, mode is not)", async () => {
+        const entries = goodEntries(0);
+        entries["/keys/id_ed25519"] = file(0o640, 501); // group-readable: leaks to other users
+        const { deps } = makeDeps(0, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(/group\/other-accessible/);
     });
 
     it.each([
@@ -209,6 +238,7 @@ describe("checkFilePermissions - alias scoping", () => {
             "/": dir(0o755, 0),
             "/cfg": dir(0o755, 501),
             "/run": dir(0o755, 0),
+            "/srv": dir(0o755, 0),
             "/cfg/config.jsonc": file(0o644, 501),
             "/state": dir(0o700, 501),
             "/run/backupkit": dir(0o700, 501),
@@ -232,6 +262,7 @@ describe("checkFilePermissions - alias scoping", () => {
             "/cfg/config.jsonc",
             "/run",
             "/run/backupkit",
+            "/srv",
             "/srv/backups",
             "/state",
         ]);
@@ -242,6 +273,7 @@ describe("checkFilePermissions - alias scoping", () => {
             "/": dir(0o755, 0),
             "/cfg": dir(0o755, 501),
             "/run": dir(0o755, 0),
+            "/srv": dir(0o755, 0),
             "/cfg/config.jsonc": file(0o666, 501),
             "/state": dir(0o700, 501),
             "/run/backupkit": dir(0o700, 501),
@@ -275,15 +307,47 @@ describe("checkFilePermissions - parent directories", () => {
     // any local user can unlink it and drop their own file in its place, so the
     // parent's mode is part of every checked file's security, not a nicety.
     it.each([
-        ["config file", "/cfg", /config file directory \/cfg is group\/other-writable/],
-        ["private key", "/keys", /private key directory \/keys is group\/other-writable/],
-        ["runtime dir", "/run", /runtime dir directory \/run is group\/other-writable/],
-        ["state dir", "/", /state dir directory \/ is group\/other-writable/],
+        ["config file", "/cfg", /the directory holding the config file, \/cfg is group\/other-writable/],
+        ["private key", "/keys", /the directory holding the private key, \/keys is group\/other-writable/],
+        ["runtime dir", "/run", /the directory holding the runtime dir, \/run is group\/other-writable/],
+        ["state dir", "/", /the directory holding the state dir, \/ is group\/other-writable/],
+        // A destination root got NO parent check at all, so the invariant read
+        // as satisfied while checking nothing there - and the archive root's
+        // parent is what decides who may rename the whole archive away.
+        ["destination root", "/srv", /the directory holding the destination root, \/srv is group\/other-writable/],
     ])("fails when the %s's parent is group/other-writable", async (_label, parent, message) => {
         const entries = goodEntries(501);
         entries[parent] = dir(0o777, 0);
         const { deps } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(message);
+    });
+
+    // A directory's OWNER has full write+unlink rights over every child name
+    // regardless of its mode, which is exactly the capability this rule exists to
+    // deny. `requireOwner` was null on every directory row, so /opt/bk owned by
+    // uid 1000 at mode 0700 holding a root-owned 0600 key PASSED the preflight.
+    it.each([
+        ["config file", "/cfg", /the directory holding the config file, \/cfg is owned by uid 1000/],
+        ["private key", "/keys", /the directory holding the private key, \/keys is owned by uid 1000/],
+        ["runtime dir", "/run", /the directory holding the runtime dir, \/run is owned by uid 1000/],
+        ["state dir", "/", /the directory holding the state dir, \/ is owned by uid 1000/],
+        ["destination root", "/srv", /the directory holding the destination root, \/srv is owned by uid 1000/],
+    ])("fails when the %s's parent is owned by another uid", async (_label, parent, message) => {
+        const entries = goodEntries(501);
+        entries[parent] = dir(0o700, 1000);
+        const { deps } = makeDeps(501, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(message);
+    });
+
+    it("a destination root owned by another uid fails even at mode 0755", async () => {
+        // Demonstrated gap: /srv/archive uid 1000 mode 0755 passed, and its owner
+        // can unlink or replace every snapshot directory under it.
+        const entries = goodEntries(501);
+        entries["/srv/backups"] = dir(0o755, 1000);
+        const { deps } = makeDeps(501, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(
+            /destination root \/srv\/backups is owned by uid 1000/,
+        );
     });
 
     it("the passphrase file's own parent is checked when it differs from the key's", async () => {
@@ -293,7 +357,7 @@ describe("checkFilePermissions - parent directories", () => {
         const remote: ResolvedRemote = { ...EXPLICIT, passphrase: { kind: "file", value: "/secrets/id.pass" } };
         const { deps } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([remote]), deps)).rejects.toThrowError(
-            /passphrase file directory \/secrets is group\/other-writable/,
+            /the directory holding the passphrase file, \/secrets is group\/other-writable/,
         );
     });
 
@@ -303,9 +367,41 @@ describe("checkFilePermissions - parent directories", () => {
         const remote: ResolvedRemote = { ...EXPLICIT, knownHostsFile: "/hosts/known_hosts" };
         const { deps, created } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([remote]), deps)).rejects.toThrowError(
-            /known_hosts directory \/hosts is group\/other-writable/,
+            /the directory holding the known_hosts, \/hosts is group\/other-writable/,
         );
         expect(created).toEqual([]);
+    });
+
+    // backupkit's OWN private directories are CREATED, then their parent is
+    // judged. The default runtime dir for a non-root user is `~/.backupkit/run`,
+    // and `~/.backupkit` exists on no fresh machine - checking the parent first
+    // made the FIRST command any user ever ran die on "~/.backupkit does not
+    // exist", a directory they never chose. Nothing else catches this: every
+    // other fixture pre-creates the parent.
+    it("creates its own runtime/state dirs when their parent does not exist yet", async () => {
+        const entries = goodEntries(501);
+        delete entries["/run"];
+        delete entries["/run/backupkit"];
+        delete entries["/state"];
+        const { deps, created } = makeDeps(501, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).resolves.toBeUndefined();
+        expect(created).toEqual([
+            { path: "/run/backupkit", mode: 0o700, kind: "dir" },
+            { path: "/state", mode: 0o700, kind: "dir" },
+        ]);
+    });
+
+    // ...but a parent that ALREADY exists and is group/other-writable still
+    // fails: creating a 0700 directory inside it stores nothing, and the check
+    // that follows is the same one as before.
+    it("still refuses a pre-existing world-writable parent for a dir it creates", async () => {
+        const entries = goodEntries(501);
+        delete entries["/run/backupkit"];
+        entries["/run"] = dir(0o777, 0);
+        const { deps } = makeDeps(501, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(
+            /the directory holding the runtime dir, \/run is group\/other-writable/,
+        );
     });
 
     it("a missing parent directory fails closed", async () => {
@@ -313,7 +409,7 @@ describe("checkFilePermissions - parent directories", () => {
         delete entries["/keys"];
         const { deps } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(
-            /private key directory \/keys does not exist/,
+            /the directory holding the private key does not exist: \/keys/,
         );
     });
 
@@ -322,7 +418,7 @@ describe("checkFilePermissions - parent directories", () => {
         entries["/keys"] = file(0o600, 501);
         const { deps } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([EXPLICIT]), deps)).rejects.toThrowError(
-            /private key directory \/keys is not a directory/,
+            /the directory holding the private key is not a directory: \/keys/,
         );
     });
 
@@ -370,6 +466,9 @@ describe("checkFilePermissions - logging.file", () => {
         expect(created).toEqual([]);
     });
 
+    // 0640 is the floor, not 0600, because newsyslog recreates the rotated log
+    // as `root:wheel 640` (see NEWSYSLOG_CONF) - anything stricter would fail
+    // every preflight after the first macOS rotation.
     it("an existing 0640 log file owned by euid passes", async () => {
         const entries = goodEntries(501);
         entries[LOG_PATH] = file(0o640, 501);
@@ -377,22 +476,39 @@ describe("checkFilePermissions - logging.file", () => {
         await expect(checkFilePermissions(baseInput([EXPLICIT], LOG_PATH), deps)).resolves.toBeUndefined();
     });
 
-    it("an existing root-owned log file passes for a non-root euid", async () => {
+    it("an existing root-owned 0600 log file passes for a non-root euid", async () => {
         const entries = goodEntries(501);
-        entries[LOG_PATH] = file(0o644, 0);
+        entries[LOG_PATH] = file(0o600, 0);
         const { deps } = makeDeps(501, entries);
         await expect(checkFilePermissions(baseInput([EXPLICIT], LOG_PATH), deps)).resolves.toBeUndefined();
     });
 
+    // backupkit CREATES this file 0600 and then appends target names, remote
+    // names, jail roots and private-key paths to it. A pre-existing 0644 log was
+    // accepted and appended to forever, so every local user could read all of
+    // that - the accepted state must never be weaker than the state we produce.
     it.each([
-        ["log directory missing", "/var/log/backupkit", null, /log file directory \/var\/log\/backupkit does not exist/],
+        ["world-readable (0644)", file(0o644, 501)],
+        ["other-readable only (0604)", file(0o604, 501)],
+        ["group-executable (0650)", file(0o650, 501)],
+    ])("fails on a pre-existing %s log file", async (_label, info) => {
+        const entries = goodEntries(501);
+        entries[LOG_PATH] = info;
+        const { deps } = makeDeps(501, entries);
+        await expect(checkFilePermissions(baseInput([EXPLICIT], LOG_PATH), deps)).rejects.toThrowError(
+            /log file .* is group\/other-accessible/,
+        );
+    });
+
+    it.each([
+        ["log directory missing", "/var/log/backupkit", null, /the directory holding the log file does not exist: \/var\/log\/backupkit/],
         [
             "log directory group/other-writable",
             "/var/log/backupkit",
             dir(0o777, 0),
-            /log file directory \/var\/log\/backupkit is group\/other-writable/,
+            /the directory holding the log file, \/var\/log\/backupkit is group\/other-writable/,
         ],
-        ["log directory is a file", "/var/log/backupkit", file(0o644, 501), /log file directory .* is not a directory/],
+        ["log directory is a file", "/var/log/backupkit", file(0o644, 501), /the directory holding the log file is not a directory: .*/],
         ["log file group-writable", LOG_PATH, file(0o664, 501), /log file .* is group\/other-writable/],
         ["log file foreign-owned", LOG_PATH, file(0o644, 777), /log file .* owned by uid 777/],
         ["log file is a symlink or fifo", LOG_PATH, other(0o644, 501), /log file .* is not a regular file/],

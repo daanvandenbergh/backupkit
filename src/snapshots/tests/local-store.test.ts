@@ -1,4 +1,4 @@
-import { link, mkdir, mkdtemp, readdir, rm, stat, statfs, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, readdir, rm, stat, statfs, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -134,6 +134,38 @@ describe("LocalSnapshotStore", () => {
             await writeFile(join(root, `${MID}.partial`, "nested", "deep.txt"), "x");
             await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: true });
             expect((await readdir(root)).sort()).toEqual([`${NEW}.partial`]);
+        });
+
+        // Regression (CRITICAL): the surviving partial becomes THIS run's rsync
+        // destination, and the transfer argv carries `--delete --force`. A
+        // `<snap>.partial` SYMLINK planted in the archive root was adopted with
+        // resumed:true - the hardlink guard's `readdir` FOLLOWS the link, finds
+        // an ordinary tree and waved it through - after which real rsync with
+        // the production argv reported "Number of deleted files: 3" against the
+        // link's TARGET, outside the archive, and promote renamed the link to
+        // the snapshot name so the "snapshot" was a link to data living outside
+        // the archive.
+        it("discards a partial that is a symlink, and unlinks it without touching the target", async () => {
+            const victim = join(tmp, "victim");
+            await mkdir(victim, { recursive: true });
+            await writeFile(join(victim, "precious.txt"), "do not delete");
+            await mkdir(root, { recursive: true });
+            await symlink(victim, join(root, `${MID}.partial`));
+            await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: false });
+            // The link is gone from the archive and its target is intact.
+            expect(await readdir(root)).toEqual([]);
+            expect(await readdir(victim)).toEqual(["precious.txt"]);
+        });
+
+        it("discards a symlinked partial even when it is the newest of several", async () => {
+            const victim = join(tmp, "victim");
+            await mkdir(victim, { recursive: true });
+            await writeFile(join(victim, "precious.txt"), "do not delete");
+            await makeDir(`${OLD}.partial`);
+            await symlink(victim, join(root, `${MID}.partial`));
+            await expect(store.claimPartial(NEW)).resolves.toEqual({ resumed: false });
+            expect(await readdir(root)).toEqual([]);
+            expect(await readdir(victim)).toEqual(["precious.txt"]);
         });
 
         it("discards a partial whose hardlink sits in a nested directory", async () => {

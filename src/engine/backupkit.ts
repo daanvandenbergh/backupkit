@@ -52,7 +52,7 @@ type ExecFn = (bin: string, args: readonly string[], options?: ExecOptions) => P
 export interface BackupkitDeps {
     /** Clock. Default `() => new Date()`. */
     now?: () => Date;
-    /** Runtime dir override (agent socket home). Default per spec: /run/backupkit (root), $XDG_RUNTIME_DIR/backupkit, else ~/.backupkit/run. */
+    /** Runtime dir override (agent socket home). Default (root) /run/backupkit on Linux, /var/run/backupkit on macOS; else $XDG_RUNTIME_DIR/backupkit, else ~/.backupkit/run. */
     runtimeDir?: string;
     /** Process environment seam (SSH_AUTH_SOCK, XDG_RUNTIME_DIR). Default process.env. */
     env?: Record<string, string | undefined>;
@@ -133,10 +133,29 @@ function fileSinkFor(path: string): (line: string) => void {
     };
 }
 
+/**
+ * How many log lines are held while `logging.file` is still unjudged. Only the
+ * constructor's config warnings and whatever a verb logs before its preflight
+ * land here, so the cap is a memory backstop for a process that never
+ * preflights (`status`), not a working buffer.
+ * ponytail: fixed 512 - a knob only if some verb ever logs more than that
+ * before its gate.
+ */
+const PENDING_LOG_LINES_MAX = 512;
+
 /** The default runtime directory for the given identity (spec section 4). */
-function defaultRuntimeDir(env: Record<string, string | undefined>, euid: number | null, home: string): string {
+export function defaultRuntimeDir(
+    env: Record<string, string | undefined>,
+    euid: number | null,
+    home: string,
+    platform: NodeJS.Platform,
+): string {
     if (euid === 0) {
-        return "/run/backupkit";
+        // Linux keeps /run (a tmpfs the systemd unit's RuntimeDirectory= owns).
+        // macOS has no /run - a root LaunchDaemon must use /var/run, which
+        // exists and is root-writable; otherwise creating the agent-socket dir
+        // fails and launchd crash-loops the daemon ("loaded", no pid, no logs).
+        return platform === "darwin" ? "/var/run/backupkit" : "/run/backupkit";
     }
     if (env.XDG_RUNTIME_DIR !== undefined && env.XDG_RUNTIME_DIR !== "") {
         return join(env.XDG_RUNTIME_DIR, "backupkit");
@@ -224,6 +243,15 @@ export class Backupkit {
     /** The root logger (config level, optional file sink). */
     private readonly log: Logger;
 
+    /** The real `logging.file` append sink, or null when file logging is off. */
+    private fileSink: ((line: string) => void) | null = null;
+
+    /** Set once the preflight has judged `logging.file`; until then the sink only buffers. */
+    private logFileTrusted = false;
+
+    /** Lines logged before that judgement, flushed by it (capped at PENDING_LOG_LINES_MAX). */
+    private readonly pendingLogLines: string[] = [];
+
     /** The runtime directory holding the agent socket. */
     private readonly runtimeDir: string;
 
@@ -292,14 +320,61 @@ export class Backupkit {
             new Logger({
                 level: config.logging.level,
                 now: this.deps.now,
-                fileSink: config.logging.file === null ? undefined : fileSinkFor(config.logging.file),
+                fileSink: config.logging.file === null ? undefined : this.deferredFileSink(config.logging.file),
             });
         this.backoff = new BackoffTracker(this.log);
         this.runtimeDir =
             deps.runtimeDir ??
-            defaultRuntimeDir(this.deps.env, this.deps.permissionDeps.euid, this.deps.env.HOME ?? homedir());
+            defaultRuntimeDir(this.deps.env, this.deps.permissionDeps.euid, this.deps.env.HOME ?? homedir(), process.platform);
         for (const warning of config.warnings) {
             this.log.warn(warning);
+        }
+    }
+
+    /**
+     * The `logging.file` sink, held CLOSED until `checkFilePermissions` has
+     * judged the path (invariant 8: nothing privileged before the gate). The
+     * constructor wires the sink and then immediately emits `config.warnings`, so
+     * the first thing every verb used to do as root was
+     * `openSync(path, O_CREAT|O_APPEND, 0600)` plus a write - upstream of the
+     * config-file permission row and of `checkLoggingFile`. With a
+     * group/other-writable config that turned `"logging": {"file": "<anything>"}`
+     * into a root-owned 0600 file at an attacker-chosen path, or an append to an
+     * existing root-owned one (`/etc/sudoers.d/*` -> parse error -> sudo refuses
+     * everything). `O_NOFOLLOW` only closed the symlink variant of that; nothing
+     * closed the direct path.
+     *
+     * Buffering rather than dropping the sink, because the alternative loses the
+     * config warnings entirely - they are emitted before any verb runs, and they
+     * are exactly what an operator needs. It also keeps the fail-safe property
+     * intact: the buffer and the flush cannot throw, so a log line still cannot
+     * kill the call site that logged it. Lines held by a process that never
+     * preflights (`status`) are dropped at exit; stdout/stderr logging carries
+     * them regardless.
+     */
+    private deferredFileSink(path: string): (line: string) => void {
+        this.fileSink = fileSinkFor(path);
+        return (line): void => {
+            if (this.logFileTrusted) {
+                this.fileSink?.(line);
+                return;
+            }
+            if (this.pendingLogLines.length < PENDING_LOG_LINES_MAX) {
+                this.pendingLogLines.push(line);
+            }
+        };
+    }
+
+    /** Open the log sink and drain everything buffered before the gate passed. Never throws (the sink swallows its own failures). */
+    private trustLogFile(): void {
+        this.logFileTrusted = true;
+        const sink = this.fileSink;
+        const pending = this.pendingLogLines.splice(0);
+        if (sink === null) {
+            return;
+        }
+        for (const line of pending) {
+            sink(line);
         }
     }
 
@@ -333,6 +408,9 @@ export class Backupkit {
             },
             this.deps.permissionDeps,
         );
+        // The log path has now been judged (`checkLoggingFile`): open the sink
+        // and drain what was logged before this point.
+        this.trustLogFile();
         // Key priming is per-remote fault-isolated (spec section 4 step 5): a
         // remote whose key cannot be primed lands in keyFailures and only its
         // targets fail in the run loop - preflight still succeeds, so the daemon
@@ -373,9 +451,33 @@ export class Backupkit {
      * every remote transfer, estimate and restore failed. THE one producer of
      * that command - the transfer path and restore both come through here, so
      * they cannot drift apart again.
+     *
+     * Being a command string is also why every token has to be free of
+     * whitespace and quotes: rsync word-splits the value, so one space turns the
+     * remainder of a token into EXTRA ssh arguments. `validate.ts` enforces that
+     * on every explicitly-written path, but the default `knownHostsFile` is
+     * synthesized from `configPath` downstream of that gate - which made
+     * `--config "/tmp/a -o ProxyCommand=/tmp/evil/x/config.jsonc"` emit the token
+     * `-o ProxyCommand=/tmp/evil/x/known_hosts` and ssh execute it as root
+     * (config.ts now refuses such a path). This is the boundary assertion for the
+     * NEXT path that reintroduces whitespace: throw here, never sanitize - a
+     * silently rewritten known_hosts or identity path is a host-key check
+     * pointed at the wrong file.
      */
     private sshCommandFor(remote: ResolvedRemote | null): string[] {
-        return remote === null ? [] : [this.sshBin(), ...sshArgs(remote, "unattended")];
+        if (remote === null) {
+            return [];
+        }
+        const tokens = [this.sshBin(), ...sshArgs(remote, "unattended")];
+        for (const token of tokens) {
+            if (/[\s'"]/.test(token)) {
+                throw new ConfigError(
+                    `refusing to build the rsync -e command for remote ${remote.name}: token "${sanitize(token)}" ` +
+                        "contains whitespace or quote characters, which rsync would split into further ssh arguments",
+                );
+            }
+        }
+        return tokens;
     }
 
     /** Whether an interactive TTY is available (deps override, else the real stdin) - the accept-new gate of invariant 5. */
@@ -710,13 +812,29 @@ export class Backupkit {
         }
     }
 
-    /** The run() pass over the selected targets, threaded with the abort signal. */
+    /**
+     * The run() pass over the selected targets, threaded with the abort signal.
+     *
+     * A lock held on ONE target is contained to that target, exactly as the
+     * scheduler's tick has always contained it: the pipeline lets `LockHeldError`
+     * escape, `runOne` records the skipped report for the locked target, and the
+     * pass moves on to the next one. Letting it unwind the invocation meant every
+     * LATER target of a one-shot `backupkit run` silently never ran - no report,
+     * no log line naming it - so `status` showed them with their last successful
+     * snapshot, `success`, 0 failures, while a remote lock nobody releases kept
+     * them from backing up for weeks.
+     *
+     * The invocation's own outcome is unchanged: the first lock-held error is
+     * rethrown once the pass has finished, so `backupkit run` still exits 3 and a
+     * cron wrapper still alarms.
+     */
     private async runPass(
         startedAt: string,
         signal: AbortSignal,
         options: { targets?: string[]; force?: boolean; dryRun?: boolean },
     ): Promise<RunReport> {
         const reports: TargetRunReport[] = [];
+        let lockHeld: unknown = null;
         for (const target of this.selectTargets(options.targets)) {
             // A stop() during the pass aborts the in-flight target and starts no further one.
             if (signal.aborted) {
@@ -743,7 +861,24 @@ export class Backupkit {
                     continue;
                 }
             }
-            reports.push(await this.runOne(target, { force: options.force, dryRun: options.dryRun, signal }));
+            try {
+                reports.push(await this.runOne(target, { force: options.force, dryRun: options.dryRun, signal }));
+            } catch (error) {
+                if (!isBackupkitError(error) || error.code !== "lock-held") {
+                    throw error;
+                }
+                // runOne has already persisted this target's skipped report, so
+                // `status` and the backoff history see it; nothing is pushed into
+                // `reports` because the rethrow below discards them anyway.
+                this.log.warn("destination lock held - target skipped, continuing with the remaining targets", {
+                    target: target.name,
+                    error: sanitize(error.message),
+                });
+                lockHeld ??= error;
+            }
+        }
+        if (lockHeld !== null) {
+            throw lockHeld;
         }
         return { startedAt, finishedAt: this.deps.now().toISOString(), targets: reports };
     }
@@ -1064,11 +1199,43 @@ export class Backupkit {
      * Readiness gate (spec section 7): verify local binaries + versions, run
      * the interactive key flow, probe each remote (TOFU pinning happens by
      * running the probe in interactive context on a TTY), resolve aliases via
-     * `ssh -G`, and produce jail-line DATA for push targets - printing is the
-     * CLI's job.
+     * `ssh -G`, and produce jail-line DATA for push targets with the jail
+     * enabled (`jail: false` targets are omitted; the jail is never probed) -
+     * printing is the CLI's job.
+     *
+     * The trust gate runs FIRST, and a failed gate ENDS the verb (invariant 8).
+     * Two bugs lived in the old order. The local probes came before
+     * `preflight()`, so `rsyncBin`/`sshBin` - values read from a config the gate
+     * had not yet judged - were SPAWNED as root: with a group/other-writable
+     * config a local user set `"rsyncBin": "/tmp/evil"` and the next
+     * `backupkit check` (the very command `init` tells the operator to run) ran
+     * their binary. And a failed gate was merely collected into `errors[]`,
+     * after which check went on to open ssh to every remote with the key and
+     * `known_hosts` it had just condemned - on a TTY pinning fresh host keys into
+     * an untrusted pin store.
+     *
+     * `check` is still the diagnostic verb, so it reports as much as it can
+     * rather than throwing on the first problem: the gate failure and every
+     * per-remote key-priming failure land in `errors[]` and the caller gets a
+     * complete `ok: false` report. What it must not do is act on an untrusted
+     * config, so once the gate has failed there is no spawn, no ssh, and no
+     * reading of config-named files (the `.pub` sidecar included) - the report
+     * comes back with the local rows unknown and no remote rows at all.
      */
     async check(): Promise<CheckReport> {
         const errors: string[] = [];
+        try {
+            await this.preflight();
+            // Per-remote priming failures do not fail preflight (fault isolation),
+            // but check() is the diagnostic surface: report each one loudly.
+            for (const [remoteName, message] of this.keyFailures) {
+                errors.push(`remote ${remoteName}: ${message}`);
+            }
+        } catch (error) {
+            errors.push(sanitize(error instanceof Error ? error.message : String(error)));
+            return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], errors };
+        }
+
         let localRsync: { bin: string; version: string } | null = null;
         try {
             localRsync = await this.localRsync();
@@ -1084,16 +1251,6 @@ export class Backupkit {
             }
         } catch (error) {
             errors.push(`ssh binary not found: ${sanitize(error instanceof Error ? error.message : String(error))}`);
-        }
-        try {
-            await this.preflight();
-            // Per-remote priming failures do not fail preflight (fault isolation),
-            // but check() is the diagnostic surface: report each one loudly.
-            for (const [remoteName, message] of this.keyFailures) {
-                errors.push(`remote ${remoteName}: ${message}`);
-            }
-        } catch (error) {
-            errors.push(sanitize(error instanceof Error ? error.message : String(error)));
         }
 
         const remoteChecks: RemoteCheck[] = [];

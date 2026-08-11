@@ -129,6 +129,54 @@ describe("Logger sanitization", () => {
     });
 });
 
+describe("Logger field quoting", () => {
+    /** Read a line back the way a logfmt/journald field extractor would. */
+    function fields(line: string): Record<string, string> {
+        const out: Record<string, string> = {};
+        for (const [, key, raw] of line.matchAll(/([\w.-]+)=("(?:[^"\\]|\\.)*"|[^\s\]]*)/g)) {
+            out[key] = raw.startsWith('"') ? (JSON.parse(raw) as string) : raw;
+        }
+        return out;
+    }
+
+    // Regression: `sanitize` strips control characters - so a forged whole LINE
+    // is impossible - but leaves SPACE and `=` untouched, so a compromised
+    // peer's rsync/ssh stderr tail survived it byte-identically inside the
+    // `error=` field of a genuine ERROR line, and a field extractor over that
+    // line yielded `status: success` plus an attacker-chosen `target=`: a
+    // failure line that parses as a success, which is a cheap way to stop an
+    // alert rule firing.
+    it("a value containing key=value text stays ONE quoted token and forges no fields", () => {
+        const { logger, stderr } = testLogger();
+        const forged = "rsync: [sender] failed status=success target=payroll consecutiveFailures=0";
+        logger.with({ target: "web1" }).error("transfer failed", { error: forged });
+        const line = stderr.chunks[0].trimEnd();
+        expect(line).toBe(
+            `2026-08-10T03:15:00.123Z ERROR [target=web1] transfer failed error=${JSON.stringify(forged)}`,
+        );
+        expect(fields(line)).toEqual({ target: "web1", error: forged });
+        // Still one physical line: quoting never introduces a newline.
+        expect(line.includes("\n")).toBe(false);
+    });
+
+    it("quotes an empty value and a value containing a quote, and leaves ordinary values bare", () => {
+        const { logger, stdout } = testLogger();
+        logger.info("m", { empty: "", quoted: 'say "hi"', plain: "web1-var-www", n: 7, ok: false });
+        const line = stdout.chunks[0].trimEnd();
+        expect(line).toContain('empty=""');
+        expect(line).toContain('quoted="say \\"hi\\""');
+        // Greppable as before for everything that does not need quoting.
+        expect(line).toContain("plain=web1-var-www n=7 ok=false");
+        expect(fields(line).quoted).toBe('say "hi"');
+    });
+
+    it("quotes context fields too - a target name is remote-influenced as well", () => {
+        const { logger, stdout } = testLogger();
+        logger.with({ run: "r 1" }).info("m");
+        expect(stdout.chunks[0]).toBe('2026-08-10T03:15:00.123Z INFO  [run="r 1"] m\n');
+    });
+});
+
 describe("Logger file sink", () => {
     it("receives every emitted line (without the newline) across both streams", () => {
         const lines: string[] = [];

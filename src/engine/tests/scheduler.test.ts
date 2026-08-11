@@ -343,6 +343,75 @@ describe("Scheduler loop (fake timers)", () => {
         await loop;
     });
 
+    // Regression: the sibling of the due-check catch above logged "target run
+    // threw unexpectedly" and wrote NO report, so the identical silent failure
+    // was still live on that path - reachable whenever the local rsync becomes
+    // unusable (uninstalled, downgraded below the 3.2.5 floor, sandboxed away by
+    // ProtectSystem=strict), when the report write itself fails, or on any
+    // unexpected throw. Demonstrated with a throwing rsync probe: three ticks
+    // logged an error each and the persisted state still read lastResult
+    // "success", consecutiveFailures 0.
+    it("an unexpected throw out of runTarget is recorded as a failed run too", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { scheduler, tracker, recorded } = makeLoop({
+            targets: [target],
+            outcome: () => {
+                throw new Error("rsync 3.1.3 is below the 3.2.5 floor");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].status).toBe("failed");
+        // Distinguishable from the due-check path.
+        expect(recorded[0].reason).toBe("run-threw");
+        expect(recorded[0].error).toContain("3.2.5 floor");
+        expect(tracker.failuresFor("web")).toBe(1);
+        expect(tracker.untilFor("web")).not.toBeNull();
+        scheduler.stop();
+        await loop;
+    });
+
+    it("a lock-held throw stays a warn-and-skip: no failure report, no backoff", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { scheduler, tracker, recorded } = makeLoop({
+            targets: [target],
+            outcome: () => {
+                throw new LockHeldError("another backupkit holds it");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(recorded).toEqual([]);
+        expect(tracker.failuresFor("web")).toBe(0);
+        scheduler.stop();
+        await loop;
+    });
+
+    it("a failing report write after an unexpected throw never ends the daemon loop", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { log } = captureLogger("error");
+        const tracker = new BackoffTracker(log);
+        const scheduler = new Scheduler({
+            targets: [target],
+            log,
+            now: () => new Date(),
+            tickMs: 30_000,
+            backoff: tracker,
+            listNewest: async () => null,
+            runTarget: async () => {
+                throw new Error("rsync vanished");
+            },
+            recordOutcome: async () => {
+                throw new Error("state dir is read-only");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        scheduler.stop();
+        await expect(loop).resolves.toBeUndefined();
+    });
+
     it("a failing report write never ends the daemon loop", async () => {
         const target = makeTarget({ name: "web", schedule: HOURLY });
         const { log } = captureLogger("error");

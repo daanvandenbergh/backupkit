@@ -81,8 +81,8 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
         "keepMonthly": 12,  // newest per month, 12 months
     },
 
-    // Run reports live here. Default: /var/lib/backupkit (root),
-    // else ~/.local/state/backupkit.
+    // Run reports live here. Default (root): /var/lib/backupkit on Linux,
+    // /var/db/backupkit on macOS; else ~/.local/state/backupkit.
     // "stateDir": "/var/lib/backupkit",
 
     // "error" | "warn" | "info" | "debug"; optional "file" for a log path.

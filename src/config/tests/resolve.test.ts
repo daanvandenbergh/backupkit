@@ -11,7 +11,7 @@ const REMOTE = { host: "10.0.0.11", user: "backup-reader", identityFile: "/etc/b
 const TARGET = { direction: "pull", remote: "r1", source: "/var/www", destination: "/srv/backups" };
 
 /** Default non-root environment fixture. */
-const USER_ENV: ResolveEnvironment = { euid: 501, env: {}, homeDir: "/home/u" };
+const USER_ENV: ResolveEnvironment = { euid: 501, env: {}, homeDir: "/home/u", platform: "linux" };
 
 /** Validate + resolve a plain object config with a fixed config path. */
 function resolve(config: unknown, environment: ResolveEnvironment = USER_ENV): ResolvedConfig {
@@ -144,12 +144,18 @@ describe("resolveConfig defaults", () => {
 });
 
 describe("stateDir default", () => {
-    it("is /var/lib/backupkit for root", () => {
-        expect(resolve(minimal(), { euid: 0, env: {}, homeDir: "/root" }).stateDir).toBe("/var/lib/backupkit");
+    it("is /var/lib/backupkit for root on linux", () => {
+        expect(resolve(minimal(), { euid: 0, env: {}, homeDir: "/root", platform: "linux" }).stateDir).toBe("/var/lib/backupkit");
+    });
+
+    it("is /var/db/backupkit for root on macOS, which has no /var/lib", () => {
+        expect(resolve(minimal(), { euid: 0, env: {}, homeDir: "/var/root", platform: "darwin" }).stateDir).toBe(
+            "/var/db/backupkit",
+        );
     });
 
     it("honors XDG_STATE_HOME for non-root", () => {
-        expect(resolve(minimal(), { euid: 501, env: { XDG_STATE_HOME: "/xdg/state" }, homeDir: "/home/u" }).stateDir).toBe(
+        expect(resolve(minimal(), { euid: 501, env: { XDG_STATE_HOME: "/xdg/state" }, homeDir: "/home/u", platform: "linux" }).stateDir).toBe(
             "/xdg/state/backupkit",
         );
     });
@@ -159,7 +165,7 @@ describe("stateDir default", () => {
     });
 
     it("a configured stateDir wins over every default", () => {
-        expect(resolve(minimal({ top: { stateDir: "/data/state" } }), { euid: 0, env: {}, homeDir: "/root" }).stateDir).toBe(
+        expect(resolve(minimal({ top: { stateDir: "/data/state" } }), { euid: 0, env: {}, homeDir: "/root", platform: "linux" }).stateDir).toBe(
             "/data/state",
         );
     });

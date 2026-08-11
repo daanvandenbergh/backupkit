@@ -14,6 +14,7 @@ import type { ResolvedConfig, ResolvedTarget } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import type { RsyncStats, TransferAttempt, TransferResult } from "../../rsync/rsync.js";
 import type { SnapshotStore } from "../../snapshots/store.js";
+import { newestUndeletable } from "../../snapshots/types.js";
 import { Backupkit, type BackupkitDeps } from "../backupkit.js";
 
 /** A logger writing into an in-memory line buffer, for asserting log output. */
@@ -53,6 +54,9 @@ export class FakeStore implements SnapshotStore {
     /** When set, withLock throws this instead of running fn (live contention). */
     failLock: LockHeldError | null = null;
 
+    /** Clock behind the newest-complete deletion floor (the real stores take one too). */
+    now: () => Date = () => new Date();
+
     /** Complete names, sorted ascending. */
     async listComplete(): Promise<string[]> {
         this.calls.push("listComplete");
@@ -81,11 +85,16 @@ export class FakeStore implements SnapshotStore {
         this.names.push(name);
     }
 
-    /** Delete a complete snapshot, refusing the newest (mirrors the real store's floor). */
+    /**
+     * Delete a complete snapshot, refusing the newest - where "newest" is what
+     * both real stores mean by it: the newest GENUINELY dated name
+     * (`newestUndeletable`), so a future-dated name a jailed writer planted is
+     * deletable while real history exists.
+     */
     async remove(name: string): Promise<void> {
         this.calls.push(`remove:${name}`);
         const sorted = [...this.names].sort();
-        if (sorted.at(-1) === name) {
+        if (newestUndeletable(sorted, this.now()) === name) {
             throw new Error(`refusing to delete the newest complete snapshot ${name}`);
         }
         this.names = this.names.filter((entry) => entry !== name);

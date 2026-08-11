@@ -2,11 +2,12 @@
  * The ONE lock mechanism both snapshot stores share (spec section 6): an
  * atomic `mkdir <root>/.backupkit.lock` followed by meta recording
  * `{ pid, pidStartTime, hostname, createdAt }`. The acquire algorithm is
- * identical for both stores - mkdir, on EEXIST inspect for staleness, remove a
- * stale lock and re-attempt exactly once, second EEXIST = live contention
- * (`LockHeldError`) - only the primitives differ (fs vs `runRemote`), injected
- * via `LockBackend`. Release is structural: `withLockScope` releases in
- * `finally`, so leaking a lock is unrepresentable. The lock-acquire mkdir is
+ * identical for both stores - mkdir, on EEXIST inspect for staleness, steal a
+ * stale lock (a COMPARE-and-delete, never a blind one: see `acquire`) and
+ * re-attempt exactly once, second EEXIST = live contention (`LockHeldError`) -
+ * only the primitives differ (fs vs `runRemote`), injected via `LockBackend`.
+ * Release is structural: `withLockScope` releases in `finally`, so leaking a
+ * lock is unrepresentable. The lock-acquire mkdir is
  * deliberately never retry-wrapped at ANY layer: EEXIST is its contention
  * signal, so a re-sent mkdir would read this process's own fresh lock as
  * contention. The local backend gets that for free (one `fs.mkdir` call); the
@@ -61,6 +62,14 @@ export interface LockBackend {
     inspect(): Promise<LockInspection>;
     /** Remove the lock directory and everything in it. */
     remove(): Promise<void>;
+    /**
+     * Remove the lock ONLY if it is still the exact instance the backend's last
+     * `inspect()` judged; false when it changed or vanished (another contender
+     * settled it). This is the compare-and-delete the stale-lock steal needs -
+     * see `acquire` for the race a blind `remove()` loses. Optional: a backend
+     * that cannot compare instances omits it and keeps the blind steal.
+     */
+    removeIfUnchanged?(): Promise<boolean>;
 }
 
 /**
@@ -68,6 +77,30 @@ export interface LockBackend {
  * warn and the mkdir re-attempted exactly once; a live lock or a second EEXIST
  * throws `LockHeldError` with the recorded holder identity. A failure to write
  * the meta rolls the fresh lock back before rethrowing.
+ *
+ * The steal is a compare-and-delete, not a blind delete, and that is
+ * load-bearing: `remove()` deletes whatever sits at the lock path NOW, which is
+ * not necessarily the instance `inspect()` judged one round-trip ago. With a
+ * blind delete, two contenders over ONE pre-existing stale lock both ended up
+ * holding it - A removed the stale lock, acquired, wrote its meta and entered
+ * the critical section; B, one round-trip behind and still holding its own
+ * stale observation, removed A's LIVE lock and acquired too (measured over a
+ * fake jail runner with realistic per-command latency: at a 200 ms stagger both
+ * were inside at once, and a two-round-trip stagger is the ordinary case for two
+ * processes contending over ssh). The damage was silent: B's `claimPartial`
+ * renamed A's in-flight `<snapA>.partial` away, A kept writing into a recreated
+ * one holding only the post-rename remainder, promoted that truncated tree and
+ * reported success - and both releases then deleted an already-gone lock with
+ * `force`, so nothing was logged.
+ *
+ * Residual, stated precisely: neither `node:fs` nor the jailed `rm -rf` surface
+ * offers a true atomic compare-and-delete, so `removeIfUnchanged` compares the
+ * lock's identity and then deletes. The local backend closes the window to two
+ * adjacent syscalls in one tick (it compares the lock directory's inode); a
+ * backend WITHOUT `removeIfUnchanged` - the remote store today - still does the
+ * blind delete and keeps the full round-trip window. Closing that needs
+ * `RemoteLockBackend` to implement `removeIfUnchanged` (a second `find` of the
+ * lock, comparing the marker it last inspected).
  */
 async function acquire(backend: LockBackend, log: Logger): Promise<void> {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -88,8 +121,21 @@ async function acquire(backend: LockBackend, log: Logger): Promise<void> {
                 hostname: inspection.hostname,
             });
         }
-        log.warn(`removing stale lock ${backend.lockPath}`, { detail: inspection.detail });
-        await backend.remove();
+        const stolen =
+            backend.removeIfUnchanged === undefined
+                ? await backend.remove().then(() => true)
+                : await backend.removeIfUnchanged();
+        if (!stolen) {
+            // The lock changed under us: another contender already took this
+            // stale lock over, so what sits there now is somebody else's LIVE
+            // lock. Losing the steal is a skip, never a delete - the scheduler
+            // treats `lock-held` as "try again next tick".
+            throw new LockHeldError(
+                `another backupkit took over the stale lock ${backend.lockPath} while it was being inspected`,
+                { pid: null, hostname: null },
+            );
+        }
+        log.warn(`removed stale lock ${backend.lockPath}`, { detail: inspection.detail });
     }
 }
 

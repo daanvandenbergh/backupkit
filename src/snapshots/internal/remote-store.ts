@@ -101,8 +101,13 @@ class RemoteLockBackend implements LockBackend {
 
     /**
      * TTL staleness: list the lock directory and parse its snapshot-named
-     * marker; more than 24 h from now in EITHER direction means stale, an
-     * unlistable lock means stale. A
+     * marker; more than 24 h from now in EITHER direction means stale. A lock
+     * that cannot be READ AT ALL (the `find` exits non-zero - a permission
+     * change, a transport failure, an FS error) is treated as held: "we could
+     * not read the lock" is strictly LESS information than "the lock has no
+     * marker", so it must not be treated as more conclusive. Judging it stale
+     * deleted a LIVE holder's lock and ran two pipelines against one archive
+     * root, which is the single thing this lock exists to prevent. A
      * lock with NO parseable marker is treated as held, NOT stale: acquisition
      * is two round-trips (mkdir the lock, then mkdir the marker), so a
      * markerless lock is almost always one a contender caught mid-acquire, and
@@ -111,15 +116,16 @@ class RemoteLockBackend implements LockBackend {
      * META_GRACE_MS window, but unbounded: the jail's `find` surface cannot
      * read the lock dir's mtime, so there is no time signal for a markerless
      * lock. ponytail: the price is that a holder that crashed in the tiny
-     * mkdir->marker window leaves a lock only an operator `rm -rf` can clear;
-     * every marker-present lock still auto-recovers via the 24 h TTL. Holder
+     * mkdir->marker window - or one whose lock became unreadable - leaves a lock
+     * only an operator `rm -rf` can clear; every marker-present, readable lock
+     * still auto-recovers via the 24 h TTL. Holder
      * pid/hostname are unknowable through this command surface and stay null.
      */
     async inspect(): Promise<LockInspection> {
         const stale = (detail: string): LockInspection => ({ stale: true, pid: null, hostname: null, detail });
         const result = await this.runner(["find", this.lockPath, "-maxdepth", "1", "-mindepth", "1", "-print0"]);
         if (result.exitCode !== 0) {
-            return stale("lock meta unreadable");
+            return { stale: false, pid: null, hostname: null, detail: "lock unreadable (assuming held)" };
         }
         for (const entry of result.stdout.split("\0")) {
             if (entry === "") {
@@ -182,10 +188,23 @@ export class RemoteSnapshotStore implements SnapshotStore {
     }
 
     /**
-     * Run one remote command and throw `SnapshotStoreError` on a non-zero exit.
-     * `options` forwards a per-call retry override; every rename below passes
-     * {@link NO_RETRY_POLICY} so a transport blip cannot re-send a `mv` that
-     * already renamed on the remote.
+     * Run one remote command and throw `SnapshotStoreError` on a non-zero exit
+     * OR on truncated output. `options` forwards a per-call retry override;
+     * every rename below passes {@link NO_RETRY_POLICY} so a transport blip
+     * cannot re-send a `mv` that already renamed on the remote.
+     *
+     * Why truncation is fatal here: `exec` caps captured stdout at 1 MiB and
+     * keeps the HEAD (invariant 28), so an over-cap `find` listing comes back as
+     * a SHORT, entirely plausible list whose newest name is months stale - and
+     * nothing downstream can tell. That silently breaks the schedule (window
+     * dedup compares against a stale name), points `--link-dest` at an ancient
+     * base, and makes `newestUndeletable` protect the wrong snapshot, so the
+     * genuinely-newest ones fall outside the deletion floor. A cut landing on a
+     * `.partial` boundary is worse still: the tail is re-read as a complete
+     * snapshot that does not exist. A push client drives the root over the cap
+     * with jail-legal `mkdir` commands, so this must fail loudly. One check at
+     * the chokepoint covers every store command (listing, promote verification,
+     * `df`); a refused command costs one run, a wrong listing costs snapshots.
      */
     private async run(
         argv: readonly string[],
@@ -197,6 +216,12 @@ export class RemoteSnapshotStore implements SnapshotStore {
             const tail = sanitize(result.stderr).slice(-500);
             throw new SnapshotStoreError(
                 `remote ${what} failed (exit ${result.exitCode ?? "signal"})${tail === "" ? "" : `: ${tail}`}`,
+            );
+        }
+        if (result.truncated) {
+            throw new SnapshotStoreError(
+                `remote ${what} output was truncated at the capture cap - refusing to act on a partial result for ${this.root}; ` +
+                    "reduce the number of entries in the archive root (a snapshot count this high is not normal - check for planted directories)",
             );
         }
         return result;

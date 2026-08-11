@@ -130,7 +130,10 @@ version_ge() {
 # True when a "rsync  version X.Y.Z  protocol ..." line meets the 3.2.5 floor.
 check_rsync_version() {
     local line=$1 ver
-    ver=$(printf '%s' "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n1)
+    # grep -m1 (not `| head -n1`): head closes the pipe early, which SIGPIPEs
+    # the upstream producer - fatal under `set -o pipefail`. -m1 makes grep
+    # itself stop after the first match, so nothing gets signalled.
+    ver=$(printf '%s' "$line" | grep -m1 -oE '[0-9]+\.[0-9]+\.[0-9]+')
     [ -n "$ver" ] || return 1
     version_ge "$ver" "3.2.5"
 }
@@ -308,7 +311,11 @@ check_prereqs() {
     done
     [ "$missing" -eq 0 ] || exit 1
     local ver
-    ver=$(rsync --version | head -n1)
+    # Capture the whole `--version` output, then take the first line with
+    # parameter expansion - NOT `| head -n1`, which SIGPIPEs rsync (fatal
+    # under `set -o pipefail`; rsync prints ~15 lines and head closes after 1).
+    ver=$(rsync --version 2>/dev/null)
+    ver=${ver%%$'\n'*}
     if ! check_rsync_version "$ver"; then
         log "error: local rsync does not meet the required >= 3.2.5 floor ($ver)"
         exit 1
@@ -357,6 +364,16 @@ setup_paths() {
     WORK="$SCRATCH_DIR/backupkit-smoke-$run_id"
     mkdir -p -- "$WORK/keys" "$WORK/archive" "$WORK/push-src" "$WORK/state" "$WORK/restore"
 
+    # $WORK holds real ed25519 PRIVATE KEYS (and, on a successful run, keys that
+    # are live in two hosts' authorized_keys), and SCRATCH_DIR is whatever the
+    # operator passed - very often a path inside this git checkout, which is how
+    # this was found. A `.gitignore` holding `*` makes the whole run directory
+    # invisible to git wherever it lands, so a sweeping `git add` between two of
+    # this script's operator-confirmation prompts cannot stage a live archive
+    # credential into history. cleanup() removes $WORK on exit; this covers the
+    # window before that, and the SIGKILL case where cleanup never runs at all.
+    printf '*\n' > "$WORK/.gitignore"
+
     parse_dest "$src_arg"
     SRC_USER=$P_USER
     SRC_HOST=$P_HOST
@@ -390,7 +407,11 @@ setup_paths() {
 setup_keys() {
     log "generating a throwaway passphrase-protected ed25519 key for the pull remote..."
     local pass
-    pass=$(LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 24)
+    # Read a fixed chunk from the urandom FILE (head on a device never
+    # SIGPIPEs), filter to alphanumerics, take 24. Piping `tr </dev/urandom |
+    # head -c 24` instead SIGPIPEs tr (tr reads the endless device forever) -
+    # fatal under `set -o pipefail`. 512 bytes yield ~120 alnum chars, ample.
+    pass=$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Za-z0-9' | cut -c1-24)
     printf '%s' "$pass" >"$KEY_PULL_PASS_FILE"
     chmod 600 "$KEY_PULL_PASS_FILE"
     ssh-keygen -q -t ed25519 -N "$pass" -C "backupkit-smoke-pull" -f "$KEY_PULL"
@@ -465,7 +486,10 @@ probe_host() {
         log "  ssh to $label host failed (check connectivity / host key)"
         return 1
     fi
-    ver_line=$(ssh -o BatchMode=yes -p "$port" "$user@$host" "rsync --version" 2>/dev/null | head -n1)
+    # First line via parameter expansion, not `| head -n1` (which SIGPIPEs the
+    # local ssh relaying the remote's multi-line output - fatal under pipefail).
+    ver_line=$(ssh -o BatchMode=yes -p "$port" "$user@$host" "rsync --version" 2>/dev/null)
+    ver_line=${ver_line%%$'\n'*}
     log "  $label rsync: ${ver_line:-<not found>}"
     if ! check_rsync_version "$ver_line"; then
         log "  $label rsync does not meet the required >= 3.2.5 floor"
@@ -529,7 +553,7 @@ step2_passphrase_key() {
 
     log "running: backupkit check"
     log "(expects the passphrase to be primed unattended via the file: askpass path - no TTY prompt)"
-    log "(the push remote is not jailed yet at this point and will show NOT reachable - expected;"
+    log "(the push remote is not jailed yet at this point and will show NOT REACHABLE - expected;"
     log " this step only judges the pull remote and the local prereqs)"
     local out
     out=$(bk check) || true
@@ -538,11 +562,11 @@ step2_passphrase_key() {
         log "expected the pull remote (smoke-src) to show reachable in the check output above"
         return 1
     fi
-    if printf '%s' "$out" | grep -q "^local rsync: NOT OK"; then
+    if printf '%s' "$out" | grep -q "^Local rsync: NOT USABLE"; then
         log "local rsync check failed"
         return 1
     fi
-    if ! printf '%s' "$out" | grep -q "^local ssh: ok"; then
+    if ! printf '%s' "$out" | grep -q "^Local ssh:   ok"; then
         log "local ssh check failed"
         return 1
     fi
@@ -556,7 +580,7 @@ step2_passphrase_key() {
 
 step3_push_jail() {
     log "running: backupkit check to compute the push-target jail line"
-    log "(the archive host will show as NOT reachable until the jail below is installed - expected)"
+    log "(the archive host will show as NOT REACHABLE until the jail below is installed - expected)"
     # run_step already runs this whole function with errexit off, so a
     # nonzero check here (expected - the jail is not installed yet) just
     # falls through; no need to toggle set -e (doing so would re-arm
@@ -687,15 +711,21 @@ step5_mid_transfer_kill() {
 #
 # This step deliberately does NOT run `service install` itself: that verb
 # writes a real systemd unit or launchd plist and requires root - doing it
-# from this script would mean touching /etc, which this script promises
-# never to do. Run it yourself, ideally in a disposable VM/container.
+# from this script would mean touching /etc (or /Library/LaunchDaemons),
+# which this script promises never to do. Run it yourself.
+#
+# The daemon runs as root, but the throwaway config, keys, and stateDir this
+# script generated are owned by YOU. That now works: backupkit waives the file
+# OWNERSHIP check when running as root (it still enforces modes), so a root
+# daemon uses your user-owned files as-is - no chown needed. Before that fix
+# this step could not start at all on a dev box.
 # ---------------------------------------------------------------------------
 
 step6_service_lifecycle() {
     log "service install/start/stop/restart/status and crash-restart need root and write"
     log "real systemd/launchd units - this script will not do that on your behalf."
-    log "Run these yourself (ideally in a disposable VM/container), pointed at the"
-    log "throwaway config generated by this run:"
+    log "The daemon runs as root but happily uses THIS run's user-owned config/keys/state"
+    log "(root waives the ownership check). Run these yourself, pointed at the throwaway config:"
     log ""
     log "    sudo backupkit service install --config \"$CONFIG_PATH\""
     log "    sudo backupkit service start   --config \"$CONFIG_PATH\""
@@ -735,7 +765,7 @@ step7_disk_low() {
     local out
     out=$(bk run diskguard-target --force)
     log "$out"
-    if ! printf '%s' "$out" | grep -q "diskguard-target: skipped reason=disk-low"; then
+    if ! printf '%s' "$out" | grep -q "skipped diskguard-target - disk-low"; then
         log "expected 'diskguard-target: skipped reason=disk-low' in the run output"
         return 1
     fi

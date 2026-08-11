@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../../exec/exec.js";
 import { LockHeldError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
-import { pidStartTime, type LockMeta } from "../internal/lock.js";
+import { pidStartTime, withLockScope, type LockBackend, type LockMeta } from "../internal/lock.js";
 import { LocalSnapshotStore } from "../internal/local-store.js";
 
 /** Silent logger for the suites. */
@@ -203,6 +203,141 @@ describe("local store lock (mkdir + meta)", () => {
         // The symlink target survived untouched; the link itself is gone.
         expect(existsSync(join(victim, "precious"))).toBe(true);
         expect(existsSync(lockPath)).toBe(false);
+    });
+});
+
+// Regression (HIGH): the stale-lock steal was a blind `remove()` of whatever
+// sat at the lock path at that moment, not of the instance `inspect()` had
+// judged - so two contenders over ONE pre-existing stale lock BOTH ended up
+// holding it: A removed the stale lock, acquired and wrote its meta while B -
+// one round-trip behind, still holding its own stale observation - removed A's
+// LIVE lock and acquired too. Measured over a fake jail runner with realistic
+// per-command latency: at a 200 ms stagger both processes were inside at once,
+// timeline [A IN, B IN, A OUT, B OUT]. B's claimPartial then renamed A's
+// in-flight <snapA>.partial away, A kept writing into a recreated one holding
+// only the post-rename remainder, and A promoted that truncated tree and
+// reported success - after which it became the --link-dest basis and the
+// newest-snapshot floor while real history aged out.
+//
+// The interleaving is reproduced deterministically here: contender B's
+// `inspect` observes the lock, and A's ENTIRE steal (remove, acquire, write
+// meta) lands before B acts on that observation.
+describe("stale-lock takeover is not a TOCTOU (two contenders, one stale lock)", () => {
+    /**
+     * A `LockBackend` over one in-memory lock path, modelling what both real
+     * backends do: `tryAcquire` creates the lock only when the path is free and
+     * every creation is a NEW instance; a freshly created lock inspects as HELD
+     * (the local backend's META_GRACE_MS window, the remote backend's
+     * markerless-lock grace) while the pre-planted one inspects as stale; and
+     * `removeIfUnchanged` is the identity compare the real local backend does
+     * against the lock directory's inode.
+     */
+    function fakeWorld() {
+        const world = { lock: { instance: 0, stale: true } as { instance: number; stale: boolean } | null, next: 1 };
+        const backend = (afterInspect?: () => Promise<void>): LockBackend => {
+            let observed: number | null = null;
+            return {
+                lockPath: "/archive/web/.backupkit.lock",
+                async tryAcquire() {
+                    if (world.lock !== null) {
+                        return false;
+                    }
+                    world.lock = { instance: world.next, stale: false };
+                    world.next += 1;
+                    return true;
+                },
+                async writeMeta() {},
+                async inspect() {
+                    const seen = world.lock;
+                    observed = seen?.instance ?? null;
+                    // The other contender's whole steal lands here: the answer
+                    // below describes the lock as it was when we looked.
+                    await afterInspect?.();
+                    return seen === null
+                        ? { stale: true, pid: null, hostname: null, detail: "lock disappeared" }
+                        : { stale: seen.stale, pid: null, hostname: null, detail: `instance ${seen.instance}` };
+                },
+                async removeIfUnchanged() {
+                    if (world.lock === null || world.lock.instance !== observed) {
+                        return false;
+                    }
+                    world.lock = null;
+                    return true;
+                },
+                async remove() {
+                    world.lock = null;
+                },
+            };
+        };
+        return { world, backend };
+    }
+
+    it("only one contender ever gets inside; the loser reports the lock held", async () => {
+        const { world, backend } = fakeWorld();
+        let inside = 0;
+        let bothInsideAtOnce = false;
+        const timeline: string[] = [];
+        let announceA!: () => void;
+        const aIsInside = new Promise<void>((resolve) => {
+            announceA = resolve;
+        });
+        let releaseA!: () => void;
+        const aMayLeave = new Promise<void>((resolve) => {
+            releaseA = resolve;
+        });
+        /** Enter the critical section as `label`, recording any overlap. */
+        function enter(label: string): void {
+            inside += 1;
+            timeline.push(`${label} IN`);
+            bothInsideAtOnce = bothInsideAtOnce || inside > 1;
+        }
+        /** Leave the critical section as `label`. */
+        function leave(label: string): void {
+            inside -= 1;
+            timeline.push(`${label} OUT`);
+        }
+
+        let a: Promise<string> | null = null;
+        // B observes the stale lock; A's ENTIRE steal then completes and A is
+        // holding a LIVE lock by the time B acts on its stale observation.
+        const b = withLockScope(
+            backend(async () => {
+                if (a === null) {
+                    a = withLockScope(backend(), log, async () => {
+                        enter("A");
+                        announceA();
+                        await aMayLeave;
+                        leave("A");
+                        return "A";
+                    });
+                    await aIsInside;
+                }
+            }),
+            log,
+            async () => {
+                enter("B");
+                leave("B");
+                return "B";
+            },
+        );
+        const outcome = await b.then(
+            (value) => value,
+            (error: unknown) => error,
+        );
+        expect(bothInsideAtOnce).toBe(false);
+        expect(outcome).toBeInstanceOf(LockHeldError);
+        // A's lock survived B's attempt and is released structurally.
+        expect(world.lock).not.toBeNull();
+        releaseA();
+        await expect(a).resolves.toBe("A");
+        expect(timeline).toEqual(["A IN", "A OUT"]);
+        expect(world.lock).toBeNull();
+    });
+
+    it("a stale lock nobody else contends for is still taken over", async () => {
+        const { world, backend } = fakeWorld();
+        await expect(withLockScope(backend(), log, async () => "took over")).resolves.toBe("took over");
+        expect(world.lock).toBeNull();
     });
 });
 

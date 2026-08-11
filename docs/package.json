@@ -9,7 +9,7 @@
         "start": "next start"
     },
     "dependencies": {
-        "@daanvandenbergh/scribekit": "^1.7.1",
+        "@daanvandenbergh/scribekit": "^1.7.2",
         "next": "^16.0.0",
         "next-mdx-remote": "^6.0.0",
         "react": "^19.0.0",

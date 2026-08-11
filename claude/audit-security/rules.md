@@ -34,6 +34,15 @@ even when nothing visibly fails.
    I/O - for the files backupkit owns; ssh_config-managed files (alias mode) are ssh's own
    enforcement domain and are never a reason to skip checking backupkit's own files. Checking a
    0600 file inside a world-writable directory proves nothing: the attacker replaces the file.
+   The MODE check (no group/other access) is the confidentiality boundary and ALWAYS runs.
+   OWNERSHIP, by deliberate design, is NOT required when the process runs as root (euid 0): root
+   can read/write/chown any file regardless of owner, so demanding files be chown'd to root adds
+   zero security and only forced operators to copy keys into a root-owned tree. A root daemon
+   accepts the operator's own user-owned keys/config/stateDir as-is (`ownershipOk` in
+   `ssh/permissions.ts`). This is intentional and locked by tests ("root (euid 0) accepts a
+   foreign-owned ..." in `src/ssh/tests/permissions.test.ts`) - do NOT re-introduce a "root must
+   own it" rule; it is friction, not protection. A NON-root process still requires euid-or-root
+   ownership (a real confused-deputy risk: another unprivileged user could swap the file).
    "Before any network I/O" binds EVERY engine verb that reaches a remote, not just the obvious
    ones - `listSnapshots` and `prune` were the sibling paths that skipped the gate while being
    exactly the verbs an operator uses to confirm the archive is healthy.
@@ -201,7 +210,134 @@ even when nothing visibly fails.
     missed trip is permanent. `backupkit prune` is the operator's override once a human has
     confirmed the shrink is real. *graduated: `src/engine/tests/target-runner.test.ts` (collapse
     -> no removes + an error log; a shrink inside the threshold still prunes).*
-28. No engine method captures unbounded child output, and no child's stdout/stderr is trusted to
+**THE SIBLING-PATH RULE (read this before adding any guard).** Four separate Critical/High bugs in
+this repo have had the identical shape: a guard was added to the path where the bug was noticed, and
+its sibling - a second call site reaching the same sink - was left unguarded. `listSnapshots`/`prune`
+skipped the permission preflight that `run`/`restore` had (invariant 8); the scheduler's generic
+`runTarget` catch wrote no run report while the due-check catch 30 lines above did (invariant 19);
+the run path's retention had no future-snapshot split while `prune`'s had one (invariant 32); and
+`rm -rf` was narrowed while `mv` and `rsync --server` still reached the same deletion (invariant 30).
+So: **when you add a guard, enumerate every caller of the sink and assert the guard on ALL of them in
+the same change** - the enumeration, not the fix, is the work. A guard on one of N paths is not a
+partial fix, it is a false sense of security plus a test that reads as green.
+
+29. The jail's rsync option handling is an ALLOWLIST, and its path operand is pinned to the ONE
+    shape the client writes. A deny list with a `--*` "benign flag" catch-all cannot be complete
+    against a tool that keeps adding options, and it let three destructive ones through:
+    `--remove-source-files` (the archive-side sender unlinks what it sends - a delete primitive that
+    never touches the `rm -rf` verb), `--inplace` (writes THROUGH a `--link-dest` hardlink, mutating
+    already-promoted snapshots), and `--protect-args`/`-s` (rsync then takes its file arguments from
+    the protocol stream, so the argv operand the jail validated is not the one governing the
+    transfer - nullifying every path check at once; rsync's own `rrsync` refuses it for this reason).
+    Separately, bounding the operand only by "under $ROOT, no `..`" - with no component policy at
+    all, unlike `check_lifecycle_path` - meant `--delete --force . $ROOT/<target>` erased a target's
+    whole history in ONE command, and `. $ROOT/<target>/<complete-snap>` overwrote verified history.
+    Pinning the destination to `<target>/<snap>.partial` for a write (and `<snap>` additionally for a
+    `--sender` read) is what makes the permitted `--delete` harmless: it can only delete inside the
+    scratch partial being built. The allowlist is derived from MEASURED argv, not intent - see 24.
+    *graduated: `src/snapshots/tests/jail.fake.test.ts` ("the rsync path operand is pinned to the
+    run's own .partial (destination policy)", "unmeasured rsync options are refused by default (the
+    option allowlist)") - expect: >= 7 destination rejects and >= 8 option rejects.*
+30. Narrowing a VERB is not the same as enforcing a PROPERTY. Invariant 23 narrowed `rm -rf` to
+    `<snap>.partial`/`<snap>.deleting`/`.backupkit.lock` - and the property "a compromised push
+    client cannot delete a completed snapshot or a target's history" still did not hold, because
+    `mv`'s two operands were validated INDEPENDENTLY (each by `check_component`, which accepts a
+    bare target-name component). `mv -- $ROOT/<target> $ROOT/<snap>.deleting` was therefore legal,
+    and its output is exactly the leaf shape `check_delete_component` then permits `rm -rf` to
+    remove: two permitted commands, whole archive gone, delete policy reduced to decoration. A
+    rename is a delete gadget whenever the destination namespace is deletable. `check_mv_pair`
+    requires both operands to be SNAPSHOT-shaped and SIBLINGS in one directory, which is what the
+    three real renames (promote, delete phase 1, partial re-claim) all are; it also closes moving
+    `.backupkit.lock` out of the way to defeat the remote mutex. When a policy names a verb, ask
+    which other verb reaches the same end state.
+    *graduated: `src/snapshots/tests/jail.fake.test.ts` ("the mv PAIR is one of three real renames
+    (closing the rename gadget)", "a rename may not bury its source inside an existing directory") -
+    expect: >= 6 reject rows, the 3 real renames accepted, and the real-data gadget proof.*
+31. A short-option token is validated WHOLE. `pre=${pre%%.*}` stripped everything after the first
+    dot to isolate rsync's pre-`.` active flags - and thereby discarded the VALUE of any
+    value-taking short option: `-T../../../tmp` reduced to the letter `T` (pure letters, accepted)
+    while meaning `--temp-dir=../../../tmp`, so rsync wrote its temp files outside the jail root.
+    `-T` sat in the deny list as a bare token, which is dead weight the moment the attached-value
+    form walks past. The long-option branch rejected `*=/*` and `*..*`; the short branch performed
+    no equivalent check on the part it had thrown away. Any prefix-strip used for validation must be
+    paired with a rule for the remainder, or the remainder is unvalidated by construction.
+    *graduated: `src/snapshots/tests/jail.fake.test.ts` ("a short bundle may not smuggle an attached
+    option VALUE (bundle grammar)").*
+32. Every retention decision applies the future-dated-snapshot split - the post-run path and `prune`
+    alike. `planFor` (prune) passed its listing through `splitFutureSnapshots`; the run path called
+    `planRetention` on a raw listing, justified by a comment claiming the clock-skew guard upstream
+    made a future name impossible. It does not: that guard reads the listing BEFORE the transfer and
+    retention re-reads it AFTER, and the attacker is the party serving the transfer, so it controls
+    the window exactly. ~46 jail-legal `mkdir` commands issued mid-transfer, dated to occupy every
+    tier's buckets, took all 24 keep slots and put every genuine snapshot in the prune list - 30 of
+    31 deleted, the honest client doing the deleting. This is the mirror of 23/29: having stopped the
+    attacker deleting history itself, make sure it cannot make US delete it.
+    *graduated: `src/engine/tests/target-runner.test.ts` (future names planted mid-transfer never
+    capture retention buckets; nothing is pruned when no genuine history survives them).*
+33. A capped stream's `truncated` flag is READ wherever that stream feeds a decision. `exec()` caps
+    each stream at 1 MiB (invariant 28) and sets `truncated` - and nothing in production ever read
+    it, so a remote `find -print0` listing over the cap silently became a SHORT listing: `newest`
+    went ~4 months stale, and a cut landing on a `.partial` boundary manufactured a complete
+    snapshot name that does not exist. Downstream that breaks the schedule (window dedup compares a
+    stale name), points `--link-dest` at a months-old base, and makes invariant 7's newest-snapshot
+    floor protect the WRONG snapshot. A jailed client can force it with ~15 000 legal `mkdir`s.
+    Adding a cap without a reader converts a crash into silent data corruption, which is worse.
+    *graduated: `src/snapshots/tests/remote-store.test.ts` ("refuses a truncated listing", "refuses
+    truncated df output too") - the guard sits in the store's single `run()` chokepoint.*
+34. A parse of child output takes the LAST match, not the first. rsync relays messages generated by
+    the REMOTE onto the local client's stdout, ahead of the client's own `--info=stats2` block, so
+    `RegExp.exec` (first match) let a hostile source dictate `totalFiles` and
+    `totalTransferredSize`. Measured: the disk guard flipped from correctly refusing to proceeding,
+    and the content-collapse tripwire (invariant 27) went silent - re-opening the
+    archive-destruction path 27 exists to close. Every numeric parse of remote output also carries
+    the `Number.isSafeInteger` bound the `df` parsers already had.
+    *graduated: `src/rsync/tests/stats.test.ts` ("takes the LAST match, so a fake block relayed from
+    the remote cannot win", plus the safe-integer bound).*
+35. UNKNOWN is not STALE, and UNKNOWN is not SAFE. Two inversions of the same rule: an unreadable
+    remote lock returned `stale`, so the shared algorithm deleted a LIVE holder's lock and ran two
+    pipelines against one archive root - while the same method deliberately treats a MARKERLESS lock
+    as held, i.e. it treated strictly less information as more conclusive. And `claimPartial`
+    adopted a resumed partial it could not vouch for: a symlinked partial became the transfer
+    destination and `--delete --force` wiped the link target, with the hardlink guard next to it
+    FOLLOWING the symlink and answering "no multiply-linked entry". `local-store`'s own docstring
+    states the rule ("unknown is not the same as safe"); both sites violated it.
+    *graduated: `src/snapshots/tests/remote-store.test.ts` (an unlistable lock is HELD, never
+    stolen), `src/snapshots/tests/local-store.test.ts` (a symlinked partial is discarded).*
+36. The config-trust gate precedes every spawn of a config-named binary and every privileged write
+    to a config-chosen path. `check` spawned `config.rsyncBin --version` and `sshBin -V` as root
+    BEFORE `preflight()` - so a group/other-writable config (the exact state preflight refuses) gave
+    a local user root code execution via the command `init` tells the operator to run. Separately the
+    `Backupkit` constructor opened `logging.file` and flushed `config.warnings` before any gate, so
+    the first act of every verb was a root-privileged create/append at an attacker-chosen path
+    (`O_NOFOLLOW` covers the symlink variant, nothing covered the direct path). A gate that runs
+    after the action it guards is not a gate.
+    *graduated: `src/engine/tests/backupkit.test.ts` ("check: a group-writable config reports the gate
+    failure and spawns/probes NOTHING", "logging.file is not opened until the permission gate has
+    judged the path") - expect: the spawn log is empty and the planted path absent after a FAILED
+    preflight, not merely after a passing one.*
+37. Log field values are QUOTED at the sink. `sanitize` (invariant 16) makes a string safe for a
+    TERMINAL - it strips control characters and so a forged whole line is impossible - but it leaves
+    SPACE and `=` untouched, and the logger emits bare `key=value`. Remote stderr containing
+    `failed status=success target=payroll consecutiveFailures=0` therefore forged fields inside a
+    genuine ERROR line, so a logfmt/journald field extractor read an attacker-authored `status` and
+    `target`: a failure line that parses as a success, which is a cheap way to keep an alert from
+    firing. Same value, different grammar, different encoding - a sanitizer chosen for one sink is
+    not a sanitizer for another.
+    *graduated: `src/shared/tests/logger.test.ts` (a value containing `key=value` text stays ONE
+    quoted token and forges no fields).*
+38. Every path that reaches rsync's `-e` string is whitespace- and quote-free, INCLUDING the ones
+    synthesized from defaults. The validator enforces it for `identityFile`, an explicitly-written
+    `knownHostsFile`, `passphrase`, `rsyncBin`, `sshBin`, `remoteRsyncBin` and a push `destination` -
+    but the DEFAULT `knownHostsFile` is derived from `configPath` downstream of that gate, and
+    `configPath` was only NUL/CR/LF-filtered. rsync word-splits `-e` before exec, so a config path
+    containing a space silently broke every remote transfer while `check` still reported the host
+    reachable, and a path containing ` -o ProxyCommand=...` gave ssh an option it executes via
+    `/bin/sh -c` - local root code execution. A rule enforced on the written value and not on the
+    derived default is enforced on the wrong set; assert it at the single `-e` producer too.
+    *graduated: `src/config/tests/config-path.test.ts` (whitespace/quote rejection table),
+    `src/engine/tests/backupkit.test.ts` ("refuses to build an rsync -e command whose tokens carry
+    whitespace or quotes") - the config-path half and the sink-assert half both.*
+39. No engine method captures unbounded child output, and no child's stdout/stderr is trusted to
     be small. A hostile remote's rsync stderr flows through ssh into the local pipe; string
     concatenation past V8's ~512 MB limit throws `RangeError` inside a stream `data` listener -
     outside the promise, uncatchable by the caller, with no `uncaughtException` handler in the

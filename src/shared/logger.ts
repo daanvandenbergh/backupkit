@@ -7,6 +7,9 @@
  *
  * Line shape:
  * `2026-08-10T03:15:00.123Z INFO  [target=web1 run=...] message key=value`
+ *
+ * A field value that would break that grammar - empty, or carrying whitespace,
+ * `=` or `"` - is JSON-quoted so it stays ONE token (see `renderField`).
  */
 
 import { sanitize } from "./sanitize.js";
@@ -57,9 +60,25 @@ interface ResolvedLoggerOptions {
     now: () => Date;
 }
 
-/** Render one `key=value` token, sanitizing the value. */
+/** Values that would stop being ONE token: empty, or carrying whitespace, `=`, or `"`. */
+const NEEDS_QUOTES = /^$|[\s="]/;
+
+/**
+ * Render one `key=value` token, sanitizing the value and quoting it when it
+ * would otherwise forge FIELDS inside the line. `sanitize` strips control
+ * characters - so a forged whole LINE is impossible - but leaves SPACE and `=`
+ * untouched, and a compromised peer's rsync/ssh stderr tail of
+ * `rsync: [sender] failed status=success target=payroll consecutiveFailures=0`
+ * survived it byte-identically inside the `error=` field of a genuine ERROR
+ * line: a logfmt/journald-style field extractor then read `status: success` and
+ * an attacker-chosen `target=` off it - a failure line that parses as a success,
+ * which is a cheap way to stop an alert rule firing. `JSON.stringify` is the
+ * quoting tool (already this project's report serializer, and it cannot emit a
+ * newline), and ordinary values stay bare so the format stays greppable.
+ */
 function renderField(key: string, value: string | number | boolean): string {
-    return `${sanitize(key)}=${sanitize(String(value))}`;
+    const rendered = sanitize(String(value));
+    return `${sanitize(key)}=${NEEDS_QUOTES.test(rendered) ? JSON.stringify(rendered) : rendered}`;
 }
 
 /**

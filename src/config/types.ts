@@ -193,7 +193,7 @@ export interface BackupkitConfig {
     targets: Record<string, TargetConfig>;
     /** Default retention for targets defining none. Omit to keep everything forever. */
     retention?: RetentionConfig;
-    /** Run-report root. Default /var/lib/backupkit (root) else ${XDG_STATE_HOME:-~/.local/state}/backupkit. */
+    /** Run-report root. Default (root) /var/lib/backupkit on Linux, /var/db/backupkit on macOS; else ${XDG_STATE_HOME:-~/.local/state}/backupkit. */
     stateDir?: string;
     /** Default { level: "info" }. */
     logging?: {

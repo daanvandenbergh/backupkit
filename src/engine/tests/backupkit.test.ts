@@ -13,7 +13,7 @@ import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { Backupkit } from "../backupkit.js";
+import { Backupkit, defaultRuntimeDir } from "../backupkit.js";
 import { ConfigError, TransferError } from "../../shared/errors.js";
 import type { ResolvedRemote } from "../../shared/types.js";
 import {
@@ -26,6 +26,29 @@ import {
     makeTransferResult,
     type KitFixture,
 } from "./fakes.js";
+
+describe("defaultRuntimeDir", () => {
+    it("uses /run/backupkit for root on linux (systemd RuntimeDirectory owns it)", () => {
+        expect(defaultRuntimeDir({}, 0, "/root", "linux")).toBe("/run/backupkit");
+    });
+
+    it("uses /var/run/backupkit for root on macOS, where /run does not exist", () => {
+        expect(defaultRuntimeDir({}, 0, "/var/root", "darwin")).toBe("/var/run/backupkit");
+    });
+
+    it("prefers XDG_RUNTIME_DIR for a non-root user, platform-independent", () => {
+        expect(defaultRuntimeDir({ XDG_RUNTIME_DIR: "/run/user/501" }, 501, "/home/u", "linux")).toBe(
+            "/run/user/501/backupkit",
+        );
+        expect(defaultRuntimeDir({ XDG_RUNTIME_DIR: "/run/user/501" }, 501, "/home/u", "darwin")).toBe(
+            "/run/user/501/backupkit",
+        );
+    });
+
+    it("falls back to ~/.backupkit/run for a non-root user without XDG_RUNTIME_DIR", () => {
+        expect(defaultRuntimeDir({}, 501, "/Users/u", "darwin")).toBe("/Users/u/.backupkit/run");
+    });
+});
 
 describe("Backupkit", () => {
     const fixtures: KitFixture[] = [];
@@ -272,6 +295,70 @@ describe("Backupkit", () => {
         expect(dashE.startsWith("-")).toBe(false);
     });
 
+    // The `-e` value is a COMMAND STRING rsync word-splits before exec, so a
+    // token carrying whitespace becomes EXTRA ssh arguments. validate.ts refuses
+    // whitespace in every path that lands here, but the default knownHostsFile is
+    // synthesized from configPath downstream of that gate - which is how
+    // `--config "/tmp/a -o ProxyCommand=/tmp/evil/x/config.jsonc"` turned into
+    // `-o ProxyCommand=...` and got executed by ssh as root. config.ts now
+    // refuses such a config path; this is the boundary assertion that makes any
+    // FUTURE path reintroducing whitespace fail loudly here instead of silently
+    // becoming an ssh option.
+    it("refuses to build an rsync -e command whose tokens carry whitespace or quotes", async () => {
+        const fixture = track(
+            await makeKit({
+                deps: { probeRemote: async () => "3.2.7" },
+            }),
+        );
+        const poisoned = new Backupkit(
+            {
+                ...makeConfig({
+                    configPath: join(fixture.root, "config.jsonc"),
+                    stateDir: fixture.stateDir,
+                    targets: [
+                        makeTarget({
+                            destination: fixture.destination,
+                            dst: { kind: "local", path: fixture.destination },
+                            src: {
+                                kind: "remote",
+                                path: "/srv/data",
+                                remote: {
+                                    kind: "explicit",
+                                    name: "srv",
+                                    host: "10.0.0.1",
+                                    user: "backup",
+                                    port: 22,
+                                    identityFile: join(fixture.root, "id_ed25519"),
+                                    passphrase: null,
+                                    // The shape the old default produced from a
+                                    // config path containing a space.
+                                    knownHostsFile: join(fixture.root, "my dir", "known_hosts"),
+                                },
+                            },
+                        }),
+                    ],
+                }),
+            },
+            {
+                now: () => fixture.clock.now,
+                runtimeDir: join(fixture.root, "run"),
+                env: {},
+                hasTty: false,
+                logger: captureLogger("error").log,
+                execFn: async () => makeExecResult(),
+                probeRsync: async () => ({ bin: "/fake/rsync", version: "3.2.7" }),
+                probeRemote: async () => "3.2.7",
+                loadKeysFn: async () => ({ sock: null, failures: new Map<string, string>() }),
+                transfer: async () => {
+                    throw new Error("the transfer must never start with a poisoned -e command");
+                },
+            },
+        );
+        await expect(poisoned.run({ force: true })).rejects.toThrowError(
+            /rsync -e command.*whitespace or quote characters/s,
+        );
+    });
+
     // A lock nobody releases (a future-dated remote marker, an operator's
     // forgotten manual run) used to be invisible: LockHeldError escaped the
     // pipeline, the scheduler logged a warn and continued, and NO report was
@@ -302,6 +389,45 @@ describe("Backupkit", () => {
         expect(persisted.reason).toBe("lock-held");
     });
 
+    // ...and a lock on ONE target must not take the rest of the pass down with
+    // it. LockHeldError unwound the whole invocation, so every later target
+    // never ran, got no report, and produced no log line naming it - `status`
+    // then showed them with their last successful snapshot, `success`, 0
+    // failures. The scheduler has had this containment all along (it catches
+    // lock-held per target and continues); the one-shot path had not. The
+    // invocation still ends non-zero (exit 3) so a cron wrapper alarms.
+    it("a lock held on one target does not stop the later targets of a one-shot run", async () => {
+        const fixture = track(
+            await makeKit({
+                extraTargets: (destination) => [
+                    makeTarget({ name: "api", destination, dst: { kind: "local", path: destination } }),
+                ],
+            }),
+        );
+        // A live-looking lock on the FIRST target only: this process's pid and start time.
+        const lockDir = join(fixture.destination, "web", ".backupkit.lock");
+        await mkdir(lockDir, { recursive: true });
+        const { pidStartTime } = await import("../../snapshots/internal/lock.js");
+        await writeFile(
+            join(lockDir, "meta"),
+            JSON.stringify({
+                pid: process.pid,
+                pidStartTime: await pidStartTime(process.pid),
+                hostname: hostname(),
+                createdAt: fixture.clock.now.toISOString(),
+            }),
+        );
+
+        await expect(fixture.kit.run({ force: true })).rejects.toThrow(/lock/i);
+
+        // The second target ran, promoted its snapshot, and left a report.
+        expect(existsSync(join(fixture.destination, "api", "2026-08-10T120000Z"))).toBe(true);
+        expect(await readdir(join(fixture.stateDir, "runs", "api"))).toHaveLength(1);
+        const [web, api] = await fixture.kit.status();
+        expect([web.target, web.lastResult]).toEqual(["web", "skipped"]);
+        expect([api.target, api.lastResult]).toEqual(["api", "success"]);
+    });
+
     it("prune: retention off (null) prunes nothing", async () => {
         const fixture = track(await makeKit({ target: { retention: null } }));
         await mkdir(join(fixture.destination, "web", "2026-08-01T000000Z"), { recursive: true });
@@ -329,6 +455,58 @@ describe("Backupkit", () => {
         // Nothing was spawned: the gate is genuinely upstream of the store, not a
         // check that happens to run after the first ssh.
         expect(fixture.execCalls).toEqual([]);
+    });
+
+    // `check` was the last verb that spawned config-named binaries BEFORE the
+    // trust gate: `localRsync()` runs `config.rsyncBin --version` and the ssh
+    // probe runs `config.sshBin -V`, both above `await this.preflight()`. With a
+    // group/other-writable config - the exact state the gate exists to refuse -
+    // a local user set "rsyncBin": "/tmp/evil" and the next `backupkit check`
+    // (the command `init` tells the operator to run) executed it as root. And
+    // once the gate had failed, check went on to open ssh to every remote with
+    // the very key and known_hosts it had just condemned, TOFU-pinning host keys
+    // into an untrusted store on a TTY.
+    it("check: a group-writable config reports the gate failure and spawns/probes NOTHING", async () => {
+        const probed: string[] = [];
+        const fixture = track(await makeKit());
+        const kit = new Backupkit(
+            {
+                ...makeConfig({
+                    configPath: join(fixture.root, "config.jsonc"),
+                    stateDir: fixture.stateDir,
+                    targets: [fixture.target],
+                }),
+                remotes: { srv: { kind: "alias", name: "srv", alias: "myserver" } },
+            },
+            {
+                now: () => fixture.clock.now,
+                runtimeDir: join(fixture.root, "run"),
+                env: {},
+                hasTty: true,
+                logger: captureLogger("error").log,
+                execFn: async (bin, args) => {
+                    probed.push(`${bin} ${args.join(" ")}`);
+                    return makeExecResult();
+                },
+                probeRsync: async (bin) => {
+                    probed.push(`${bin ?? "rsync"} --version`);
+                    return { bin: "/fake/rsync", version: "3.2.7" };
+                },
+                probeRemote: async () => {
+                    probed.push("remote probe");
+                    return "3.2.7";
+                },
+            },
+        );
+        await chmod(join(fixture.root, "config.jsonc"), 0o666);
+        const report = await kit.check();
+        expect(report.ok).toBe(false);
+        expect(report.errors.some((error) => /config file .* is group\/other-writable/.test(error))).toBe(true);
+        // No config-named binary was spawned, and no ssh left the host.
+        expect(probed).toEqual([]);
+        expect(report.remotes).toEqual([]);
+        expect(report.localRsync).toBeNull();
+        expect(report.sshOk).toBe(false);
     });
 
     it("preflight: an all-alias config starts no agent and is idempotent", async () => {
@@ -842,66 +1020,81 @@ describe("Backupkit", () => {
         expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z"))).toBe(true);
     });
 
-    // An unwritable logging.file must never be fatal. It becomes unwritable for
-    // reasons unrelated to backups - a stale systemd ReadWritePaths after the
-    // log path moved, a full or remounted filesystem - and an unguarded
-    // appendFileSync would throw out of whatever happened to log, including out
-    // of the scheduler's own error handler, ending the daemon.
-    it("an unwritable logging.file disables file logging instead of killing the process", async () => {
-        const root = await mkdtemp(join(tmpdir(), "backupkit-logsink-"));
+    /**
+     * A kit whose `logging.file` sink is the REAL one (no logger override), over
+     * a temp tree whose config file, state dir and destination root all pass the
+     * permission preflight - so a test can drive the trust gate on purpose.
+     */
+    async function logSinkKit(params: { root: string; logFile: string }): Promise<Backupkit> {
+        const configPath = join(params.root, "config.jsonc");
+        await writeFile(configPath, "{}\n", { mode: 0o600 });
+        const destination = join(params.root, "archive");
+        await mkdir(destination, { recursive: true, mode: 0o700 });
+        const config = makeConfig({
+            configPath,
+            stateDir: join(params.root, "state"),
+            targets: [makeTarget({ destination, dst: { kind: "local", path: destination } })],
+        });
+        config.logging = { level: "info", file: params.logFile };
+        config.warnings = ["a config warning, logged from the constructor"];
+        return new Backupkit(config, {
+            now: () => new Date("2026-08-10T12:00:00Z"),
+            runtimeDir: join(params.root, "run"),
+            env: {},
+            hasTty: false,
+        });
+    }
+
+    // The constructor used to wire the sink and then immediately emit
+    // config.warnings, so the FIRST thing any verb did as root was
+    // openSync(logging.file, O_CREAT, 0600) + a write - before the config-file
+    // permission row and before checkLoggingFile. With a group/other-writable
+    // config an attacker set "logging": {"file": "/etc/ld.so.preload"} and a bare
+    // `backupkit status` created a root-owned 0600 file at an arbitrary path, or
+    // appended to an existing root-owned one (a line in /etc/sudoers.d/* makes
+    // sudo refuse everything). Invariant 8: nothing privileged before the gate.
+    it("logging.file is not opened until the permission gate has judged the path", async () => {
+        const root = await mkdtemp(join(tmpdir(), "backupkit-logdefer-"));
         try {
-            const configPath = join(root, "config.jsonc");
-            await writeFile(configPath, "{}\n", { mode: 0o600 });
-            const config = makeConfig({
-                configPath,
-                stateDir: join(root, "state"),
-                targets: [makeTarget()],
-            });
-            // A path whose parent does not exist: appendFileSync throws ENOENT.
-            config.logging = { level: "info", file: join(root, "no-such-dir", "backupkit.log") };
-            config.warnings = ["a config warning, logged from the constructor"];
+            const victimDir = join(root, "victim");
+            await mkdir(victimDir, { recursive: true, mode: 0o700 });
+            const planted = join(victimDir, "planted.conf");
+            const kit = await logSinkKit({ root, logFile: planted });
+            // Construction logs the config warnings - and creates nothing.
+            expect(existsSync(planted)).toBe(false);
 
-            const written: string[] = [];
-            const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
-                written.push(String(chunk));
-                return true;
-            });
-            try {
-                // Without the guard this constructor throws: the warning is
-                // logged before the constructor returns.
-                const kit = new Backupkit(config, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
-                expect(kit).toBeInstanceOf(Backupkit);
-            } finally {
-                spy.mockRestore();
-            }
+            // A FAILED gate keeps it that way: the config the path came from is
+            // precisely what is not trusted.
+            await chmod(join(root, "config.jsonc"), 0o666);
+            await expect(kit.preflight()).rejects.toThrowError(/config file .* is group\/other-writable/);
+            expect(existsSync(planted)).toBe(false);
 
-            const notice = written.filter((line) => line.includes("logging.file"));
-            expect(notice).toHaveLength(1);
-            expect(notice[0]).toContain("is not writable");
-            expect(notice[0]).toContain("file logging disabled for this process");
+            // Once the gate passes, the buffered lines land - in a 0600 file.
+            await chmod(join(root, "config.jsonc"), 0o600);
+            await kit.preflight();
+            expect((await stat(planted)).mode & 0o777).toBe(0o600);
+            expect(await readFile(planted, "utf8")).toContain("a config warning, logged from the constructor");
         } finally {
             await rm(root, { recursive: true, force: true });
         }
     });
 
-    // The log sink appends as the daemon's uid - root, under the shipped unit.
-    // A local user who can plant a symlink at the log path would otherwise turn
+    // The sink appends as the daemon's uid - root, under the shipped unit. A
+    // local user who can plant a symlink at the log path would otherwise turn
     // every log line into a root-privileged append to a file of their choosing,
     // and the default 0666 & ~umask would leave config- and remote-derived text
-    // world-readable. O_NOFOLLOW makes the open fail (ELOOP) instead.
-    it("logging.file never follows a symlink and creates at 0600", async () => {
+    // world-readable. O_NOFOLLOW makes the open fail (ELOOP) instead - and that
+    // failure must never escape the call site that logged (a log line thrown out
+    // of the scheduler's own error handler would end the daemon), so it disables
+    // file logging with one stderr notice.
+    it("logging.file never follows a symlink, and a failed open disables file logging instead of throwing", async () => {
         const root = await mkdtemp(join(tmpdir(), "backupkit-logsymlink-"));
         try {
-            const configPath = join(root, "config.jsonc");
-            await writeFile(configPath, "{}\n", { mode: 0o600 });
             const victim = join(root, "victim");
             await writeFile(victim, "untouched\n", { mode: 0o600 });
             const logPath = join(root, "backupkit.log");
             await symlink(victim, logPath);
-
-            const config = makeConfig({ configPath, stateDir: join(root, "state"), targets: [makeTarget()] });
-            config.logging = { level: "info", file: logPath };
-            config.warnings = ["a config warning, logged from the constructor"];
+            const kit = await logSinkKit({ root, logFile: logPath });
 
             const written: string[] = [];
             const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
@@ -909,22 +1102,18 @@ describe("Backupkit", () => {
                 return true;
             });
             try {
-                new Backupkit(config, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
+                // The flush happens here, inside the preflight - and resolves.
+                await expect(kit.preflight()).resolves.toBeUndefined();
             } finally {
                 spy.mockRestore();
             }
 
             // The symlink target is byte-identical: nothing was written through it.
             expect(await readFile(victim, "utf8")).toBe("untouched\n");
-            expect(written.filter((line) => line.includes("logging.file"))).toHaveLength(1);
-
-            // And a real (non-symlink) log file is created 0600, not 0644.
-            const fresh = join(root, "fresh.log");
-            const freshConfig = makeConfig({ configPath, stateDir: join(root, "state"), targets: [makeTarget()] });
-            freshConfig.logging = { level: "info", file: fresh };
-            freshConfig.warnings = ["a config warning, logged from the constructor"];
-            new Backupkit(freshConfig, { now: () => new Date("2026-08-10T12:00:00Z"), env: {}, hasTty: false });
-            expect((await stat(fresh)).mode & 0o777).toBe(0o600);
+            const notice = written.filter((line) => line.includes("logging.file"));
+            expect(notice).toHaveLength(1);
+            expect(notice[0]).toContain("is not writable");
+            expect(notice[0]).toContain("file logging disabled for this process");
         } finally {
             await rm(root, { recursive: true, force: true });
         }

@@ -7,6 +7,7 @@
  * rm), and the newest complete snapshot is never deletable (invariant 7).
  */
 
+import type { Stats } from "node:fs";
 import { lstat, mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
 import { join } from "node:path";
@@ -54,6 +55,12 @@ function assertSnapshotName(name: string): void {
  * "this partial is linked" answer costs a handful of syscalls. Unreadable
  * entries answer true: unknown is not the same as safe.
  *
+ * Every stat here is an `lstat` and every type test comes from `readdir`'s own
+ * dirent, so nothing inside the tree is ever followed: a symlink is counted as
+ * the link (nlink 1), not as whatever it points at, and a symlinked subdirectory
+ * is not recursed into. `dir` ITSELF is still followed by this `readdir` - which
+ * is exactly why the caller lstats the partial for a symlink BEFORE getting here.
+ *
  * ponytail: a full walk in the (rare) all-clear case. Fine - it happens once
  * per run and only when a partial survived. If it ever shows up in a profile,
  * the upgrade path is `find -links +1 -print -quit`.
@@ -92,6 +99,16 @@ function errnoCode(error: unknown): string | null {
 }
 
 /**
+ * Identity of one lock-directory instance: inode plus creation time. Two locks
+ * created in sequence at the same path (a steal, or a release followed by a
+ * fresh acquire) practically never share both, which is what lets a stale-lock
+ * steal tell "still the lock I inspected" from "somebody else's live lock".
+ */
+function lockIdentity(stats: Stats): string {
+    return `${stats.ino}:${stats.ctimeMs}`;
+}
+
+/**
  * Local lock primitives: atomic `fs.mkdir` (fails EEXIST on a pre-planted
  * symlink too), a JSON meta file written 0600, and pid-liveness plus
  * pid-start-time staleness (unparseable meta = stale).
@@ -102,6 +119,9 @@ class LocalLockBackend implements LockBackend {
 
     /** Clock used for the meta's createdAt. */
     private readonly now: () => Date;
+
+    /** Identity of the lock instance the last `inspect()` judged, or null when it saw none. */
+    private inspected: string | null = null;
 
     /** Construct the backend for one store root. */
     constructor(root: string, now: () => Date) {
@@ -155,8 +175,10 @@ class LocalLockBackend implements LockBackend {
             stats = await lstat(this.lockPath);
         } catch {
             // The lock vanished between mkdir and inspect: the re-attempt settles it.
+            this.inspected = null;
             return stale("lock disappeared");
         }
+        this.inspected = lockIdentity(stats);
         if (!stats.isDirectory()) {
             return stale("lock path is not a directory");
         }
@@ -209,6 +231,28 @@ class LocalLockBackend implements LockBackend {
     async remove(): Promise<void> {
         await rm(this.lockPath, { recursive: true, force: true });
     }
+
+    /**
+     * The compare-and-delete half of the stale-lock steal: remove the lock only
+     * while it is still the instance the last `inspect()` judged (same inode and
+     * same creation time - an unlink+mkdir by another contender always yields a
+     * different pair). False means the lock changed or vanished, and `acquire`
+     * then abandons the steal rather than deleting a stranger's LIVE lock.
+     *
+     * ponytail: `node:fs` has no atomic compare-and-delete (no `unlinkat` with
+     * an inode predicate), so this is lstat-then-rm - two adjacent syscalls in
+     * one tick instead of the full inspect->remove round-trip the blind delete
+     * left open. Closing the last sliver needs a different lock primitive
+     * (`flock` on a lock file), which is a spec-section-6 change for both stores.
+     */
+    async removeIfUnchanged(): Promise<boolean> {
+        const stats = await lstat(this.lockPath).catch(() => null);
+        if (stats === null || this.inspected === null || lockIdentity(stats) !== this.inspected) {
+            return false;
+        }
+        await this.remove();
+        return true;
+    }
 }
 
 /** The local `SnapshotStore` implementation over one archive root directory. */
@@ -252,8 +296,9 @@ export class LocalSnapshotStore implements SnapshotStore {
      * `<newName>.partial` for this run to resume into. Names failing the
      * snapshot regex family are never touched.
      *
-     * A survivor that contains ANY multiply-linked entry is discarded instead
-     * of resumed (security invariant 7: a snapshot is immutable once promoted).
+     * A survivor that is a SYMLINK, or that contains ANY multiply-linked entry,
+     * is discarded instead of resumed (security invariant 7: a snapshot is
+     * immutable once promoted, and a run's destination never leaves the archive).
      * `--link-dest` hardlinks unchanged files into the previous snapshot, so
      * resuming into such a partial lets rsync's attribute-only update path
      * (same size and mtime, different mode or uid) `chmod`/`chown` THROUGH the
@@ -278,9 +323,28 @@ export class LocalSnapshotStore implements SnapshotStore {
         if (keep === undefined) {
             return { resumed: false };
         }
-        if (await hasMultiplyLinkedEntry(join(this.root, keep))) {
+        const keepPath = join(this.root, keep);
+        // lstat, never stat: the survivor becomes THIS run's rsync destination
+        // and the transfer argv carries `--delete --force`, so a `<snap>.partial`
+        // SYMLINK planted by anyone who can write the archive root aims that
+        // delete at the link's target, outside the archive - and `promote` would
+        // then rename the link to the snapshot name, so the "snapshot" is a link
+        // and the data lives outside the archive entirely. The hardlink guard
+        // below cannot catch it: its `readdir` FOLLOWS the link, finds an
+        // ordinary tree and waves it through. Discarded rather than fatal,
+        // matching the hardlink guard right below it - a fresh transfer is cheap
+        // and a hard error here would fail the target every 30 s. (The push side
+        // gets this from the jail script's `check_no_symlink_prefix`, invariant
+        // 15; the local/pull store had no equivalent.)
+        if ((await lstat(keepPath)).isSymbolicLink()) {
+            this.log.warn("discarding a resumable partial that is a symlink, not a directory", { partial: keep });
+            // No `recursive`: unlink the link itself, never walk into its target.
+            await rm(keepPath, { force: true });
+            return { resumed: false };
+        }
+        if (await hasMultiplyLinkedEntry(keepPath)) {
             this.log.warn("discarding a resumable partial that hardlinks into a promoted snapshot", { partial: keep });
-            await rm(join(this.root, keep), { recursive: true, force: true });
+            await rm(keepPath, { recursive: true, force: true });
             return { resumed: false };
         }
         const claimed = `${newName}.partial`;
