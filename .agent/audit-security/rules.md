@@ -7,15 +7,47 @@ even when nothing visibly fails.
 1. No process is ever spawned with `shell: true`; no command line is ever built by string
    concatenation of config- or remote-derived values; `exec/` is the only `child_process`
    importer.
-2. Every remote command argv element is quoted by the single quoter in `ssh/internal/quote.ts`;
-   `--` precedes every path operand of `mkdir`/`mv`/`rm`/`df`; no other code constructs remote
-   commands. The two `find` forms pass their operand BARE and must keep doing so - the jail's
+2. Every remote command argv element goes through `ssh/internal/quote.ts`;
+   `--` precedes every path operand of `mkdir`/`mv`/`rm`/`df`/`ls`; no other code constructs remote
+   commands. The `find` forms pass their operand BARE and must keep doing so - the jail's
    `find` case pattern hardcodes the no-`--` shape, so "fixing" the caller would make every
    listing fail with a bare "rejected". `find`'s operand is bounded by absoluteness and by
    `check_lifecycle_path`, not by `--`.
+   That module now holds TWO quoters, and which one runs is decided by `remote.restrictedShell`
+   in `runRemote` - the single place allowed to make that choice. `quoteShellArg` (the default)
+   makes ANY value one shell word. `bareShellArg` returns the value unchanged and is only for an
+   appliance account whose shell parses no quoting at all (a Hetzner Storage Box reads `'mkdir'`
+   as a command named `'mkdir'`), where no escape would survive; its safety therefore comes from
+   REFUSING anything outside `^[A-Za-z0-9._/@:=+,-]+$` rather than from encoding. Two ways to
+   break this silently: widening that charset (whitespace or a quote re-opens word-splitting on
+   an ordinary POSIX shell, which is what such a remote falls back to), and reaching for
+   `bareShellArg` anywhere other than that one `restrictedShell` branch. Neither turns a test red
+   by itself. *graduated: `src/ssh/tests/quote.test.ts` (the bare accept/refuse tables) and
+   `src/ssh/tests/run-remote.fake.test.ts` ("restrictedShell remotes") - expect: >= 15 refused
+   values, and a remote that did not opt in still receiving single-quoted words.*
+   ALSO: the listing verb is chosen by `target.jail`, not by taste - jailed stores list with
+   `find -print0` (the jail's grammar answers nothing else), unjailed ones with `ls -A --`
+   (appliance shells ship no `find`). Both parse into basenames that are then re-joined onto the
+   store root and matched against invariant 6's regex before any destructive command, which is
+   what makes `ls`'s newline-delimited output safe to consume. A future caller that acts on a
+   listed name WITHOUT that regex gate turns a remote-controlled filename into a path operand.
+   *graduated: `src/snapshots/tests/remote-store.test.ts` ("RemoteSnapshotStore unjailed
+   (jail: false)") - expect: no `find` on the unjailed path, and the NUL-mangled-name row still
+   ignored on the jailed one.*
 3. Passphrases are never in config values, env, argv, or logs; only ssh-add's TTY prompt or the
    0600 askpass file ever carries one. Alias remotes carry no passphrase at all (structurally
    impossible).
+   A SERVICE holds no encrypted key at all: `loadKeys` in `serviceMode` refuses every
+   passphrase-protected key (declared `file:`/`prompt`, or merely encrypted in fact - the
+   `ssh-keygen -y -P ""` probe decides) BEFORE it starts an agent, and `backupkit daemon` is the
+   only caller that sets that flag. The silent failure is dropping the flag at that one call
+   site: the daemon then comes back up looking healthy and fails every target on every tick
+   instead, with an error no unattended process can ever resolve. Do not "fix" a report of this
+   by adding an askpass file to the service - a passphrase file beside the key it unlocks is not
+   a secret, and inventing that path is what this rule exists to prevent. *graduated:
+   `src/ssh/tests/agent.fake.test.ts` ("serviceMode refuses passphrase-protected keys") and
+   `src/cli/tests/commands.test.ts` ("preflights in SERVICE mode") - expect: nothing spawned at
+   all before the refusal, and `daemon` passing `{ serviceMode: true }`.*
 4. Every ssh invocation carries `BatchMode=yes`; no code path can block on an interactive
    prompt - alias mode included, because the injected command-line `-o` overrides any
    ssh_config setting.

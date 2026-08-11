@@ -1,6 +1,6 @@
 # @daanvandenbergh/backupkit
 
-![backupkit - automated, versioned rsync backups over SSH](claude/scribekit-hero/readme/hero.png)
+![backupkit - automated, versioned rsync backups over SSH](.agent/scribekit-hero/readme/hero.png)
 
 Automated, versioned backups over SSH - a thin, dependency-free TypeScript layer on top of `rsync`.
 
@@ -26,8 +26,10 @@ Three steps get a machine backing up:
 ```bash
 backupkit init             # write a commented starter config.jsonc
 backupkit check            # verify rsync/ssh versions, keys, and host reachability
-backupkit service install  # register the daemon, then: backupkit service start
+backupkit start            # schedule it in this session (Ctrl-C stops it)
 ```
+
+The last step is where the two run modes fork: `backupkit start` schedules in *your* session, `sudo backupkit service install` registers a root service instead. `check` ends by printing whichever of the two your config can use - a passphrase-protected key rules the service out - with the `--config` path already filled in. See [Two ways to run it](#two-ways-to-run-it).
 
 A minimal **pull** config (`/etc/backupkit/config.jsonc`) - the backup server fetches from a source host that holds no archive credentials:
 
@@ -54,7 +56,7 @@ A minimal **pull** config (`/etc/backupkit/config.jsonc`) - the backup server fe
 }
 ```
 
-Then `backupkit run` performs one pass over every due target; the daemon does it on schedule.
+Then `backupkit run` performs one pass over every due target; `backupkit start` (or the installed service) does it on schedule.
 
 ## CLI
 
@@ -70,15 +72,27 @@ Then `backupkit run` performs one pass over every due target; the daemon does it
 | `backupkit unlock [TARGET...]` | Clear a destination lock a killed run left behind. A live lock is reported, not removed, unless `--force`. |
 | `backupkit service <verb>` | `install`/`uninstall`/`start`/`stop`/`restart`/`status` the systemd unit or launchd job. |
 | `backupkit logs [-f] [-n N]` | Tail the daemon logs (journald on Linux, log files on macOS). |
-| `backupkit start` | Foreground scheduler loop **in your own session**: starts an ssh-agent, adds every key (prompting for each passphrase), then schedules until Ctrl-C. The supported home for passphrase-protected keys. |
+| `backupkit start` | Foreground scheduler loop **in your own session**: starts an ssh-agent, adds every key (prompting for each passphrase), then schedules until Ctrl-C. `--force` runs every target once first. The supported home for passphrase-protected keys. |
 | `backupkit daemon` | Foreground scheduler loop (what the installed service runs). Refuses to start if any configured key is passphrase-protected - a service has no terminal to unlock one on. |
 | `backupkit jail install\|status` | Run **on an archive server** (config-free): atomically install/update the shipped `backupkit-remote` jail script at `/usr/local/bin/backupkit-remote`, or verify the installed copy matches this package version. |
 
 `--config <path>` overrides the default lookup (`$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc`, then `~/.backupkit/config.jsonc`). `init` writes at that same resolved path - `/etc/backupkit/` under `sudo`, `~/.backupkit/` as yourself - and since the daemon runs as root, a config kept in your home directory has to be named at install time: `sudo backupkit service install --config ~/.backupkit/config.jsonc`. See the [configuration reference](https://daanvandenbergh.github.io/backupkit/configuration) and [CLI reference](https://daanvandenbergh.github.io/backupkit/cli-reference).
 
-## Keys: the service takes only unencrypted ones
+## Two ways to run it
 
-`backupkit daemon` - the installed service - checks every configured key before it starts anything and **exits with an error if any of them is passphrase-protected**, naming the key and its remote. A launchd job or systemd unit has no terminal to type a passphrase on, and putting the passphrase in a file beside the key buys no secrecy while adding a second secret to lose. A key counts as protected when its remote declares a `passphrase` *or* when the key file itself turns out to be encrypted.
+The same scheduler - same windows, same retention, same locking - runs in one of two modes. They differ in who supervises it, which config it reads, and whether a key may have a passphrase.
+
+| | [Run it yourself](https://daanvandenbergh.github.io/backupkit/run-it-yourself) | [Run it as a service](https://daanvandenbergh.github.io/backupkit/daemon-setup) |
+|---|---|---|
+| Command | `backupkit start` | `sudo backupkit service install` + `start` |
+| Runs as | you, in a terminal | root, under systemd/launchd |
+| Config | `~/.backupkit/config.jsonc` | `/etc/backupkit/config.jsonc` |
+| `stateDir` default | `~/.local/state/backupkit` | `/var/lib/backupkit` (`/var/db/backupkit` on macOS) |
+| Passphrase-protected key | **yes**, prompts once per key | **no**, refuses to start |
+| Survives logout/reboot | no | yes |
+| Logs | this terminal (plus `logging.file`) | journald / `/var/log/backupkit`, via `backupkit logs` |
+
+`backupkit daemon` - the loop the installed service runs - checks every configured key before it starts anything and **exits with an error if any of them is passphrase-protected**, naming the key and its remote. A launchd job or systemd unit has no terminal to type a passphrase on, and putting the passphrase in a file beside the key buys no secrecy while adding a second secret to lose. A key counts as protected when its remote declares a `passphrase` *or* when the key file itself turns out to be encrypted.
 
 So either give the service its own key with no passphrase (`ssh-keygen -t ed25519 -N ""`), or run the scheduler yourself:
 
@@ -86,13 +100,13 @@ So either give the service its own key with no passphrase (`ssh-keygen -t ed2551
 backupkit start   # ssh-agent + prompt once per key, then schedule until Ctrl-C
 ```
 
-`start` is the same scheduler with the same windows, retention, and locking - it just lives in your session, so it can prompt. Its schedule dies with the process. Alias remotes are unaffected: your own agent and `ssh_config` are in charge of those. See the [daemon setup guide](https://daanvandenbergh.github.io/backupkit/daemon-setup).
+Alias remotes sit outside all of this: `ssh_config` and an agent are in charge of those, though a root service resolves them against *root's* ssh_config, not yours.
 
 ## Push vs pull
 
 **Pull** (recommended) keeps every credential on the backup server: it reaches out and fetches, so a compromised source host holds nothing that can read or delete a stored snapshot. **Push** is for when the source cannot be reached inbound; by default the push key on the archive server is confined by a `backupkit-remote` forced command that jails it to one destination root, permits only rsync plus the snapshot lifecycle, pins each transfer's destination to the scratch `<snapshot>.partial` directory of the run, and validates a rename as a *pair* so a snapshot can never be renamed into a deletable name it did not already have - so no single command, and no pair of commands, can erase a target's archive history. `backupkit check` prints the exact `authorized_keys` line, and installing the script on the archive server is one command there: `npm install -g @daanvandenbergh/backupkit && sudo backupkit jail install` (rerun `jail install` after every package update; `backupkit jail status` tells you when the installed copy has fallen behind, and every `backupkit` command on that server warns on stderr while an installed copy is outdated). Installation is deliberately the server admin's local act - the push client never holds a credential that could rewrite the jail that confines it.
 
-The jail is **recommended, not required**: set `"jail": false` on a push target to run without it - for a plain account whose risk you accept, or a restricted host (a storage-box style appliance) where a forced command cannot be installed. Transfers are identical either way: the client always speaks plain rsync plus POSIX file commands over ssh, and the jail only *filters* them, so nothing is installed on the happy path that the unjailed path lacks. What changes is authority: an unjailed push key can do whatever the account allows, including deleting the entire archive. Without the jail the account must accept these commands over ssh: `rsync --server`, `mkdir -p --`, `mkdir --`, `mv --`, `ls -A --`, `rm -rf --`, and `df -Pk --` - listing is the one command that differs by mode (a jailed target lists with the jail's `find <dir> -maxdepth 1 -mindepth 1 -print0`), because a restricted appliance shell often has no `find` at all. `backupkit check` never probes for the jail; it only prints the lines for jailed targets and notes each `"jail": false` one. An appliance whose shell parses no quoting at all - a Hetzner Storage Box reads `'mkdir'` as a command named `'mkdir'` - additionally needs `"restrictedShell": true` on the remote: backupkit then sends each command as bare words and refuses to send any element that is not already one inert shell word.
+The jail is **recommended, not required**: set `"jail": false` on a push target to run without it - for a plain account whose risk you accept, or a restricted host (a storage-box style appliance) where a forced command cannot be installed. Transfers are identical either way: the client always speaks plain rsync plus POSIX file commands over ssh, and the jail only *filters* them, so nothing is installed on the happy path that the unjailed path lacks. What changes is authority: an unjailed push key can do whatever the account allows, including deleting the entire archive. Without the jail the account must accept these commands over ssh: `rsync --server`, `mkdir -p --`, `mkdir --`, `mv --`, `ls -A --`, `rm -rf --`, and `df -Pk --` - listing is the one command that differs by mode (a jailed target lists with the jail's `find <dir> -maxdepth 1 -mindepth 1 -print0`), because a restricted appliance shell often has no `find` at all. `backupkit check` never probes for the jail; it only prints the lines for jailed targets and notes each `"jail": false` one. An appliance whose shell parses no quoting at all - a Hetzner Storage Box reads `'mkdir'` as a command named `'mkdir'` - additionally needs `"restrictedShell": true` on the remote: backupkit then sends each command as bare words and refuses to send any element that is not already one inert shell word. Those bare words are exactly what the jail's quoted grammar rejects, so a `restrictedShell` remote's push targets must also set `"jail": false` - the config validator refuses the pair rather than letting it fail at run time.
 
 What the jail **cannot** prevent is the authority push mode inherently grants: the pushing host runs retention, so a compromised push client can retire completed snapshots one at a time exactly as the legitimate client does. The archive server holds no retention policy of its own and cannot tell a policy-driven prune from a targeted deletion. That is the structural reason pull is the recommendation, and it is why `backupkit prune` is the only bulk path.
 

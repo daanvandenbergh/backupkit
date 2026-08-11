@@ -21,5 +21,5 @@ Its contents are **published web pages**, not a working or scratch area.
 
 **Do not use this directory as scratch space.** Anything you add as `<slug>/<locale>.mdx` here can go
 **live on the public website**. Do not write notes, plans, task lists, drafts, or temporary files
-here - put working files in your scratchpad or the repo's `claude/` directory instead. Editing an
+here - put working files in your scratchpad or the repo's `.agent/` directory instead. Editing an
 existing page here is fine **only** when the task is explicitly to change the documentation content.

@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-label="backupkit">
     <title>backupkit</title>
     <defs>
-        <!-- The brand ramp, same slots as claude/scribekit-hero/readme/hero.settings.js. -->
+        <!-- The brand ramp, same slots as .agent/scribekit-hero/readme/hero.settings.js. -->
         <linearGradient id="bk-tile" x1="0" y1="0" x2="1" y2="1">
             <stop offset="0" stop-color="#2563EB" />
             <stop offset="55%" stop-color="#6D5DF6" />

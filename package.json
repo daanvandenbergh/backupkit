@@ -36,7 +36,7 @@
         "node": ">=20"
     },
     "devDependencies": {
-        "@daanvandenbergh/claudekit": "^1.0.6",
+        "@daanvandenbergh/claudekit": "^1.2.0",
         "@daanvandenbergh/scribekit": "^1.7.2",
         "@types/node": "^22.20.1",
         "typescript": "^5.6.0",

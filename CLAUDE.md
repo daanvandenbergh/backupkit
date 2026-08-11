@@ -10,7 +10,7 @@ compromised source host cannot touch the backup archive).
 ```
 assets/
   logo/                             # The mark: bare SVG, gradient mark, dark and light app tiles
-claude/
+.agent/
   scribekit-hero/readme/            # The README hero: brand settings, params, rendered hero.png
 src/
   index.ts                          # Package root entry (".")
@@ -67,6 +67,6 @@ Bump `version` in `package.json` and `npm publish` (public scope; `prepublishOnl
 user publishes and pushes - never do either unasked.
 
 ## The public contract stays in lockstep
-`README.md` is this package's contract with its users. Any change to the API, the config shape, or
-the on-disk snapshot layout updates the README in the SAME change - a doc that lags the code is
-part of the definition of NOT done.
+`README.md` and `docs/` are this package's contract with its users. Any change to the API, the config
+shape, the CLI, or the on-disk snapshot layout updates BOTH in the SAME change - a doc that lags the
+code is part of the definition of NOT done.
