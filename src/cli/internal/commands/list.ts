@@ -27,7 +27,7 @@ export async function listCommand(argv: string[], deps: CliDeps): Promise<number
         return 0;
     }
     if (infos.length === 0) {
-        deps.stdout("no backups yet - run: backupkit run");
+        deps.stdout("No snapshots yet. Create the first one with: backupkit run");
         return 0;
     }
     const lines = alignRows(

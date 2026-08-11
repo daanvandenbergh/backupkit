@@ -5,7 +5,7 @@
  */
 
 import type { CliDeps } from "../context.js";
-import { parseFlags } from "../context.js";
+import { count, parseFlags } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
 
 /** The `backupkit daemon` command entry. */
@@ -23,8 +23,8 @@ export async function daemonCommand(argv: string[], deps: CliDeps): Promise<numb
     // without them a healthy daemon is indistinguishable from one that died
     // silently during preflight.
     const enabled = config.targets.filter((target) => target.enabled).length;
-    deps.stdout(`daemon started - scheduling ${enabled} of ${config.targets.length} target(s)`);
+    deps.stdout(`Daemon started - scheduling ${enabled} of ${count(config.targets.length, "configured target")}.`);
     await engine.start();
-    deps.stdout("daemon stopped");
+    deps.stdout("Daemon stopped cleanly.");
     return 0;
 }

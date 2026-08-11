@@ -47,15 +47,15 @@ export async function initCommand(argv: string[], deps: CliDeps): Promise<number
     if (values.force !== true) {
         for (const existing of [path, sibling]) {
             if (existing !== null && deps.files.exists(existing)) {
-                deps.stderr(`config exists at ${existing} - pass --force to overwrite`);
+                deps.stderr(`A config already exists at ${existing}. Pass --force to overwrite it.`);
                 return 1;
             }
         }
     }
     deps.files.mkdir(dirname(path));
     deps.files.write(path, STARTER_CONFIG, 0o644);
-    deps.stdout(`wrote ${path}`);
-    deps.stdout("edit it, then run: backupkit check");
-    deps.stdout("then register the daemon: backupkit service install");
+    deps.stdout(`Wrote a starter config to ${path}`);
+    deps.stdout("Next, edit it to describe your backups, then check it with: backupkit check");
+    deps.stdout("Then register the daemon with: sudo backupkit service install");
     return 0;
 }

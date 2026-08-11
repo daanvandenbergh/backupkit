@@ -35,7 +35,7 @@ export async function restoreCommand(argv: string[], deps: CliDeps): Promise<num
         verify: values.verify === true,
     });
     deps.stdout(
-        `restored ${report.target}/${report.snapshot} -> ${report.output}${report.verified ? " (verified)" : ""}`,
+        `Restored snapshot ${report.snapshot} of ${report.target} to ${report.output}${report.verified ? " (contents verified)" : ""}`,
     );
     return 0;
 }

@@ -4,7 +4,8 @@
  * dispatch over node:util parseArgs commands, the bare-invocation 3-step
  * help, --version, per-command --help, and the exit-code mapping
  * (0 success, 1 runtime failure, 2 config error, 3 lock held, 64 bad usage).
- * Errors print to stderr as `error <CODE>: message`; stack traces appear only
+ * Errors print to stderr as `Error: message` - the machine-readable part is the
+ * exit code, not a prefix a person has to read past; stack traces appear only
  * when the loaded config's logging level is "debug". Every command is a thin
  * view over one engine method except `service` and `logs`, which drive the OS
  * tools through exec/.
@@ -106,14 +107,14 @@ export function defaultDeps(): CliDeps {
     return deps;
 }
 
-/** Map a thrown error to its exit code and print `error <CODE>: message` on stderr. */
+/** Map a thrown error to its exit code and print `Error: message` on stderr. */
 function reportError(error: unknown, deps: CliDeps): number {
     if (error instanceof UsageError) {
-        deps.stderr(`error usage: ${error.message}`);
+        deps.stderr(`Error: ${error.message}`);
         return 64;
     }
     if (isBackupkitError(error)) {
-        deps.stderr(`error ${error.code}: ${error.message}`);
+        deps.stderr(`Error: ${error.message}`);
         if (deps.debugEnabled && error.stack !== undefined) {
             deps.stderr(error.stack);
         }
@@ -126,7 +127,7 @@ function reportError(error: unknown, deps: CliDeps): number {
         return 1;
     }
     const message = error instanceof Error ? error.message : String(error);
-    deps.stderr(`error runtime: ${message}`);
+    deps.stderr(`Error: ${message}`);
     if (deps.debugEnabled && error instanceof Error && error.stack !== undefined) {
         deps.stderr(error.stack);
     }
@@ -207,7 +208,7 @@ if (isEntryPoint(import.meta.url, process.argv[1])) {
             process.exitCode = code;
         },
         (error) => {
-            process.stderr.write(`error runtime: ${error instanceof Error ? error.message : String(error)}\n`);
+            process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
             process.exitCode = 1;
         },
     );

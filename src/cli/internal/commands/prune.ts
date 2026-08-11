@@ -25,23 +25,23 @@ export async function pruneCommand(argv: string[], deps: CliDeps): Promise<numbe
     const report = await engine.prune({ targets, dryRun });
     let failed = false;
     for (const entry of report.targets) {
-        deps.stdout(`target ${entry.target}:`);
+        deps.stdout(`Target ${entry.target}:`);
         for (const keep of entry.plan.keep) {
-            deps.stdout(`    keep  ${keep.name}  (${keep.reasons.join(", ")})`);
+            deps.stdout(`    keep   ${keep.name}  (${keep.reasons.join(", ")})`);
         }
         for (const name of entry.plan.prune) {
-            deps.stdout(`    prune ${name}${dryRun ? "" : "  (deleted)"}`);
+            deps.stdout(`    prune  ${name}${dryRun ? "" : "  (deleted)"}`);
         }
         if (entry.plan.prune.length === 0) {
-            deps.stdout("    nothing to prune");
+            deps.stdout("    Nothing to prune - every snapshot is still within retention.");
         }
         for (const error of entry.errors) {
-            deps.stderr(`error snapshot-store: ${entry.target}: ${error}`);
+            deps.stderr(`Error: could not prune ${entry.target}: ${error}`);
             failed = true;
         }
     }
     if (dryRun) {
-        deps.stdout("dry-run - nothing was deleted");
+        deps.stdout("Dry run - nothing was deleted. Drop --dry-run to apply this plan.");
     }
     return failed ? 1 : 0;
 }

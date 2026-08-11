@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import { main } from "../main.js";
-import { MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "../internal/service/units.js";
+import { LAUNCHD_PLIST_PATH, MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "../internal/service/units.js";
 import { fakeDeps, makeExecResult } from "./fakes.js";
 
 /** Fake deps with the systemd unit already installed (the normal Linux case). */
@@ -48,10 +48,12 @@ describe("Linux (journalctl)", () => {
         expect(h.execCalls).toEqual([]);
     });
 
-    it("reports the missing-source message with exit 1 when the unit was never installed", async () => {
+    it("reports the not-installed message with exit 1 when the unit was never installed", async () => {
         const h = fakeDeps();
         expect(await main(["logs"], h.deps)).toBe(1);
-        expect(h.err).toEqual(["no daemon logs found - is the service installed? (backupkit service install)"]);
+        expect(h.err).toEqual([
+            "No daemon logs found - the service is not installed. Register it with: sudo backupkit service install",
+        ]);
         expect(h.execCalls).toEqual([]);
     });
 });
@@ -60,7 +62,7 @@ describe("macOS (tail)", () => {
     it("tails the existing launchd log files", async () => {
         const h = fakeDeps({
             platform: "darwin",
-            files: { [MACOS_LOG_FILES[0]]: "log", [MACOS_LOG_FILES[1]]: "err" },
+            files: { [LAUNCHD_PLIST_PATH]: "<plist>", [MACOS_LOG_FILES[0]]: "log", [MACOS_LOG_FILES[1]]: "err" },
         });
         expect(await main(["logs", "-n", "50", "-f"], h.deps)).toBe(0);
         expect([h.execCalls[0].bin, ...h.execCalls[0].args]).toEqual([
@@ -75,15 +77,26 @@ describe("macOS (tail)", () => {
     });
 
     it("skips a missing file but still tails the other", async () => {
-        const h = fakeDeps({ platform: "darwin", files: { [MACOS_LOG_FILES[1]]: "err" } });
+        const h = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "<plist>", [MACOS_LOG_FILES[1]]: "err" } });
         expect(await main(["logs"], h.deps)).toBe(0);
         expect(h.execCalls[0].args).toEqual(["-n", "100", "/var/log/backupkit/backupkit.err.log"]);
     });
 
-    it("reports the missing-source message with exit 1 when no log file exists", async () => {
+    it("reports the not-installed message with exit 1 when the plist is absent", async () => {
         const h = fakeDeps({ platform: "darwin" });
         expect(await main(["logs"], h.deps)).toBe(1);
-        expect(h.err).toEqual(["no daemon logs found - is the service installed? (backupkit service install)"]);
+        expect(h.err).toEqual([
+            "No daemon logs found - the service is not installed. Register it with: sudo backupkit service install",
+        ]);
+        expect(h.execCalls).toEqual([]);
+    });
+
+    it("distinguishes installed-but-no-logs (crash-loop) from not-installed", async () => {
+        const h = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "<plist>" } });
+        expect(await main(["logs"], h.deps)).toBe(1);
+        expect(h.err).toEqual([
+            "The service is installed but has written no logs yet - if it should be running, it may be failing to start. Check: backupkit service status",
+        ]);
         expect(h.execCalls).toEqual([]);
     });
 });

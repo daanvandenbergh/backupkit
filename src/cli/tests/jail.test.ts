@@ -104,6 +104,24 @@ describe("jail status", () => {
         expect(await main(["jail", "status"], h.deps)).toBe(1);
         expect(h.err[0]).toContain("missing its jail script");
     });
+
+    // Every "run this to fix it" line under --path has to CARRY the --path, or
+    // it names a command that writes to a different file than the one just
+    // reported on - follow it and the reported path stays exactly as broken.
+    it.each([
+        ["not installed", {}],
+        ["outdated", { "/opt/bk/backupkit-remote": "#!/bin/sh\nv1\n" }],
+    ])("carries --path into the fix command it prints (%s)", async (_case, files) => {
+        const h = jailDeps({ files });
+        expect(await main(["jail", "status", "--path", "/opt/bk/backupkit-remote"], h.deps)).toBe(1);
+        expect(h.out[0]).toContain("sudo backupkit jail install --path /opt/bk/backupkit-remote");
+    });
+
+    it("carries --path into the needs-root refusal too", async () => {
+        const h = jailDeps({ euid: 501 });
+        expect(await main(["jail", "install", "--path", "/opt/bk/backupkit-remote"], h.deps)).toBe(1);
+        expect(h.err[0]).toContain("sudo backupkit jail install --path /opt/bk/backupkit-remote");
+    });
 });
 
 describe("jail drift warning (every command)", () => {

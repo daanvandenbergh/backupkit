@@ -30,7 +30,7 @@ sudo backupkit service install
 sudo backupkit service start
 ```
 
-`service install` writes the OS unit (a systemd unit on Linux, a launchd plist on macOS), enables it on systemd, writes a newsyslog rotation rule on macOS, and ends with `installed - start it: backupkit service start`.
+`service install` writes the OS unit (a systemd unit on Linux, a launchd plist on macOS), enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
 
 ## Drive the lifecycle
 
@@ -40,12 +40,12 @@ sudo backupkit service start
 | --- | --- |
 | `install` | write the unit (+ enable on systemd, + newsyslog conf on macOS) |
 | `uninstall` | stop the unit if running, then remove everything install wrote |
-| `start` | start the unit; `already running` if it is up (exit 0) |
-| `stop` | stop the unit; `already stopped` if it is down (exit 0) |
+| `start` | start the unit; `Service is already running.` if it is up (exit 0) |
+| `stop` | stop the unit; `Service is already stopped.` if it is down (exit 0) |
 | `restart` | restart the running unit |
 | `status` | the unit-state header line plus the per-target table |
 
-Any lifecycle verb run without an installed unit prints `service not installed - run: backupkit service install` and exits 1. On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`. `service status` is the one verb that needs no root: it prepends a `service: active (pid 1234)` or `service: not installed` header to the ordinary `status` table, and never errors just because the unit is absent.
+Any lifecycle verb run without an installed unit says the service is not installed, names the command that registers it, and exits 1. On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`. `service status` is the one verb that needs no root: it prepends a one-line unit-state header - running (with the pid), installed but stopped, or not installed - to the ordinary `status` table, and never errors just because the unit is absent.
 
 **The unit follows your config.** Parts of it are derived from the config - most importantly `ReadWritePaths`, which lists every path the daemon may write: each local destination root, the `stateDir`, the config directory, and the `logging.file` directory. Under `ProtectSystem=strict` the rest of the filesystem is read-only, so a unit written before you added a target would leave the daemon unable to write the new archive at all. You do not have to remember this: `start` and `restart` re-derive the unit from the current config, and if it differs they rewrite it, print `config changed since install - refreshed the service unit`, and reload (on macOS a changed plist is reloaded with `bootout` + `bootstrap`, since `kickstart` would re-exec the cached one). Adding a target is therefore just an edit plus `sudo backupkit service restart`.
 
@@ -64,7 +64,7 @@ backupkit logs -f         # follow until Ctrl-C
 backupkit logs -n 500     # last 500 lines
 ```
 
-`-n`/`--lines` defaults to 100; `-f`/`--follow` streams live. If there is no log source yet - no journal unit, or no macOS log files - it prints `no daemon logs found - is the service installed? (backupkit service install)` and exits 1. There is no `--json`, because journald already offers `-o json` for machines.
+`-n`/`--lines` defaults to 100; `-f`/`--follow` streams live. If there is no log source yet - no journal unit, or no macOS log files - it says so, names the command that registers the service, and exits 1. There is no `--json`, because journald already offers `-o json` for machines.
 
 ## How restart and reboot recovery work
 

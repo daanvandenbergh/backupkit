@@ -169,6 +169,17 @@ export function selectTargets(positionals: string[], config: ResolvedConfig): st
 }
 
 /**
+ * "1 target", "2 targets" - a count with its noun, pluralised. Every CLI line
+ * that reports a count goes through this instead of writing "target(s)": a
+ * person reading "1 problem(s) above need fixing" is reading a template that
+ * was never finished, and that is the whole impression the message leaves.
+ * `plural` is for the irregulars; the default is the English "+s".
+ */
+export function count(n: number, singular: string, plural: string = `${singular}s`): string {
+    return `${n} ${n === 1 ? singular : plural}`;
+}
+
+/**
  * Render rows as padEnd-aligned plain-text columns (no ANSI, greppable).
  * Column widths fit the widest cell including the header.
  */

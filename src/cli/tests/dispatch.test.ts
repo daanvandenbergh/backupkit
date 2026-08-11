@@ -46,7 +46,7 @@ describe("bare invocation and global flags", () => {
     it("rejects an unknown command with exit 64 listing the valid names", async () => {
         const h = fakeDeps();
         expect(await main(["frobnicate"], h.deps)).toBe(64);
-        expect(h.err[0]).toContain('error usage: unknown command "frobnicate"');
+        expect(h.err[0]).toContain('Error: unknown command "frobnicate"');
         for (const name of ["run", "daemon", "service", "logs", "list", "ls", "status", "restore", "prune", "check", "init"]) {
             expect(h.err[0]).toContain(name);
         }
@@ -62,7 +62,7 @@ describe("bare invocation and global flags", () => {
         async (name) => {
             const h = fakeDeps();
             expect(await main([name], h.deps)).toBe(64);
-            expect(h.err[0]).toContain(`error usage: unknown command "${name}"`);
+            expect(h.err[0]).toContain(`Error: unknown command "${name}"`);
             expect(h.engine.calls).toEqual([]);
         },
     );
@@ -101,7 +101,7 @@ describe("unknown flags exit 64 listing the valid flags", () => {
     ])("%s %s", async (command, flag) => {
         const h = fakeDeps();
         expect(await main([command, flag], h.deps)).toBe(64);
-        expect(h.err[0]).toContain("error usage:");
+        expect(h.err[0]).toContain("Error:");
         expect(h.err[0]).toContain("valid flags:");
         expect(h.err[0]).toContain("--config");
         expect(h.engine.calls).toEqual([]);
@@ -138,10 +138,10 @@ describe("flag forms and the ls alias", () => {
 
 describe("exit-code mapping", () => {
     it.each([
-        [new ConfigError("bad config"), 2, "error config: bad config"],
-        [new LockHeldError("lock held by pid 7"), 3, "error lock-held: lock held by pid 7"],
-        [new SshError("host down"), 1, "error ssh: host down"],
-        [new Error("boom"), 1, "error runtime: boom"],
+        [new ConfigError("bad config"), 2, "Error: bad config"],
+        [new LockHeldError("lock held by pid 7"), 3, "Error: lock held by pid 7"],
+        [new SshError("host down"), 1, "Error: host down"],
+        [new Error("boom"), 1, "Error: boom"],
     ])("engine failure %#: exit %i with formatted stderr", async (error, code, line) => {
         const h = fakeDeps();
         h.engine.failure = error as Error;
@@ -152,7 +152,7 @@ describe("exit-code mapping", () => {
     it("maps a config-load failure to exit 2", async () => {
         const h = fakeDeps({ loadFailure: new ConfigError("/etc/backupkit/config.jsonc:3: targets: missing") });
         expect(await main(["run"], h.deps)).toBe(2);
-        expect(h.err[0]).toBe("error config: /etc/backupkit/config.jsonc:3: targets: missing");
+        expect(h.err[0]).toBe("Error: /etc/backupkit/config.jsonc:3: targets: missing");
     });
 
     it("prints a stack trace only when debug is enabled", async () => {

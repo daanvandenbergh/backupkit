@@ -43,9 +43,9 @@ describe("writing", () => {
         expect(await main(["init", "--config", "/tmp/bk/config.jsonc"], h.deps)).toBe(0);
         expect(h.fileMap.get("/tmp/bk/config.jsonc")).toBe(STARTER_CONFIG);
         expect(h.out).toEqual([
-            "wrote /tmp/bk/config.jsonc",
-            "edit it, then run: backupkit check",
-            "then register the daemon: backupkit service install",
+            "Wrote a starter config to /tmp/bk/config.jsonc",
+            "Next, edit it to describe your backups, then check it with: backupkit check",
+            "Then register the daemon with: sudo backupkit service install",
         ]);
         expect(h.err).toEqual([]);
     });
@@ -53,14 +53,14 @@ describe("writing", () => {
     it("refuses to overwrite an existing config without --force", async () => {
         const h = fakeDeps({ files: { "/tmp/bk/config.jsonc": "old" } });
         expect(await main(["init", "--config", "/tmp/bk/config.jsonc"], h.deps)).toBe(1);
-        expect(h.err).toEqual(["config exists at /tmp/bk/config.jsonc - pass --force to overwrite"]);
+        expect(h.err).toEqual(["A config already exists at /tmp/bk/config.jsonc. Pass --force to overwrite it."]);
         expect(h.fileMap.get("/tmp/bk/config.jsonc")).toBe("old");
     });
 
     it("refuses when a sibling config.json exists (would trip the keep-one rule)", async () => {
         const h = fakeDeps({ files: { "/tmp/bk/config.json": "old" } });
         expect(await main(["init", "--config", "/tmp/bk/config.jsonc"], h.deps)).toBe(1);
-        expect(h.err).toEqual(["config exists at /tmp/bk/config.json - pass --force to overwrite"]);
+        expect(h.err).toEqual(["A config already exists at /tmp/bk/config.json. Pass --force to overwrite it."]);
     });
 
     it("overwrites with --force", async () => {

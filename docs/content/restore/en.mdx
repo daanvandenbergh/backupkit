@@ -26,11 +26,7 @@ Give `restore` the target, the snapshot name, and a `--output` path that does no
 backupkit restore var-www 2026-08-10T031500Z --output /tmp/restored-www
 ```
 
-On success it prints one line:
-
-```
-restored var-www/2026-08-10T031500Z -> /tmp/restored-www
-```
+On success it prints one line naming the target, the snapshot, and where it landed.
 
 The copy uses `rsync -a --sparse -H`, so permissions, sparse files, and hard links inside the snapshot are preserved. Symlinks are copied as symlinks, never followed. `--delete` is never passed - restore only ever writes into a fresh path.
 
@@ -56,11 +52,7 @@ Add `--verify` for a post-copy integrity check. It runs a checksum dry-run compa
 backupkit restore var-www latest --output /tmp/restored-www --verify
 ```
 
-A clean verify pass appends `(verified)` to the output line:
-
-```
-restored var-www/2026-08-10T031500Z -> /tmp/restored-www (verified)
-```
+A clean verify pass marks the output line as verified.
 
 Verification is opt-in because it re-reads both sides in full. Skip it for a routine restore; use it when you need proof the copy is bit-for-bit the snapshot.
 

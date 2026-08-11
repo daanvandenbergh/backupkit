@@ -74,15 +74,15 @@ Run the foreground scheduler loop - this is exactly what the installed service u
 
 ### service
 
-Manage the OS service unit: `install | uninstall | start | stop | restart | status`. Every verb is idempotent, and `install`, `uninstall`, `start`, `stop`, and `restart` require root; `status` does not. A lifecycle verb with no installed unit prints `service not installed - run: backupkit service install` and exits 1. See [Daemon Setup](/daemon-setup) for the full lifecycle.
+Manage the OS service unit: `install | uninstall | start | stop | restart | status`. Every verb is idempotent, and `install`, `uninstall`, `start`, `stop`, and `restart` require root; `status` does not. A lifecycle verb with no installed unit says the service is not installed, names the command that registers it, and exits 1. See [Daemon Setup](/daemon-setup) for the full lifecycle.
 
 ### logs
 
-Tail the daemon logs - `journalctl -u backupkit` on Linux, a `tail` of the launchd log files on macOS. `-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. With no log source it prints `no daemon logs found - is the service installed? (backupkit service install)` and exits 1. There is no `--json` (journald offers `-o json`).
+Tail the daemon logs - `journalctl -u backupkit` on Linux, a `tail` of the launchd log files on macOS. `-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. With no log source it says so, names the command that registers the service, and exits 1. There is no `--json` (journald offers `-o json`).
 
 ### list (alias: ls)
 
-List complete snapshots per target, oldest first, with a partial-resume indicator. `ls` is the one alias for `list`. A missing archive directory prints `no backups yet - run: backupkit run` and exits 0.
+List complete snapshots per target, oldest first, with a partial-resume indicator. `ls` is the one alias for `list`. A missing archive directory says there are no snapshots yet, names `backupkit run`, and exits 0.
 
 ### status
 
@@ -102,11 +102,11 @@ The interactive readiness gate: validate the config (stopping at the first error
 
 ### init
 
+Write the fully commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force`, naming the config already in the way. Its stdout is three lines.
+
 ### jail
 
 The one command meant for the **archive server**, not the push client (install backupkit there too; neither verb reads a config). `install` copies the `backupkit-remote` forced-command script this package ships to `/usr/local/bin/backupkit-remote` (or `--path`) - atomically via a temp file and rename, re-asserting mode `0755`, idempotent, root required. `status` (no root) compares the installed copy against the shipped one and exits 1 when it is missing or outdated - an old copy rejects every push, so pair `npm update -g` with `sudo backupkit jail install`, and use `status` from monitoring to catch drift. The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. As a safety net, **every** `backupkit` invocation on a machine with a script installed at the well-known path prints a stderr warning when that copy differs from the package - a machine with no installed script stays silent. See [the push jail](/security-model#the-push-jail-a-forced-command-that-validates-the-resolved-path).
-
-Write the fully commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force` (`config exists at <path> - pass --force to overwrite`). Its stdout is three lines.
 
 ## JSON output
 

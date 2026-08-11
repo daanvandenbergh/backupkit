@@ -79,6 +79,19 @@ function install(deps: CliDeps, dest: string): number {
     return 0;
 }
 
+/**
+ * The exact command that installs to `dest` - carrying `--path` through
+ * whenever `dest` is not the default. A bare "run: sudo backupkit jail install"
+ * printed under `jail status --path /opt/bk/backupkit-remote` names a command
+ * that writes to a DIFFERENT file than the one just reported on, so following
+ * the instruction leaves the reported path exactly as broken as it was.
+ */
+function installCommandFor(dest: string): string {
+    return dest === JAIL_INSTALL_PATH
+        ? "sudo backupkit jail install"
+        : `sudo backupkit jail install --path ${dest}`;
+}
+
 /** Report whether the installed copy at `dest` matches the shipped script. Exit 0 only when it does. */
 function status(deps: CliDeps, dest: string): number {
     const shipped = readShipped(deps);
@@ -86,12 +99,12 @@ function status(deps: CliDeps, dest: string): number {
         return 1;
     }
     if (!deps.files.exists(dest)) {
-        deps.stdout(`Jail script: not installed at ${dest}. Install it with: sudo backupkit jail install`);
+        deps.stdout(`Jail script: not installed at ${dest}. Install it with: ${installCommandFor(dest)}`);
         return 1;
     }
     if (deps.files.read(dest) !== shipped) {
         deps.stdout(
-            `Jail script: ${dest} differs from the version this package ships (${deps.version}) - an old copy rejects every push. Update it with: sudo backupkit jail install`,
+            `Jail script: ${dest} differs from the version this package ships (${deps.version}) - an old copy rejects every push. Update it with: ${installCommandFor(dest)}`,
         );
         return 1;
     }
@@ -137,7 +150,7 @@ export async function jailCommand(argv: string[], deps: CliDeps): Promise<number
         throw new UsageError(`--path must be absolute (got "${dest}")`);
     }
     if (verb === "install" && deps.euid !== 0) {
-        deps.stderr(`"backupkit jail install" needs root. Run: sudo backupkit jail install`);
+        deps.stderr(`"backupkit jail install" needs root. Run: ${installCommandFor(dest)}`);
         return 1;
     }
     return verb === "install" ? install(deps, dest) : status(deps, dest);

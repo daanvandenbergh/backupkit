@@ -11,10 +11,23 @@
 import type { CliDeps } from "../context.js";
 import { parseFlags, UsageError } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
-import { MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "./units.js";
+import { LAUNCHD_PLIST_PATH, MACOS_LOG_FILES, SYSTEMD_UNIT_PATH } from "./units.js";
 
-/** The message printed when no log source exists. */
-const NO_LOGS = "no daemon logs found - is the service installed? (backupkit service install)";
+/** Printed when the service is genuinely not registered yet. */
+const NOT_INSTALLED =
+    "No daemon logs found - the service is not installed. Register it with: sudo backupkit service install";
+
+/**
+ * Printed when the service IS installed but no log file exists yet - a
+ * different state from "not installed" that the old message wrongly conflated.
+ * The usual cause is a daemon that crash-loops before writing anything (its
+ * exit reason is in `service status` / the platform's own log), so point there.
+ */
+const INSTALLED_NO_LOGS =
+    "The service is installed but has written no logs yet - if it should be running, it may be failing to start. Check: backupkit service status";
+
+/** Printed on Linux when journalctl itself is missing (nothing can read the journal). */
+const NO_JOURNALCTL = "Cannot read logs: journalctl is not available on this system.";
 
 /** The `backupkit logs` command entry. */
 export async function logsCommand(argv: string[], deps: CliDeps): Promise<number> {
@@ -38,9 +51,13 @@ export async function logsCommand(argv: string[], deps: CliDeps): Promise<number
     const follow = values.follow === true;
 
     if (deps.platform === "darwin") {
+        if (!deps.files.exists(LAUNCHD_PLIST_PATH)) {
+            deps.stderr(NOT_INSTALLED);
+            return 1;
+        }
         const files = MACOS_LOG_FILES.filter((file) => deps.files.exists(file));
         if (files.length === 0) {
-            deps.stderr(NO_LOGS);
+            deps.stderr(INSTALLED_NO_LOGS);
             return 1;
         }
         const result = await deps.execFn("tail", ["-n", lines, ...(follow ? ["-f"] : []), ...files], {
@@ -53,7 +70,7 @@ export async function logsCommand(argv: string[], deps: CliDeps): Promise<number
     // unregistered unit reports the spec'd missing-source message instead of
     // journalctl's silent "-- No entries --" success (exit 0).
     if (!deps.files.exists(SYSTEMD_UNIT_PATH)) {
-        deps.stderr(NO_LOGS);
+        deps.stderr(NOT_INSTALLED);
         return 1;
     }
     try {
@@ -63,7 +80,7 @@ export async function logsCommand(argv: string[], deps: CliDeps): Promise<number
         return result.exitCode ?? 1;
     } catch {
         // journalctl absent entirely (spawn failed): no journal to read.
-        deps.stderr(NO_LOGS);
+        deps.stderr(NO_JOURNALCTL);
         return 1;
     }
 }

@@ -69,7 +69,7 @@ describe("verb parsing and root requirement", () => {
         async (verb) => {
             const h = fakeDeps({ euid: 501 });
             expect(await main(["service", verb], h.deps)).toBe(1);
-            expect(h.err).toEqual([`service ${verb} requires root - run: sudo backupkit service ${verb}`]);
+            expect(h.err).toEqual([`"backupkit service ${verb}" needs root. Run: sudo backupkit service ${verb}`]);
             expect(h.execCalls).toEqual([]);
         },
     );
@@ -77,7 +77,7 @@ describe("verb parsing and root requirement", () => {
     it("status does not require root", async () => {
         const h = fakeDeps({ euid: 501 });
         expect(await main(["service", "status"], h.deps)).toBe(0);
-        expect(h.out[0]).toBe("service: not installed");
+        expect(h.out[0]).toBe("Service: not installed (register it with: sudo backupkit service install)");
     });
 });
 
@@ -93,7 +93,7 @@ describe("Linux lifecycle", () => {
             ["systemctl", "enable", "backupkit"],
         ]);
         expect(h.execCalls[0].options?.stdio).toBe("inherit");
-        expect(h.out).toEqual(["installed - start it: backupkit service start"]);
+        expect(h.out).toEqual(["Service installed. Start it with: sudo backupkit service start"]);
         expect(h.fileMap.has(NEWSYSLOG_CONF_PATH)).toBe(false);
         // No logging.file in the default fixture: only the stateDir, which is an
         // unprefixed ReadWritePaths member and so must exist before the unit
@@ -126,9 +126,9 @@ describe("Linux lifecycle", () => {
     });
 
     it.each([
-        ["start", "inactive", ["systemctl", "start", "backupkit"], "started"],
-        ["stop", "active", ["systemctl", "stop", "backupkit"], "stopped"],
-        ["restart", "active", ["systemctl", "restart", "backupkit"], "restarted"],
+        ["start", "inactive", ["systemctl", "start", "backupkit"], "Service started."],
+        ["stop", "active", ["systemctl", "stop", "backupkit"], "Service stopped."],
+        ["restart", "active", ["systemctl", "restart", "backupkit"], "Service restarted."],
     ])("%s drives systemctl and reports", async (verb, activeState, expectedArgv, message) => {
         const h = fakeDeps({
             files: installedFiles("linux"),
@@ -150,7 +150,7 @@ describe("Linux lifecycle", () => {
             execResults: [{ match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "active\n" }) }],
         });
         expect(await main(["service", "start"], running.deps)).toBe(0);
-        expect(running.out).toEqual(["already running"]);
+        expect(running.out).toEqual(["Service is already running."]);
         expect(running.execCalls.map((call) => call.args[0])).not.toContain("start");
 
         const stopped = fakeDeps({
@@ -158,7 +158,7 @@ describe("Linux lifecycle", () => {
             execResults: [{ match: (bin, args) => args[0] === "is-active", result: makeExecResult({ stdout: "inactive\n", exitCode: 3 }) }],
         });
         expect(await main(["service", "stop"], stopped.deps)).toBe(0);
-        expect(stopped.out).toEqual(["already stopped"]);
+        expect(stopped.out).toEqual(["Service is already stopped."]);
     });
 
     // The unit mirrors config-derived facts (ReadWritePaths above all), and
@@ -188,7 +188,7 @@ describe("Linux lifecycle", () => {
         });
         expect(await main(["service", verb], h.deps)).toBe(0);
         expect(h.fileMap.get(SYSTEMD_UNIT_PATH)).toContain('"-/mnt/archive"');
-        expect(h.out).toContain("config changed since install - refreshed the service unit");
+        expect(h.out).toContain("Config changed since install - refreshed the service unit.");
         expect(h.execCalls.map((call) => [call.bin, ...call.args])).toContainEqual(["systemctl", "daemon-reload"]);
     });
 
@@ -203,14 +203,14 @@ describe("Linux lifecycle", () => {
             ],
         });
         expect(await main(["service", "start"], h.deps)).toBe(0);
-        expect(h.out).toEqual(["started"]);
+        expect(h.out).toEqual(["Service started."]);
         expect(h.execCalls.map((call) => call.args[0])).not.toContain("daemon-reload");
     });
 
     it.each([["start"], ["stop"], ["restart"]])("%s without an installed unit exits 1 naming service install", async (verb) => {
         const h = fakeDeps();
         expect(await main(["service", verb], h.deps)).toBe(1);
-        expect(h.err).toEqual(["service not installed - run: backupkit service install"]);
+        expect(h.err).toEqual(["The backupkit service is not installed. Register it with: sudo backupkit service install"]);
         expect(h.execCalls).toEqual([]);
     });
 
@@ -225,11 +225,11 @@ describe("Linux lifecycle", () => {
         expect(argv).toContainEqual(["systemctl", "stop", "backupkit"]);
         expect(argv).toContainEqual(["systemctl", "disable", "backupkit"]);
         expect(argv).toContainEqual(["systemctl", "daemon-reload"]);
-        expect(h.out).toEqual(["uninstalled"]);
+        expect(h.out).toEqual(["Service uninstalled."]);
 
         const again = fakeDeps();
         expect(await main(["service", "uninstall"], again.deps)).toBe(0);
-        expect(again.out).toEqual(["already uninstalled"]);
+        expect(again.out).toEqual(["Service was not installed - nothing to remove."]);
         expect(again.execCalls).toEqual([]);
     });
 
@@ -245,7 +245,7 @@ describe("Linux lifecycle", () => {
             { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false },
         ];
         expect(await main(["service", "status"], h.deps)).toBe(0);
-        expect(h.out[0]).toBe("service: active (pid 1234)");
+        expect(h.out[0]).toBe("Service: running (pid 1234)");
         expect(h.out[1]).toContain("TARGET");
         expect(h.out[2]).toContain("web");
     });
@@ -329,7 +329,7 @@ describe("macOS lifecycle", () => {
         expect(h.fileMap.get(LAUNCHD_PLIST_PATH)).toContain("<key>KeepAlive</key>");
         expect(h.fileMap.get(NEWSYSLOG_CONF_PATH)).toBe("/var/log/backupkit/*.log  root:wheel  640  5  10240  *  J\n");
         expect(h.execCalls).toEqual([]);
-        expect(h.out).toEqual(["installed - start it: backupkit service start"]);
+        expect(h.out).toEqual(["Service installed. Start it with: sudo backupkit service start"]);
     });
 
     it("start bootstraps when not loaded and is idempotent when loaded", async () => {
@@ -341,11 +341,11 @@ describe("macOS lifecycle", () => {
             "system",
             LAUNCHD_PLIST_PATH,
         ]);
-        expect(cold.out).toEqual(["started"]);
+        expect(cold.out).toEqual(["Service started."]);
 
         const warm = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "start"], warm.deps)).toBe(0);
-        expect(warm.out).toEqual(["already running"]);
+        expect(warm.out).toEqual(["Service is already running."]);
     });
 
     it("stop boots out and restart kickstarts", async () => {
@@ -381,6 +381,6 @@ describe("macOS lifecycle", () => {
     it("status parses the launchd pid", async () => {
         const h = fakeDeps({ platform: "darwin", files: installedFiles("darwin"), execResults: [loaded()] });
         expect(await main(["service", "status"], h.deps)).toBe(0);
-        expect(h.out[0]).toBe("service: active (pid 4321)");
+        expect(h.out[0]).toBe("Service: running (pid 4321)");
     });
 });

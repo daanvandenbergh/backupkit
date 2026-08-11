@@ -21,7 +21,11 @@ describe("run", () => {
         };
         expect(await main(["run", "web", "--force", "--dry-run"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({ method: "run", options: { targets: ["web"], force: true, dryRun: true } });
-        expect(h.out).toEqual(["web: success snapshot=2026-08-10T031500Z", "db: skipped reason=disk-low"]);
+        expect(h.out).toEqual([
+            "OK      web - snapshot 2026-08-10T031500Z",
+            "skipped db - disk-low",
+            "Done - 2 targets processed, none failed.",
+        ]);
     });
 
     it("exits 1 when any target failed", async () => {
@@ -32,13 +36,16 @@ describe("run", () => {
             targets: [makeRunReport({ status: "failed", error: "transfer exhausted", snapshot: null })],
         };
         expect(await main(["run"], h.deps)).toBe(1);
-        expect(h.out[0]).toBe("web: failed error=transfer exhausted");
+        expect(h.out).toEqual([
+            "FAILED  web - transfer exhausted",
+            "Done - 1 of 1 target FAILED. See the lines above, or run: backupkit logs",
+        ]);
     });
 
     it("says so when nothing was due and wires signal handling to engine.stop", async () => {
         const h = fakeDeps();
         expect(await main(["run"], h.deps)).toBe(0);
-        expect(h.out).toEqual(["no targets were due - pass --force to run anyway"]);
+        expect(h.out).toEqual(["Nothing to do - no target is due yet. Run them all anyway with: backupkit run --force"]);
         expect(h.stops).toHaveLength(1);
         await h.stops[0]();
         expect(h.engine.calls.map((call) => call.method)).toContain("stop");
@@ -56,7 +63,7 @@ describe("daemon", () => {
     it("brackets the scheduler loop with a start and a stop line", async () => {
         const h = fakeDeps();
         expect(await main(["daemon"], h.deps)).toBe(0);
-        expect(h.out).toEqual(["daemon started - scheduling 1 of 1 target(s)", "daemon stopped"]);
+        expect(h.out).toEqual(["Daemon started - scheduling 1 of 1 configured target.", "Daemon stopped cleanly."]);
     });
 });
 
@@ -79,7 +86,7 @@ describe("list", () => {
     it("prints the no-backups hint on an empty listing", async () => {
         const h = fakeDeps();
         expect(await main(["list"], h.deps)).toBe(0);
-        expect(h.out).toEqual(["no backups yet - run: backupkit run"]);
+        expect(h.out).toEqual(["No snapshots yet. Create the first one with: backupkit run"]);
     });
 
     it("emits one JSON document with --json", async () => {
@@ -143,7 +150,7 @@ describe("restore", () => {
             method: "restore",
             options: { target: "web", snapshot: "latest", output: "/tmp/out", verify: true },
         });
-        expect(h.out).toEqual(["restored web/2026-08-10T031500Z -> /tmp/out (verified)"]);
+        expect(h.out).toEqual(["Restored snapshot 2026-08-10T031500Z of web to /tmp/out (contents verified)"]);
     });
 });
 
@@ -166,10 +173,10 @@ describe("prune", () => {
         expect(await main(["prune", "--dry-run"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({ method: "prune", options: { targets: undefined, dryRun: true } });
         expect(h.out).toEqual([
-            "target web:",
-            "    keep  2026-08-10T031500Z  (newest, last)",
-            "    prune 2026-08-01T031500Z",
-            "dry-run - nothing was deleted",
+            "Target web:",
+            "    keep   2026-08-10T031500Z  (newest, last)",
+            "    prune  2026-08-01T031500Z",
+            "Dry run - nothing was deleted. Drop --dry-run to apply this plan.",
         ]);
     });
 
@@ -186,7 +193,7 @@ describe("prune", () => {
             ],
         };
         expect(await main(["prune"], h.deps)).toBe(1);
-        expect(h.err[0]).toContain("error snapshot-store: web: 2026-08-01T031500Z: permission denied");
+        expect(h.err[0]).toContain("Error: could not prune web: 2026-08-01T031500Z: permission denied");
     });
 });
 
@@ -219,15 +226,15 @@ describe("check", () => {
         };
         expect(await main(["check"], h.deps)).toBe(0);
         const text = h.out.join("\n");
-        expect(text).toContain("local rsync: /opt/homebrew/bin/rsync 3.2.7");
-        expect(text).toContain("remote example [explicit]: reachable, rsync 3.2.7");
-        expect(text).toContain("remote myserver [alias -> backup@10.0.0.9:2222]: reachable, rsync 3.4.1");
+        expect(text).toContain("Local rsync: /opt/homebrew/bin/rsync 3.2.7");
+        expect(text).toContain("Remote example (explicit): reachable, rsync 3.2.7");
+        expect(text).toContain("Remote myserver (alias, backup@10.0.0.9:2222): reachable, rsync 3.4.1");
         expect(text).toContain('restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA');
         expect(text).toContain("# target push-www via remote example");
         expect(text).toContain("/usr/local/bin/backupkit-remote");
-        expect(text).toContain("push jail (recommended, optional)");
+        expect(text).toContain("Push jail (recommended, optional)");
         expect(text).toContain('set "jail": false');
-        expect(text).toContain("check ok");
+        expect(text).toContain("Check passed - backupkit is ready.");
     });
 
     it("prints a note for each jail-disabled push target instead of a jail line", async () => {
@@ -241,9 +248,9 @@ describe("check", () => {
         const h = fakeDeps({ config: makeConfig({ configPath: "/etc/backupkit/config.jsonc", stateDir: "/var/lib/backupkit", targets: [target] }) });
         expect(await main(["check"], h.deps)).toBe(0);
         const text = h.out.join("\n");
-        expect(text).not.toContain("push jail (recommended, optional)");
+        expect(text).not.toContain("Push jail (recommended, optional)");
         expect(text).toContain(
-            'push target push-www: jail disabled ("jail": false) - the push key gets whatever access the server grants it',
+            'Warning: push target push-www has the jail disabled ("jail": false) - its key gets whatever access the server grants it.',
         );
     });
 
@@ -258,7 +265,7 @@ describe("check", () => {
             errors: ["rsync too old", "remote example: host unreachable"],
         };
         expect(await main(["check"], h.deps)).toBe(1);
-        expect(h.out.join("\n")).toContain("check FAILED");
-        expect(h.err).toEqual(["check: rsync too old", "check: remote example: host unreachable"]);
+        expect(h.out.join("\n")).toContain("Check FAILED - 2 problems above need fixing");
+        expect(h.err).toEqual(["Error: rsync too old", "Error: remote example: host unreachable"]);
     });
 });

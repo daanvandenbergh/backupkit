@@ -11,7 +11,7 @@
  */
 
 import type { CliDeps } from "../context.js";
-import { parseFlags } from "../context.js";
+import { count, parseFlags } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
 
 /** The `backupkit check` command entry. */
@@ -22,50 +22,58 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
         return 0;
     }
     const { config, engine } = deps.loadContext(values.config as string | undefined);
-    deps.stdout(`config: ${config.configPath} ok`);
+    deps.stdout(`Config:      ${config.configPath} (valid)`);
     const report = await engine.check();
 
     deps.stdout(
         report.localRsync === null
-            ? "local rsync: NOT OK (see errors below)"
-            : `local rsync: ${report.localRsync.bin} ${report.localRsync.version}`,
+            ? "Local rsync: NOT USABLE (see the errors below)"
+            : `Local rsync: ${report.localRsync.bin} ${report.localRsync.version}`,
     );
-    deps.stdout(`local ssh: ${report.sshOk ? "ok" : "NOT OK (see errors below)"}`);
+    deps.stdout(`Local ssh:   ${report.sshOk ? "ok" : "NOT USABLE (see the errors below)"}`);
 
     for (const remote of report.remotes) {
         const resolved =
             remote.resolved === null
                 ? ""
-                : ` -> ${remote.resolved.user}@${remote.resolved.hostname}:${remote.resolved.port}`;
+                : `, ${remote.resolved.user}@${remote.resolved.hostname}:${remote.resolved.port}`;
         const state = remote.reachable
-            ? `reachable, rsync ${remote.rsyncVersion ?? "?"}`
-            : `NOT reachable${remote.error === null ? "" : ` - ${remote.error}`}`;
-        deps.stdout(`remote ${remote.remote} [${remote.kind}${resolved}]: ${state}`);
+            ? `reachable, rsync ${remote.rsyncVersion ?? "version unknown"}`
+            : `NOT REACHABLE${remote.error === null ? "" : ` - ${remote.error}`}`;
+        deps.stdout(`Remote ${remote.remote} (${remote.kind}${resolved}): ${state}`);
     }
 
     if (report.jailLines.length > 0) {
         deps.stdout("");
-        deps.stdout("push jail (recommended, optional) - add to the archive server's authorized_keys:");
+        deps.stdout("Push jail (recommended, optional) - add these lines to the archive server's authorized_keys:");
         for (const jail of report.jailLines) {
             deps.stdout(`# target ${jail.target} via remote ${jail.remote}`);
             deps.stdout(jail.line);
         }
         deps.stdout(
-            "install the jail: copy dist/snapshots/internal/backupkit-remote.sh to /usr/local/bin/backupkit-remote on the archive server and chmod 755 it",
+            "To install the jail, run on the archive server: npm install -g @daanvandenbergh/backupkit && sudo backupkit jail install",
         );
-        deps.stdout('to skip the jail for a target (accepted risk), set "jail": false on it');
+        deps.stdout(
+            "(or copy dist/snapshots/internal/backupkit-remote.sh there yourself as /usr/local/bin/backupkit-remote, chmod 755)",
+        );
+        deps.stdout('To skip the jail for a target (an accepted risk), set "jail": false on it.');
     }
     for (const target of config.targets) {
         if (target.direction === "push" && !target.jail) {
             deps.stdout(
-                `push target ${target.name}: jail disabled ("jail": false) - the push key gets whatever access the server grants it`,
+                `Warning: push target ${target.name} has the jail disabled ("jail": false) - its key gets whatever access the server grants it.`,
             );
         }
     }
 
     for (const error of report.errors) {
-        deps.stderr(`check: ${error}`);
+        deps.stderr(`Error: ${error}`);
     }
-    deps.stdout(report.ok ? "check ok" : "check FAILED");
+    deps.stdout("");
+    deps.stdout(
+        report.ok
+            ? "Check passed - backupkit is ready. Register the daemon with: sudo backupkit service install"
+            : `Check FAILED - ${count(report.errors.length, "problem")} above ${report.errors.length === 1 ? "needs" : "need"} fixing before backups will run.`,
+    );
     return report.ok ? 0 : 1;
 }

@@ -42,7 +42,7 @@ Running `backupkit` with no arguments prints the same three-step setup you are a
 sudo backupkit init --config /etc/backupkit/config.jsonc
 ```
 
-The output is three lines: the path it wrote, `edit it, then run: backupkit check`, and done. Every explanation lives in the comments of the file it wrote, so open that file next.
+The output is three lines: the path it wrote, and the next two commands to run (`backupkit check`, then `backupkit service install`). Every explanation lives in the comments of the file it wrote, so open that file next.
 
 Backupkit resolves the config path the same way for every command: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `${XDG_CONFIG_HOME:-~/.config}/backupkit/`. Pick a location and stay with it.
 
@@ -113,7 +113,7 @@ sudo backupkit service install
 sudo backupkit service start
 ```
 
-`service install` writes the unit and ends with `installed - start it: backupkit service start`. The daemon then runs the foreground scheduler for you, taking one snapshot per due window and pruning on your retention policy. Check on it any time:
+`service install` writes the unit and ends by naming the command that starts it. The daemon then runs the foreground scheduler for you, taking one snapshot per due window and pruning on your retention policy. Check on it any time:
 
 ```bash
 backupkit status          # last run and next due per target
