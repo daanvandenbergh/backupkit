@@ -29,6 +29,14 @@ const INSTALLED_NO_LOGS =
 /** Printed on Linux when journalctl itself is missing (nothing can read the journal). */
 const NO_JOURNALCTL = "Cannot read logs: journalctl is not available on this system.";
 
+/**
+ * Printed on macOS to a non-root operator: the daemon logs to a root-owned
+ * directory (/var/log/backupkit, 0750 root:wheel), so an unprivileged user
+ * cannot read them and they read as absent here. Re-run under sudo.
+ */
+const NEED_SUDO = (follow: boolean): string =>
+    `The daemon logs are owned by root - re-run with sudo: sudo backupkit logs${follow ? " -f" : ""}`;
+
 /** The `backupkit logs` command entry. */
 export async function logsCommand(argv: string[], deps: CliDeps): Promise<number> {
     const { values } = parseFlags(
@@ -57,6 +65,14 @@ export async function logsCommand(argv: string[], deps: CliDeps): Promise<number
         }
         const files = MACOS_LOG_FILES.filter((file) => deps.files.exists(file));
         if (files.length === 0) {
+            // The daemon runs as root and writes to /var/log/backupkit, which is
+            // 0750 root:wheel - a non-root, non-wheel operator cannot even stat
+            // the files (they read as "absent" here). Do not misreport that as
+            // "no logs yet"; the logs are root's, so point at sudo.
+            if (deps.euid !== 0) {
+                deps.stderr(NEED_SUDO(follow));
+                return 1;
+            }
             deps.stderr(INSTALLED_NO_LOGS);
             return 1;
         }

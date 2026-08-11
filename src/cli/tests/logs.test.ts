@@ -91,12 +91,20 @@ describe("macOS (tail)", () => {
         expect(h.execCalls).toEqual([]);
     });
 
-    it("distinguishes installed-but-no-logs (crash-loop) from not-installed", async () => {
-        const h = fakeDeps({ platform: "darwin", files: { [LAUNCHD_PLIST_PATH]: "<plist>" } });
+    it("distinguishes installed-but-no-logs (crash-loop) from not-installed (as root)", async () => {
+        const h = fakeDeps({ platform: "darwin", euid: 0, files: { [LAUNCHD_PLIST_PATH]: "<plist>" } });
         expect(await main(["logs"], h.deps)).toBe(1);
         expect(h.err).toEqual([
             "The service is installed but has written no logs yet - if it should be running, it may be failing to start. Check: backupkit service status",
         ]);
+        expect(h.execCalls).toEqual([]);
+    });
+
+    it("a non-root operator who cannot read the root-owned logs is told to use sudo, not 'no logs'", async () => {
+        // Log files read as absent because /var/log/backupkit is 0750 root:wheel.
+        const h = fakeDeps({ platform: "darwin", euid: 501, files: { [LAUNCHD_PLIST_PATH]: "<plist>" } });
+        expect(await main(["logs", "-f"], h.deps)).toBe(1);
+        expect(h.err).toEqual(["The daemon logs are owned by root - re-run with sudo: sudo backupkit logs -f"]);
         expect(h.execCalls).toEqual([]);
     });
 });
