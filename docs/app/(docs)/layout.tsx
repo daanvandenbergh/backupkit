@@ -1,4 +1,4 @@
-// app/docs/layout.tsx - wraps every docs route in the persistent shell. Server component: it builds
+// app/(docs)/layout.tsx - wraps every docs route in the persistent shell. Server component: it builds
 // the nav tree at build time and hands the serializable result to the client chrome.
 import type { ReactNode } from "react";
 import { docs } from "./_docs";

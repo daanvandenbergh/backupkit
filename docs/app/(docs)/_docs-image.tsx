@@ -1,4 +1,4 @@
-// app/docs/_docs-image.tsx - a base-path-aware hero <img>, passed to DocsPage as `imgComponent`.
+// app/(docs)/_docs-image.tsx - a base-path-aware hero <img>, passed to DocsPage as `imgComponent`.
 //
 // The page hero (`image:` front-matter) renders as a raw <img src="/assets/...">. On a project site
 // (`/<repo>/` base path) that raw path is NOT prefixed by Next (and `next/image` passes it through

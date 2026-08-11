@@ -1,8 +1,9 @@
-// app/docs/_docs.ts - the single configured Docs instance the routes read from.
+// app/(docs)/_docs.ts - the single configured Docs instance the routes read from.
 import { Docs } from "@daanvandenbergh/scribekit";
 
 export const docs = new Docs({
-    contentDir: "./docs", // folder of <slug>/en.mdx pages, resolved against the app root (process.cwd())
+    contentDir: "./content", // folder of <slug>/en.mdx pages, resolved against the app root (process.cwd())
+    basePath: "/", // the site IS the docs: pages serve at /<slug>, not /docs/<slug>. Keep in step with the route group.
     siteUrl: "https://daanvandenbergh.github.io/backupkit", // GitHub Pages project-site origin
     brandName: "Backupkit",
     // Tab and group order for a stable sidebar. Fill from the corpus front-matter (`tab` / `group`).

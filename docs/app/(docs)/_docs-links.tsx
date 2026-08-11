@@ -1,6 +1,10 @@
-// app/docs/_docs-links.tsx - the MDX `a` override, so in-body prose links are client-side AND
+// app/(docs)/_docs-links.tsx - the MDX `a` override, so in-body prose links are client-side AND
 // honour the deployment base path. Passed to DocsPage as `components={{ a: BodyLink }}`.
-// A plain function (no hooks), so it renders fine from the server component route.
+//
+// A CLIENT module: `NavLink` below is the `next/link` re-export the client-side sections
+// (`DocsTopicGrid` inside `DocsIndex`) take as `linkComponent` - a server component's own function
+// cannot cross that boundary, a client reference can.
+"use client";
 import Link from "next/link";
 import type { AnchorHTMLAttributes } from "react";
 
@@ -20,3 +24,6 @@ export function BodyLink({ href = "", children, ...props }: AnchorHTMLAttributes
         </a>
     );
 }
+
+/** `next/link` as a client reference, for the client-side sections that take a `linkComponent`. */
+export { default as NavLink } from "next/link";

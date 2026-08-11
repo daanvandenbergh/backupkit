@@ -70,7 +70,7 @@ Backupkit owns the identity, key loading, and known_hosts.
 }
 ```
 
-The `passphrase` value is validated to be `"file:/..."` or exactly `"prompt"`; a raw passphrase or an `env:` form is rejected. The path after `file:` gets the same treatment as every other path field - absolute, normalized, no `.`/`..` component, no whitespace or quote characters. See the [Security Model](/docs/security-model) for how each form is loaded.
+The `passphrase` value is validated to be `"file:/..."` or exactly `"prompt"`; a raw passphrase or an `env:` form is rejected. The path after `file:` gets the same treatment as every other path field - absolute, normalized, no `.`/`..` component, no whitespace or quote characters. See the [Security Model](/security-model) for how each form is loaded.
 
 `host` carries a positive charset rather than a blocklist, for the same reason the alias charset does: a value containing `/` would make rsync read `user@host/x:/path` as a *local* path and silently write the archive to a relative directory, and a leading `-` or a control character would reach ssh's option parser or the operator's terminal. A pre-bracketed `[::1]` is rejected because the endpoint formatter adds the brackets itself.
 
@@ -179,7 +179,7 @@ The top-level `retention` object is the default GFS policy for targets that defi
 }
 ```
 
-All counts are non-negative integers. Omit the object to keep everything forever; set a target's `retention` to `false` to keep everything for that target. An empty `{}` is rejected. See [Versioning & Retention](/docs/retention) for how the tiers choose snapshots.
+All counts are non-negative integers. Omit the object to keep everything forever; set a target's `retention` to `false` to keep everything for that target. An empty `{}` is rejected. See [Versioning & Retention](/retention) for how the tiers choose snapshots.
 
 ## The starter as a worked example
 
@@ -187,6 +187,6 @@ All counts are non-negative integers. Omit the object to keep everything forever
 
 ## Related
 
-- [Versioning & Retention](/docs/retention) - how retention rules select snapshots
-- [Security Model](/docs/security-model) - key, passphrase, and known_hosts handling
-- [CLI Reference](/docs/cli-reference) - the commands that read this config
+- [Versioning & Retention](/retention) - how retention rules select snapshots
+- [Security Model](/security-model) - key, passphrase, and known_hosts handling
+- [CLI Reference](/cli-reference) - the commands that read this config

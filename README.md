@@ -71,13 +71,13 @@ Then `backupkit run` performs one pass over every due target; the daemon does it
 | `backupkit logs [-f] [-n N]` | Tail the daemon logs (journald on Linux, log files on macOS). |
 | `backupkit daemon` | Foreground scheduler loop (what the installed service runs). |
 
-`--config <path>` overrides the default lookup (`$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc`, then `~/.config/backupkit/config.jsonc`). See the [configuration reference](https://daanvandenbergh.github.io/backupkit/docs/configuration) and [CLI reference](https://daanvandenbergh.github.io/backupkit/docs/cli-reference).
+`--config <path>` overrides the default lookup (`$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc`, then `~/.config/backupkit/config.jsonc`). See the [configuration reference](https://daanvandenbergh.github.io/backupkit/configuration) and [CLI reference](https://daanvandenbergh.github.io/backupkit/cli-reference).
 
 ## Push vs pull
 
 **Pull** (recommended) keeps every credential on the backup server: it reaches out and fetches, so a compromised source host holds nothing that can read or delete a stored snapshot. **Push** is for when the source cannot be reached inbound; the push key on the archive server is always confined by a `backupkit-remote` forced command that jails it to one destination root, permits only rsync plus the snapshot lifecycle, and restricts deletion to a snapshot's own `.partial`/`.deleting` scratch names - so a compromised push client cannot remove a completed snapshot or a target's history. `backupkit check` prints the exact `authorized_keys` line.
 
-What neither direction can prevent is a source that lies about its own contents: a compromised source can present an emptied tree, and count-based retention would eventually age out the snapshots holding the real data. Backupkit trips a content-collapse guard when a snapshot's file count collapses against the previous one - the snapshot is still stored, but retention is skipped and the run is logged at error level until you confirm the shrink is real with `backupkit prune`. See the [security model](https://daanvandenbergh.github.io/backupkit/docs/security-model).
+What neither direction can prevent is a source that lies about its own contents: a compromised source can present an emptied tree, and count-based retention would eventually age out the snapshots holding the real data. Backupkit trips a content-collapse guard when a snapshot's file count collapses against the previous one - the snapshot is still stored, but retention is skipped and the run is logged at error level until you confirm the shrink is real with `backupkit prune`. See the [security model](https://daanvandenbergh.github.io/backupkit/security-model).
 
 ## Library API
 

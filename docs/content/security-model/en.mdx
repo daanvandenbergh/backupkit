@@ -19,7 +19,7 @@ Backupkit moves data over ssh and writes it to an archive, so its security model
 
 ## Prefer pull so a compromised source cannot reach the archive
 
-The strongest control is architectural. In a **pull** target the backup server reaches out to the source and the source holds no credential to the archive, so a compromised source host cannot read, delete, or tamper with a stored snapshot. Pull is the default for this reason. **Push** exists for hosts that must initiate the connection themselves; because the source then holds a credential that reaches the archive, backupkit jails that credential (below). See [Push vs Pull Architecture](/docs/push-vs-pull) for the full comparison.
+The strongest control is architectural. In a **pull** target the backup server reaches out to the source and the source holds no credential to the archive, so a compromised source host cannot read, delete, or tamper with a stored snapshot. Pull is the default for this reason. **Push** exists for hosts that must initiate the connection themselves; because the source then holds a credential that reaches the archive, backupkit jails that credential (below). See [Push vs Pull Architecture](/push-vs-pull) for the full comparison.
 
 ### What the trust direction does not cover
 
@@ -96,6 +96,6 @@ Reinforce that at the mount layer anyway: mount the filesystem holding your dest
 
 ## Related
 
-- [Push vs Pull Architecture](/docs/push-vs-pull) - the trust direction in depth
-- [Configuration Reference](/docs/configuration) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
-- [Daemon Setup](/docs/daemon-setup) - the hardened service unit and how keys behave across reboots
+- [Push vs Pull Architecture](/push-vs-pull) - the trust direction in depth
+- [Configuration Reference](/configuration) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
+- [Daemon Setup](/daemon-setup) - the hardened service unit and how keys behave across reboots

@@ -1,4 +1,4 @@
-// app/docs/_docs-chrome.tsx - the persistent, interactive docs shell (client component).
+// app/(docs)/_docs-chrome.tsx - the persistent, interactive docs shell (client component).
 "use client";
 import type { ReactNode } from "react";
 import Link from "next/link";

@@ -72,7 +72,7 @@ Run the foreground scheduler loop - this is exactly what the installed service u
 
 ### service
 
-Manage the OS service unit: `install | uninstall | start | stop | restart | status`. Every verb is idempotent, and `install`, `uninstall`, `start`, `stop`, and `restart` require root; `status` does not. A lifecycle verb with no installed unit prints `service not installed - run: backupkit service install` and exits 1. See [Daemon Setup](/docs/daemon-setup) for the full lifecycle.
+Manage the OS service unit: `install | uninstall | start | stop | restart | status`. Every verb is idempotent, and `install`, `uninstall`, `start`, `stop`, and `restart` require root; `status` does not. A lifecycle verb with no installed unit prints `service not installed - run: backupkit service install` and exits 1. See [Daemon Setup](/daemon-setup) for the full lifecycle.
 
 ### logs
 
@@ -88,7 +88,7 @@ One row per target: last snapshot, next due, last result, consecutive failures, 
 
 ### restore
 
-Copy one snapshot to a non-existent `--output` path; `SNAPSHOT` may be `latest`. `--verify` runs a post-copy checksum pass. See [Restoring a Backup](/docs/restore).
+Copy one snapshot to a non-existent `--output` path; `SNAPSHOT` may be `latest`. `--verify` runs a post-copy checksum pass. See [Restoring a Backup](/restore).
 
 ### prune
 
@@ -122,6 +122,6 @@ Other output is plain text with columns aligned by padding - no table module and
 
 ## Related
 
-- [Getting Started](/docs/getting-started) - the commands in setup order
-- [Daemon Setup](/docs/daemon-setup) - the service lifecycle in depth
-- [Configuration Reference](/docs/configuration) - the config every command reads
+- [Getting Started](/getting-started) - the commands in setup order
+- [Daemon Setup](/daemon-setup) - the service lifecycle in depth
+- [Configuration Reference](/configuration) - the config every command reads

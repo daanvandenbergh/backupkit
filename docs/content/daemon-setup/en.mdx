@@ -17,7 +17,7 @@ updated: "2026-08-10"
 
 The daemon runs the scheduler that takes one snapshot per due window and prunes on your retention policy. This guide installs it, drives its lifecycle, tails its logs, and explains the restart and reboot-recovery behaviour the unit is configured for.
 
-**Prerequisites:** a config that passes `backupkit check` (see [Getting Started](/docs/getting-started)). Every lifecycle verb except `status` requires root.
+**Prerequisites:** a config that passes `backupkit check` (see [Getting Started](/getting-started)). Every lifecycle verb except `status` requires root.
 
 ## The three-step setup
 
@@ -90,6 +90,6 @@ The logger never rotates anything - rotation belongs to the platform. On Linux t
 
 ## Related
 
-- [Getting Started](/docs/getting-started) - the linear path to a passing `check`
-- [CLI Reference](/docs/cli-reference) - every command and flag
-- [Security Model](/docs/security-model) - the hardened systemd unit and key handling
+- [Getting Started](/getting-started) - the linear path to a passing `check`
+- [CLI Reference](/cli-reference) - every command and flag
+- [Security Model](/security-model) - the hardened systemd unit and key handling

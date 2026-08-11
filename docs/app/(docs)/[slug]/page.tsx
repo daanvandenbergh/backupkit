@@ -1,4 +1,4 @@
-// app/docs/[slug]/page.tsx - one static page per doc. Single-locale (flat /docs/<slug>).
+// app/(docs)/[slug]/page.tsx - one static page per doc. Single-locale (flat /<slug>).
 import Link from "next/link";
 import { DocsPage } from "@daanvandenbergh/scribekit/react";
 import { docs } from "../_docs";
