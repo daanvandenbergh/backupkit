@@ -38,6 +38,7 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
 - **Never run a real destructive operation to "test" it.** `rsync --delete` against a live tree, a
   prune of real snapshots: those are exercised against a temp fixture dir, never a user's data.
 
+@node_modules/@daanvandenbergh/scribekit/rules/docs_parity.md
 @node_modules/@daanvandenbergh/claudekit/rules/ts_coding_standards.md
 @node_modules/@daanvandenbergh/claudekit/rules/core_principles.md
 @node_modules/@daanvandenbergh/claudekit/rules/workflow.md
@@ -67,6 +68,6 @@ Bump `version` in `package.json` and `npm publish` (public scope; `prepublishOnl
 user publishes and pushes - never do either unasked.
 
 ## The public contract stays in lockstep
-`README.md` and `docs/` are this package's contract with its users. Any change to the API, the config
-shape, the CLI, or the on-disk snapshot layout updates BOTH in the SAME change - a doc that lags the
-code is part of the definition of NOT done.
+`README.md` and `docs/` are this package's contract with its users - the imported `docs_parity`
+rule governs them. Here that also covers the on-disk snapshot layout: it is user-visible, so a
+change to it is a docs-affecting change.
