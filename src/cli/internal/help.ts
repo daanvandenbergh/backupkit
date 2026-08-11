@@ -21,6 +21,7 @@ Commands:
     service <verb>         install|uninstall|start|stop|restart|status
     daemon                 foreground scheduler (what the service runs)
     check | init           readiness / starter config
+    jail install|status    (on an archive server) install/verify the push jail script
 
 backupkit <command> --help for details.`;
 
@@ -78,4 +79,12 @@ probe remotes, pin host keys (TTY only), and print push-jail lines.
 Write the fully commented starter config.jsonc.
     --force      overwrite an existing config
     --config P   write the config at this exact path`,
+    jail: `backupkit jail install|status [--path P]
+
+Run ON the archive server (needs backupkit installed there; no config needed):
+install copies the backupkit-remote forced-command script this package ships
+to its well-known path (atomic + idempotent - rerun it after every npm
+update), and status reports whether the installed copy matches the package.
+install requires root; status does not, and exits 1 on missing/outdated.
+    --path P     script location (default /usr/local/bin/backupkit-remote)`,
 };

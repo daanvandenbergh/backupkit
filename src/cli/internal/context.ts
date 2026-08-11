@@ -67,6 +67,10 @@ export interface FileOps {
     remove(path: string): void;
     /** Create a directory recursively, optionally with an explicit mode. */
     mkdir(path: string, mode?: number): void;
+    /** Set a file's mode exactly (unlike write()'s mode, not masked by umask). */
+    chmod(path: string, mode: number): void;
+    /** Atomically rename `from` to `to`, replacing an existing `to`. */
+    rename(from: string, to: string): void;
 }
 
 /** Everything a CLI command needs from the outside world - injectable for tests. */

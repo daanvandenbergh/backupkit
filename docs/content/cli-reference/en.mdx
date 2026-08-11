@@ -39,6 +39,7 @@ Commands:
     service <verb>         install|uninstall|start|stop|restart|status
     daemon                 foreground scheduler (what the service runs)
     check | init           readiness / starter config
+    jail install|status    (on an archive server) install/verify the push jail script
 
 backupkit <command> --help for details.
 ```
@@ -58,6 +59,7 @@ backupkit restore   TARGET SNAPSHOT|latest --output PATH [--verify] [--config P]
 backupkit prune     [TARGET...] [--dry-run] [--config P]
 backupkit check     [--config P]
 backupkit init      [--force] [--config P]
+backupkit jail      install|status [--path P]
 ```
 
 Target names are positional and optional on `run`, `status`, `list`, and `prune`; with none, the command applies to every target.
@@ -99,6 +101,10 @@ Apply retention now. `--dry-run` prints the plan (the keeps with their reasons, 
 The interactive readiness gate: validate the config (stopping at the first error), verify local `rsync` and `ssh` versions, load keys, probe remotes, pin unpinned host keys on a TTY, and print the push-jail `authorized_keys` lines (informational: the jail is recommended but optional and never probed; a `"jail": false` target gets a jail-disabled note instead). It exits 2 on a config error and 1 on any probe failure. Run it after each reboot for a `prompt`-passphrase deployment.
 
 ### init
+
+### jail
+
+The one command meant for the **archive server**, not the push client (install backupkit there too; neither verb reads a config). `install` copies the `backupkit-remote` forced-command script this package ships to `/usr/local/bin/backupkit-remote` (or `--path`) - atomically via a temp file and rename, re-asserting mode `0755`, idempotent, root required. `status` (no root) compares the installed copy against the shipped one and exits 1 when it is missing or outdated - an old copy rejects every push, so pair `npm update -g` with `sudo backupkit jail install`, and use `status` from monitoring to catch drift. The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. See [the push jail](/security-model#the-push-jail-a-forced-command-that-validates-the-resolved-path).
 
 Write the fully commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force` (`config exists at <path> - pass --force to overwrite`). Its stdout is three lines.
 

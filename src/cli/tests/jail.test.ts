@@ -1,0 +1,123 @@
+/**
+ * `backupkit jail` behavior against the fake filesystem: install (root gate,
+ * fresh install, update, idempotent no-op with mode re-assert, atomic
+ * temp+rename, missing shipped script, --path override and validation) and
+ * status (up to date / outdated / not installed exit codes). Config-free by
+ * design: no test here ever calls loadContext.
+ */
+
+import { describe, expect, it } from "vitest";
+
+import { main } from "../main.js";
+import { fakeDeps } from "./fakes.js";
+
+/** The shipped script path implied by the fake deps' cliPath (/opt/backupkit/dist/cli/main.js). */
+const SHIPPED = "/opt/backupkit/dist/snapshots/internal/backupkit-remote.sh";
+
+/** The default install destination. */
+const DEST = "/usr/local/bin/backupkit-remote";
+
+/** Fake deps with the shipped script present (and optional extra files). */
+function jailDeps(options: Parameters<typeof fakeDeps>[0] = {}) {
+    return fakeDeps({ ...options, files: { [SHIPPED]: "#!/bin/sh\nv2\n", ...options.files } });
+}
+
+describe("jail install", () => {
+    it("requires root", async () => {
+        const h = jailDeps({ euid: 501 });
+        expect(await main(["jail", "install"], h.deps)).toBe(1);
+        expect(h.err[0]).toContain("needs root");
+        expect(h.fileMap.has(DEST)).toBe(false);
+    });
+
+    it("installs fresh: temp write, chmod 755, atomic rename, guidance line", async () => {
+        const h = jailDeps();
+        expect(await main(["jail", "install"], h.deps)).toBe(0);
+        expect(h.fileMap.get(DEST)).toBe("#!/bin/sh\nv2\n");
+        expect(h.fileMap.has(`${DEST}.backupkit-install`)).toBe(false);
+        expect(h.renames).toEqual([{ from: `${DEST}.backupkit-install`, to: DEST }]);
+        expect(h.chmods).toEqual([{ path: `${DEST}.backupkit-install`, mode: 0o755 }]);
+        expect(h.out[0]).toBe(`Jail script installed at ${DEST}.`);
+        expect(h.out[1]).toContain("backupkit check");
+    });
+
+    it("updates an outdated copy and says so", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["jail", "install"], h.deps)).toBe(0);
+        expect(h.fileMap.get(DEST)).toBe("#!/bin/sh\nv2\n");
+        expect(h.out[0]).toBe(`Jail script at ${DEST} updated.`);
+    });
+
+    it("is a no-op on an up-to-date copy, apart from re-asserting the mode", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv2\n" } });
+        expect(await main(["jail", "install"], h.deps)).toBe(0);
+        expect(h.renames).toEqual([]);
+        expect(h.chmods).toEqual([{ path: DEST, mode: 0o755 }]);
+        expect(h.out[0]).toBe(`Jail script at ${DEST} is already up to date.`);
+    });
+
+    it("fails with a reinstall hint when the package's own script is missing", async () => {
+        const h = fakeDeps();
+        expect(await main(["jail", "install"], h.deps)).toBe(1);
+        expect(h.err[0]).toContain("missing its jail script");
+        expect(h.err[0]).toContain(SHIPPED);
+    });
+
+    it("honors --path and creates its directory", async () => {
+        const h = jailDeps();
+        expect(await main(["jail", "install", "--path", "/opt/bin/backupkit-remote"], h.deps)).toBe(0);
+        expect(h.fileMap.get("/opt/bin/backupkit-remote")).toBe("#!/bin/sh\nv2\n");
+        expect(h.mkdirs).toEqual([{ path: "/opt/bin", mode: undefined }]);
+    });
+
+    it("rejects a relative --path", async () => {
+        const h = jailDeps();
+        expect(await main(["jail", "install", "--path", "bin/backupkit-remote"], h.deps)).toBe(64);
+        expect(h.err[0]).toContain("--path must be absolute");
+    });
+});
+
+describe("jail status", () => {
+    it("reports up to date with exit 0, without root", async () => {
+        const h = jailDeps({ euid: 501, files: { [DEST]: "#!/bin/sh\nv2\n" } });
+        expect(await main(["jail", "status"], h.deps)).toBe(0);
+        expect(h.out[0]).toContain("up to date");
+        expect(h.out[0]).toContain("0.1.0-test");
+    });
+
+    it("reports not installed with exit 1 and the install command", async () => {
+        const h = jailDeps();
+        expect(await main(["jail", "status"], h.deps)).toBe(1);
+        expect(h.out[0]).toContain("not installed");
+        expect(h.out[0]).toContain("sudo backupkit jail install");
+    });
+
+    it("reports an outdated copy with exit 1 and the update command", async () => {
+        const h = jailDeps({ files: { [DEST]: "#!/bin/sh\nv1\n" } });
+        expect(await main(["jail", "status"], h.deps)).toBe(1);
+        expect(h.out[0]).toContain("differs");
+        expect(h.out[0]).toContain("sudo backupkit jail install");
+    });
+
+    it("fails when the package's own script is missing", async () => {
+        const h = fakeDeps();
+        expect(await main(["jail", "status"], h.deps)).toBe(1);
+        expect(h.err[0]).toContain("missing its jail script");
+    });
+});
+
+describe("jail usage", () => {
+    it("rejects a missing or unknown verb and extra positionals", async () => {
+        for (const argv of [["jail"], ["jail", "wipe"], ["jail", "install", "status"]]) {
+            const h = jailDeps();
+            expect(await main(argv, h.deps)).toBe(64);
+            expect(h.err[0]).toContain("jail needs one verb");
+        }
+    });
+
+    it("prints help with --help", async () => {
+        const h = jailDeps();
+        expect(await main(["jail", "--help"], h.deps)).toBe(0);
+        expect(h.out.join("\n")).toContain("backupkit jail install|status");
+    });
+});

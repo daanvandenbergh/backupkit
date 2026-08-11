@@ -43,7 +43,13 @@ restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA
 
 The `restrict` prefix disables port forwarding, agent forwarding, PTY allocation, and X11. The forced command then permits only the exact `rsync --server` transfers and the handful of directory operations backupkit's snapshot store issues, each confined to the jail root you name. Anything else the key tries to run exits with a rejection. The [Security Model](/security-model) covers the jail - including its symlink-resolution defense - in full.
 
-**Upgrade the jail script with the package.** `backupkit-remote` is a copy on the archive server, not something the client can update, and it validates every command against the exact name grammar the client uses. So when you upgrade backupkit on a source host, re-copy `dist/snapshots/internal/backupkit-remote.sh` to each archive server it pushes to. A jail older than its client rejects operations with a bare `backupkit-remote: rejected`, which surfaces as a failed run naming no cause. (A test in the package pins the script's grammar to the client's, so the two only diverge across versions, never within one.)
+**Upgrade the jail script with the package.** `backupkit-remote` is a copy on the archive server, not something the client can update (by design: the jailed key must never be able to rewrite its own jail), and it validates every command against the exact name grammar the client uses. The easy way to install and update it is to install backupkit on the archive server too and run, after every package update there:
+
+```bash
+sudo backupkit jail install     # atomic, idempotent; backupkit jail status reports drift
+```
+
+`jail install` needs no config - it copies the script the package ships to `/usr/local/bin/backupkit-remote` via a temp file and rename, so a crash never leaves a half-written jail. `backupkit jail status` (no root) exits 1 when the installed copy is missing or differs from the package, which makes it a cheap monitoring probe. Without backupkit on the server, copy `dist/snapshots/internal/backupkit-remote.sh` there by hand instead. A jail older than its client rejects operations with a bare `backupkit-remote: rejected`, which surfaces as a failed run naming no cause. (A test in the package pins the script's grammar to the client's, so the two only diverge across versions, never within one.)
 
 ## Running without the jail
 

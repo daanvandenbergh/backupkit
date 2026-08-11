@@ -135,6 +135,10 @@ export interface FakeDeps {
     loadedWith: (string | undefined)[];
     /** Every directory creation requested through `files.mkdir`, in order. */
     mkdirs: { path: string; mode: number | undefined }[];
+    /** Every mode change requested through `files.chmod`, in order. */
+    chmods: { path: string; mode: number }[];
+    /** Every rename requested through `files.rename`, in order. */
+    renames: { from: string; to: string }[];
 }
 
 /** Options for `fakeDeps`. */
@@ -167,6 +171,8 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
     const stops: (() => Promise<void>)[] = [];
     const loadedWith: (string | undefined)[] = [];
     const mkdirs: { path: string; mode: number | undefined }[] = [];
+    const chmods: { path: string; mode: number }[] = [];
+    const renames: { from: string; to: string }[] = [];
     const deps: CliDeps = {
         stdout: (line) => out.push(line),
         stderr: (line) => err.push(line),
@@ -196,6 +202,18 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
             mkdir: (path, mode) => {
                 mkdirs.push({ path, mode });
             },
+            chmod: (path, mode) => {
+                chmods.push({ path, mode });
+            },
+            rename: (from, to) => {
+                const content = fileMap.get(from);
+                if (content === undefined) {
+                    throw new Error(`ENOENT: ${from}`);
+                }
+                fileMap.delete(from);
+                fileMap.set(to, content);
+                renames.push({ from, to });
+            },
         },
         nodeBin: "/usr/bin/node",
         cliPath: "/opt/backupkit/dist/cli/main.js",
@@ -212,7 +230,7 @@ export function fakeDeps(options: FakeDepsOptions = {}): FakeDeps {
             stops.push(stop);
         },
     };
-    return { deps, out, err, execCalls, fileMap, engine, config, stops, loadedWith, mkdirs };
+    return { deps, out, err, execCalls, fileMap, engine, config, stops, loadedWith, mkdirs, chmods, renames };
 }
 
 /** A minimal TargetRunReport fixture. */

@@ -10,7 +10,7 @@
  * tools through exec/.
  */
 
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadConfig } from "../config/config.js";
@@ -20,6 +20,7 @@ import { isBackupkitError } from "../shared/errors.js";
 import { checkCommand } from "./internal/commands/check.js";
 import { daemonCommand } from "./internal/commands/daemon.js";
 import { initCommand } from "./internal/commands/init.js";
+import { jailCommand } from "./internal/commands/jail.js";
 import { listCommand } from "./internal/commands/list.js";
 import { pruneCommand } from "./internal/commands/prune.js";
 import { restoreCommand } from "./internal/commands/restore.js";
@@ -47,6 +48,7 @@ const COMMANDS: Record<string, Command> = {
     prune: pruneCommand,
     check: checkCommand,
     init: initCommand,
+    jail: jailCommand,
 };
 
 /** The package version, read from the adjacent package.json. */
@@ -71,6 +73,12 @@ export function defaultDeps(): CliDeps {
             remove: (path) => rmSync(path, { force: true }),
             mkdir: (path, mode) => {
                 mkdirSync(path, { recursive: true, mode });
+            },
+            chmod: (path, mode) => {
+                chmodSync(path, mode);
+            },
+            rename: (from, to) => {
+                renameSync(from, to);
             },
         },
         nodeBin: process.execPath,
