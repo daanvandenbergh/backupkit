@@ -1,21 +1,25 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none" role="img" aria-label="backupkit">
     <title>backupkit</title>
     <defs>
-        <!-- The brand ramp, same slots as claude/scribekit-hero/readme/hero.settings.js. -->
-        <linearGradient id="bk-tile" x1="0" y1="0" x2="1" y2="1">
+        <!--
+         * The reverse of logo-tile.svg: white tile, mark on the brand ramp. `userSpaceOnUse` so the
+         * ramp runs once across the whole mark - the default would restart it inside every rack unit.
+         * Coordinates are in the mark's own 96 space (the group transform applies to them too).
+         -->
+        <linearGradient id="bk-mark" gradientUnits="userSpaceOnUse" x1="13" y1="10" x2="83" y2="86">
             <stop offset="0" stop-color="#26B0B2" />
             <stop offset="55%" stop-color="#186C96" />
             <stop offset="100%" stop-color="#0E2E5C" />
         </linearGradient>
     </defs>
-    <rect width="128" height="128" rx="30" fill="url(#bk-tile)" />
+    <rect width="128" height="128" rx="30" fill="#fff" />
     <g transform="translate(23 23) scale(0.8542)">
-        <g stroke="#fff" stroke-width="7" stroke-linejoin="round">
+        <g stroke="url(#bk-mark)" stroke-width="7" stroke-linejoin="round">
             <rect x="13" y="10" width="70" height="22" rx="7" />
             <rect x="13" y="37" width="70" height="22" rx="7" />
             <rect x="13" y="64" width="70" height="22" rx="7" />
         </g>
-        <g fill="#fff">
+        <g fill="url(#bk-mark)">
             <circle cx="28" cy="21" r="3.6" />
             <circle cx="28" cy="48" r="3.6" />
             <circle cx="28" cy="75" r="3.6" />

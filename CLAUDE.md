@@ -9,7 +9,7 @@ compromised source host cannot touch the backup archive).
 
 ```
 assets/
-  logo/                             # The mark: bare SVG + dark and light app tiles
+  logo/                             # The mark: bare SVG, gradient mark, dark and light app tiles
 claude/
   scribekit-hero/readme/            # The README hero: brand settings, params, rendered hero.png
 src/
@@ -49,7 +49,7 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
 
 ## Git
 - Never create new git branches unless asked, if you really feel it is needed, ask for permission first.
-- **A session MAY commit its own verified work, and should** - a finished unit sitting uncommitted is
+- **A session SHOULD commit its own verified work** - a finished unit sitting uncommitted is
   one git accident away from gone.
   - **Stage EXPLICIT PATHS ONLY - `git add <the files you edited>`. NEVER `git add -A`, `git add .`
     or `git commit -a`.**
@@ -57,6 +57,10 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
     committing. A commit is a recovery point; a broken one is a trap wearing one.
   - **The message names the area and what shipped**, ending with the Co-Authored-By trailer.
   - **NEVER push** - the user pushes.
+  - **NEVER stash** - using git.
+
+## Canary
+In every chat text response address me by my name, Daan.
 
 ## Releasing
 Bump `version` in `package.json` and `npm publish` (public scope; `prepublishOnly` builds). The

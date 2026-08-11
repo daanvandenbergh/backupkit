@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" fill="none" role="img" aria-label="backupkit">
+    <title>backupkit</title>
+    <defs>
+        <!--
+         * The bare mark on the brand ramp, no tile behind it - for light surfaces that supply their
+         * own background (the docs navbar). `userSpaceOnUse` so the ramp runs once across the whole
+         * mark; the default would restart it inside every rack unit.
+         -->
+        <linearGradient id="bk-mark" gradientUnits="userSpaceOnUse" x1="13" y1="10" x2="83" y2="86">
+            <stop offset="0" stop-color="#26B0B2" />
+            <stop offset="55%" stop-color="#186C96" />
+            <stop offset="100%" stop-color="#0E2E5C" />
+        </linearGradient>
+    </defs>
+    <g stroke="url(#bk-mark)" stroke-width="7" stroke-linejoin="round">
+        <rect x="13" y="10" width="70" height="22" rx="7" />
+        <rect x="13" y="37" width="70" height="22" rx="7" />
+        <rect x="13" y="64" width="70" height="22" rx="7" />
+    </g>
+    <g fill="url(#bk-mark)">
+        <circle cx="28" cy="21" r="3.6" />
+        <circle cx="28" cy="48" r="3.6" />
+        <circle cx="28" cy="75" r="3.6" />
+    </g>
+</svg>

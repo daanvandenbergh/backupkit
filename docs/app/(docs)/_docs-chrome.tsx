@@ -14,11 +14,10 @@ export function DocsChrome({ nav, children }: { nav: NavTree; children: ReactNod
             <div className="scribekit-docs">
                 {/* DocsNavbar renders the centered ⌘K search itself (showSearch defaults true).
                     Put your own buttons (auth, links, theme) in `actions=[...]` - not another search. */}
-                {/* The logo is the brand tile (gradient ground, white mark) - the bare mark is white
-                    strokes and would vanish against the light navbar. `BaseImg` so it resolves under
-                    a project-site base path. */}
+                {/* The logo is the bare mark on the brand ramp (no tile) - the navbar supplies its own
+                    white ground. `BaseImg` so it resolves under a project-site base path. */}
                 <DocsNavbar
-                    logo={<BaseImg src="/assets/logo-tile.svg" alt="" width={22} height={22} style={{ display: "block", borderRadius: 6 }} />}
+                    logo={<BaseImg src="/assets/logo-mark.svg" alt="" width={22} height={22} style={{ display: "block" }} />}
                     brandName="Backupkit"
                     docsText="Docs"
                     linkComponent={Link}
