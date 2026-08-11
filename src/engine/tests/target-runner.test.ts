@@ -608,6 +608,19 @@ describe("runTarget pipeline", () => {
         expect(counter.calls).toBe(1);
         expect(seen).toHaveLength(0);
         expect(store.calls.some((call) => call.startsWith("claimPartial") || call.startsWith("promote") || call.startsWith("remove"))).toBe(false);
+        // A dry run writes nothing, so it must not take the destination lock:
+        // taking it made a read-only estimate leave a lock behind, and a remote
+        // one has no pid to check - a SIGKILLed dry run blocked the target for
+        // the full 24 h TTL.
+        expect(store.calls).not.toContain("lock");
+    });
+
+    it("dry run: runs even while another backupkit holds the destination lock", async () => {
+        const store = new FakeStore();
+        store.failLock = new LockHeldError("another backupkit holds it", { pid: 42 });
+        const report = await runTarget(makeTarget(), makeDeps(store), { dryRun: true });
+        expect(report.status).toBe("success");
+        expect(report.reason).toBe("dry-run");
     });
 
     it("resumes an existing partial (claimPartial reports resumed)", async () => {

@@ -68,7 +68,7 @@ backupkit jail      install|status [--path P]
 
 Back up every due target once, or only the targets you name.
 
-`--force` runs a target whether or not it is due, ignoring backoff and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move; retention is planned but not applied.
+`--force` runs a target whether or not it is due, ignoring backoff and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move; retention is planned but not applied. Because it writes nothing it also takes no destination lock, so an estimate works while a real run is in flight - and can never leave a lock behind. The number it reports is a snapshot of that moment, not a reservation.
 
 ### daemon
 

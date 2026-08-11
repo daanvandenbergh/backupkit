@@ -52,8 +52,16 @@ export interface LockInspection {
  * jailed `mkdir --`/`find`/`rm -rf --` command surface.
  */
 export interface LockBackend {
-    /** Absolute path of the lock directory (for messages). */
+    /** Absolute path of the lock directory, as the backend's own commands address it. */
     readonly lockPath: string;
+    /**
+     * How that path is written in messages, when naming the path alone would
+     * mislead. The remote backend prefixes its ssh destination, because
+     * `another backupkit holds /srv/backups/www/.backupkit.lock` sent an
+     * operator to `rm -rf` a path that exists on the ARCHIVE host and not on
+     * the machine reading the message. Defaults to `lockPath`.
+     */
+    readonly displayPath?: string;
     /** Atomically create the lock directory. True = created (lock won); false = it already exists. */
     tryAcquire(): Promise<boolean>;
     /** Record the holder meta inside the freshly created lock directory. */
@@ -103,6 +111,7 @@ export interface LockBackend {
  * lock, comparing the marker it last inspected).
  */
 async function acquire(backend: LockBackend, log: Logger): Promise<void> {
+    const where = backend.displayPath ?? backend.lockPath;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
         if (await backend.tryAcquire()) {
             try {
@@ -116,7 +125,7 @@ async function acquire(backend: LockBackend, log: Logger): Promise<void> {
         const inspection = await backend.inspect();
         if (!inspection.stale || attempt === 2) {
             const suffix = inspection.detail === "" ? "" : ` (${inspection.detail})`;
-            throw new LockHeldError(`another backupkit holds ${backend.lockPath}${suffix}`, {
+            throw new LockHeldError(`another backupkit holds ${where}${suffix}`, {
                 pid: inspection.pid,
                 hostname: inspection.hostname,
             });
@@ -131,11 +140,11 @@ async function acquire(backend: LockBackend, log: Logger): Promise<void> {
             // lock. Losing the steal is a skip, never a delete - the scheduler
             // treats `lock-held` as "try again next tick".
             throw new LockHeldError(
-                `another backupkit took over the stale lock ${backend.lockPath} while it was being inspected`,
+                `another backupkit took over the stale lock ${where} while it was being inspected`,
                 { pid: null, hostname: null },
             );
         }
-        log.warn(`removed stale lock ${backend.lockPath}`, { detail: inspection.detail });
+        log.warn(`removed stale lock ${where}`, { detail: inspection.detail });
     }
 }
 
@@ -161,7 +170,7 @@ export async function withLockScope<T>(backend: LockBackend, log: Logger, fn: ()
             if (!fnFailed) {
                 throw releaseError;
             }
-            log.error(`failed to release lock ${backend.lockPath} after an error`, {
+            log.error(`failed to release lock ${backend.displayPath ?? backend.lockPath} after an error`, {
                 releaseError: String(releaseError),
             });
         }

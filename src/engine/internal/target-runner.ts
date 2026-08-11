@@ -212,7 +212,7 @@ export async function runTarget(
     });
 
     try {
-        return await deps.store.withLock(async () => {
+        const pipeline = async (): Promise<TargetRunReport> => {
             // Prepare (spec step 2): sweep .deleting artifacts and claim any surviving
             // partial under this run's name. Also guarantees the store root exists
             // before the estimate pass. Skipped on dry-run (no writes).
@@ -497,7 +497,18 @@ export async function runTarget(
             }
 
             return report(result.status, null, retentionError);
-        });
+        };
+        // A dry run writes NOTHING to the destination - no claimPartial, no
+        // transfer, retention only planned - so it does NOT take the
+        // destination lock. Locking it made an advisory, read-only estimate
+        // fail outright against a real run in flight, and (worse) made the
+        // estimate itself leave a lock behind: a remote lock has no pid to
+        // check, so a dry run that was SIGKILLed before its `finally` blocked
+        // the target for the full 24 h TTL, clearable only by hand ON THE
+        // ARCHIVE HOST. The price is that a concurrent run may promote or
+        // prune under the estimate, which can only make the estimate stale -
+        // never the archive wrong.
+        return options.dryRun === true ? await pipeline() : await deps.store.withLock(pipeline);
     } catch (error) {
         if (isBackupkitError(error) && error.code === "lock-held") {
             throw error;
