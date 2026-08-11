@@ -35,7 +35,7 @@ Every command looks in the same order:
 1. `--config <path>`
 2. `$BACKUPKIT_CONFIG`
 3. `/etc/backupkit/` - trying `config.jsonc`, then `config.json`
-4. `${XDG_CONFIG_HOME:-~/.config}/backupkit/` - same two names
+4. `~/.backupkit/` - same two names
 
 A path from `--config` or `$BACKUPKIT_CONFIG` is used exactly as given. If nothing is there, that is an error, not a reason to keep looking. Having both `config.jsonc` and `config.json` in one directory is also an error, and it names both files.
 

@@ -17,11 +17,11 @@ import type { ResolvedConfig } from "./types.js";
 
 /** Injectable inputs for path resolution (tests never touch /etc). */
 export interface ResolvePathOptions {
-    /** Environment variables (BACKUPKIT_CONFIG, XDG_CONFIG_HOME, HOME are read). Default process.env. */
+    /** Environment variables (BACKUPKIT_CONFIG, HOME are read). Default process.env. */
     env?: Record<string, string | undefined>;
     /**
      * Directories probed for config.jsonc/config.json, in order. Default:
-     * /etc/backupkit, then ${XDG_CONFIG_HOME:-~/.config}/backupkit.
+     * /etc/backupkit, then ~/.backupkit.
      */
     probeDirs?: string[];
 }
@@ -38,8 +38,7 @@ export interface LoadConfigOptions extends ResolvePathOptions {
 
 /** The default probe directories for the given environment. */
 function defaultProbeDirs(env: Record<string, string | undefined>): string[] {
-    const configHome = env.XDG_CONFIG_HOME ?? join(env.HOME ?? homedir(), ".config");
-    return ["/etc/backupkit", join(configHome, "backupkit")];
+    return ["/etc/backupkit", join(env.HOME ?? homedir(), ".backupkit")];
 }
 
 /**
@@ -86,7 +85,7 @@ function normalizeConfigPath(value: string): string {
 /**
  * Resolve the config file path using the fixed order: (1) the CLI --config
  * argument, (2) $BACKUPKIT_CONFIG, (3) /etc/backupkit/,
- * (4) ${XDG_CONFIG_HOME:-~/.config}/backupkit/ - the directory steps probe
+ * (4) ~/.backupkit/ - the directory steps probe
  * config.jsonc then config.json and fail loudly when BOTH exist ("keep one").
  * A missing path from steps 1-2 is a ConfigError, never a fallthrough;
  * nothing found anywhere is a ConfigError listing every probed path. Whatever

@@ -42,7 +42,7 @@ sudo backupkit init --config /etc/backupkit/config.jsonc
 
 It prints three lines: where it wrote the file, and the next two commands. The explanations are in the file itself, so open it next.
 
-Every command looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `${XDG_CONFIG_HOME:-~/.config}/backupkit/`. Pick one location and stick with it.
+Every command looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `~/.backupkit/`. Pick one location and stick with it.
 
 ## Step 2: edit the config
 

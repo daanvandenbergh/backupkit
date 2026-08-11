@@ -25,15 +25,17 @@ describe("path resolution", () => {
         expect(initPath(undefined, plainRoot.deps)).toBe("/etc/backupkit/config.jsonc");
 
         const user = fakeDeps({ euid: 501, env: { HOME: "/home/dev" } });
-        expect(initPath(undefined, user.deps)).toBe("/home/dev/.config/backupkit/config.jsonc");
+        expect(initPath(undefined, user.deps)).toBe("/home/dev/.backupkit/config.jsonc");
+    });
 
-        const xdg = fakeDeps({ euid: 501, env: { XDG_CONFIG_HOME: "/xdg" } });
-        expect(initPath(undefined, xdg.deps)).toBe("/xdg/backupkit/config.jsonc");
+    it("ignores XDG_CONFIG_HOME - the user config lives in ~/.backupkit", () => {
+        const xdg = fakeDeps({ euid: 501, env: { HOME: "/home/dev", XDG_CONFIG_HOME: "/xdg" } });
+        expect(initPath(undefined, xdg.deps)).toBe("/home/dev/.backupkit/config.jsonc");
     });
 
     it("falls back to os.homedir() (never a literal '~') when HOME is unset", () => {
         const noHome = fakeDeps({ euid: 501, env: {} });
-        expect(initPath(undefined, noHome.deps)).toBe(join(homedir(), ".config", "backupkit", "config.jsonc"));
+        expect(initPath(undefined, noHome.deps)).toBe(join(homedir(), ".backupkit", "config.jsonc"));
     });
 });
 

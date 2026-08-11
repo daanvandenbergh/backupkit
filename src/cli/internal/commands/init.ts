@@ -17,9 +17,9 @@ import { COMMAND_HELP } from "../help.js";
 /**
  * Where init writes: --config / $BACKUPKIT_CONFIG verbatim, else the first
  * probe directory for this identity (/etc/backupkit for root, else
- * ${XDG_CONFIG_HOME:-~/.config}/backupkit) + config.jsonc. The HOME fallback
- * matches config.ts's `defaultProbeDirs` exactly (os.homedir(), never a
- * literal "~") so init always writes where loadConfig will later look.
+ * ~/.backupkit) + config.jsonc. The HOME fallback matches config.ts's
+ * `defaultProbeDirs` exactly (os.homedir(), never a literal "~") so init
+ * always writes where loadConfig will later look.
  */
 export function initPath(configArg: string | undefined, deps: CliDeps): string {
     const verbatim = configArg ?? deps.env.BACKUPKIT_CONFIG;
@@ -29,8 +29,7 @@ export function initPath(configArg: string | undefined, deps: CliDeps): string {
     if (deps.euid === 0) {
         return "/etc/backupkit/config.jsonc";
     }
-    const configHome = deps.env.XDG_CONFIG_HOME ?? join(deps.env.HOME ?? homedir(), ".config");
-    return join(configHome, "backupkit", "config.jsonc");
+    return join(deps.env.HOME ?? homedir(), ".backupkit", "config.jsonc");
 }
 
 /** The `backupkit init` command entry. */
