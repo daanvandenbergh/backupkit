@@ -212,6 +212,16 @@ export class Scheduler {
                 continue;
             }
             const now = this.deps.now();
+            // Respect the failure backoff BEFORE any remote work. A backed-off
+            // target must not be LISTED or run: the due-check listing is an ssh
+            // round-trip for push targets, so gating backoff only before
+            // runTarget (as this used to) let an unreachable remote fail that
+            // listing on every 30 s tick - spamming a failure and driving the
+            // count to the 6 h ceiling instead of actually spacing retries out.
+            const until = this.deps.backoff.untilFor(target.name);
+            if (until !== null && now.getTime() < until.getTime()) {
+                continue;
+            }
             let newest = this.newestCache.get(target.name);
             if (newest === undefined) {
                 try {
@@ -242,10 +252,6 @@ export class Scheduler {
             }
             const newestDate = newest === null ? null : parseSnapshotName(newest);
             if (!isDue(target.schedule, newestDate, now)) {
-                continue;
-            }
-            const until = this.deps.backoff.untilFor(target.name);
-            if (until !== null && now.getTime() < until.getTime()) {
                 continue;
             }
             try {

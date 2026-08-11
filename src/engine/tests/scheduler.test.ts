@@ -240,6 +240,38 @@ describe("Scheduler loop (fake timers)", () => {
         await loop;
     });
 
+    it("a target whose due-check LISTING fails backs off - it is not re-listed every tick", async () => {
+        // Regression: an unreachable remote made the due-check ssh listing fail
+        // on every 30s tick, spamming a failure and driving the count past the
+        // ceiling because backoff was checked only AFTER the listing. Now backoff
+        // gates the listing too, so an unreachable target is probed on its
+        // backoff schedule, not every tick.
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        let listCalls = 0;
+        const { scheduler, runs, recorded } = makeLoop({
+            targets: [target],
+            listNewest: async () => {
+                listCalls++;
+                throw new Error("ssh: host unreachable");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        // First tick: listed once, fails, recorded failed, backoff engages.
+        expect(listCalls).toBe(1);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].status).toBe("failed");
+        expect(runs).toEqual([]); // never reached runTarget
+        // Within the 15-minute backoff: NOT re-listed (the bug re-listed ~20x).
+        await vi.advanceTimersByTimeAsync(10 * 60_000);
+        expect(listCalls).toBe(1);
+        // Past the backoff: probed again - backoff delays, never stops.
+        await vi.advanceTimersByTimeAsync(6 * 60_000);
+        expect(listCalls).toBe(2);
+        scheduler.stop();
+        await loop;
+    });
+
     it("disabled targets never run", async () => {
         const target = makeTarget({ name: "web", schedule: HOURLY, enabled: false });
         const { scheduler, runs } = makeLoop({ targets: [target] });
