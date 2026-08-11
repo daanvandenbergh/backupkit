@@ -28,8 +28,20 @@ const PERMANENT_SSH_MESSAGE: Record<PermanentSshPattern, string> = {
     "host-key-changed": "remote host key changed (exit 255) - permanent, possible MITM; a human must fix known_hosts",
 };
 
-/** rsync exit codes that are transient by the spec table: 10 socket I/O, 12 protocol stream, 30/35 timeouts. */
-const TRANSIENT_EXIT_CODES = new Set([10, 12, 30, 35]);
+/**
+ * rsync exit codes that are transient: 10 socket I/O, 12 protocol stream,
+ * 13 message I/O, 14 IPC, 21 waitpid, 30/35 timeouts.
+ *
+ * All seven are ONE event seen from different layers - the transport died
+ * mid-transfer. Which code rsync happens to return depends on where it was
+ * when the link dropped (reading the socket, writing the message pipe, reaping
+ * the ssh child), and treating only some of them as retriable means a flaky
+ * link loses the run on the codes that fell through to the fatal default. The
+ * cost of being wrong here is asymmetric: a retry resumes the same `.partial`
+ * so it costs one attempt out of the target's budget, while a missed retry
+ * costs the whole run.
+ */
+const TRANSIENT_EXIT_CODES = new Set([10, 12, 13, 14, 21, 30, 35]);
 
 /** rsync exit codes that are a backupkit bug or rsync-version escape: usage, protocol, unsupported action. */
 const HARD_FAIL_EXIT_CODES = new Set([1, 2, 4, 5, 6]);

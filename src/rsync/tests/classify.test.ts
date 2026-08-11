@@ -17,6 +17,12 @@ const MATRIX: MatrixRow[] = [
     { exitCode: 23, stderr: "rsync: opendir failed", cls: "warning", retriable: false, promote: true },
     { exitCode: 10, stderr: "", cls: "transient", retriable: true, promote: false },
     { exitCode: 12, stderr: "", cls: "transient", retriable: true, promote: false },
+    // 13/14/21 are the same dropped link as 10/12, seen from the message pipe,
+    // the IPC layer and the child reaper. Falling through to the fatal default
+    // lost the run on exactly the flaky networks retrying exists for.
+    { exitCode: 13, stderr: "rsync error: errors with program diagnostics", cls: "transient", retriable: true, promote: false },
+    { exitCode: 14, stderr: "rsync error: error in IPC code", cls: "transient", retriable: true, promote: false },
+    { exitCode: 21, stderr: "rsync error: some error returned by waitpid()", cls: "transient", retriable: true, promote: false },
     { exitCode: 30, stderr: "", cls: "transient", retriable: true, promote: false },
     { exitCode: 35, stderr: "", cls: "transient", retriable: true, promote: false },
     { exitCode: 11, stderr: "write failed: No space left on device", cls: "disk", retriable: false, promote: false },
