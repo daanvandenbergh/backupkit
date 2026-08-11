@@ -44,6 +44,8 @@ It prints three lines: where it wrote the file, and the next two commands. The e
 
 Every command looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `~/.backupkit/`. Pick one location and stick with it.
 
+`init` writes where that same lookup would land: `sudo backupkit init` creates the shared `/etc/backupkit/config.jsonc`, and `backupkit init` as yourself creates `~/.backupkit/config.jsonc` for you alone. The daemon runs as root and cannot see your home directory's config on its own, so if you keep it there, install the service with `--config` - see [Root service, per-user config](/daemon-setup).
+
 ## Step 2: edit the config
 
 The starter ships with one example remote and one example target. At minimum you set:

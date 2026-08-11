@@ -72,7 +72,7 @@ Then `backupkit run` performs one pass over every due target; the daemon does it
 | `backupkit daemon` | Foreground scheduler loop (what the installed service runs). |
 | `backupkit jail install\|status` | Run **on an archive server** (config-free): atomically install/update the shipped `backupkit-remote` jail script at `/usr/local/bin/backupkit-remote`, or verify the installed copy matches this package version. |
 
-`--config <path>` overrides the default lookup (`$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc`, then `~/.backupkit/config.jsonc`). See the [configuration reference](https://daanvandenbergh.github.io/backupkit/configuration) and [CLI reference](https://daanvandenbergh.github.io/backupkit/cli-reference).
+`--config <path>` overrides the default lookup (`$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc`, then `~/.backupkit/config.jsonc`). `init` writes at that same resolved path - `/etc/backupkit/` under `sudo`, `~/.backupkit/` as yourself - and since the daemon runs as root, a config kept in your home directory has to be named at install time: `sudo backupkit service install --config ~/.backupkit/config.jsonc`. See the [configuration reference](https://daanvandenbergh.github.io/backupkit/configuration) and [CLI reference](https://daanvandenbergh.github.io/backupkit/cli-reference).
 
 ## Push vs pull
 

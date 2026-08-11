@@ -47,12 +47,14 @@ A path from `--config` or `$BACKUPKIT_CONFIG` is used exactly as given. If nothi
 | `targets` | object | required | What to back up, keyed by target name (they run in the order you write them) |
 | `name` | string | `"backupkit"` | Instance label used in logs and lock files |
 | `retention` | object | keep everything | Default retention for targets that define none |
-| `stateDir` | string | `/var/lib/backupkit` as root, else `~/.local/state/backupkit` | Where run reports are stored |
+| `stateDir` | string | `/var/lib/backupkit` as root (`/var/db/backupkit` on macOS), else `~/.local/state/backupkit` | Where run reports are stored |
 | `logging` | object | `{ level: "info" }` | `level` (`error`/`warn`/`info`/`debug`) and an optional `file` |
 | `rsyncBin` | string | tries `/opt/homebrew/bin/rsync`, `/usr/local/bin/rsync`, then PATH | Override the local rsync |
 | `sshBin` | string | from PATH | Override the local ssh |
 
 Remote and target keys have to match `/^[a-z0-9][a-z0-9._-]*$/` and stay under 64 characters.
+
+The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup).
 
 ## Remotes
 

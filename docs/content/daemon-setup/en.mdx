@@ -30,6 +30,35 @@ sudo backupkit service start
 
 `service install` writes the OS unit - a systemd unit on Linux, a launchd plist on macOS - enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
 
+## Root service, per-user config
+
+The daemon always runs as **root** - `User=root` in the systemd unit, and the launchd job is a `/Library/LaunchDaemons` system daemon. Two consequences are worth knowing before you point it at a config in your home directory.
+
+**Root looks in root's places.** Under `sudo` the lookup is `/etc/backupkit/` and then *root's* `~/.backupkit/` - never yours. So a config written by an unprivileged `backupkit init`, which lands in your own `~/.backupkit/config.jsonc`, is invisible to it. Name the file once, at install:
+
+```bash
+sudo backupkit service install --config ~/.backupkit/config.jsonc
+```
+
+The absolute path is written into the unit's `ExecStart`, so every later `start` and `restart` uses that same file. A root service may read a config you own - it only has to be owned by you or root and not group- or other-writable, and `install` refuses it by name with the exact `chmod` otherwise.
+
+**Set `stateDir` explicitly when you do this.** Its default depends on *who runs the command*, not on the config: root gets `/var/lib/backupkit` (`/var/db/backupkit` on macOS), you get `~/.local/state/backupkit`. Share one config between the root daemon and your own unprivileged `backupkit status` and the two read different report directories - the daemon backs up correctly while your `status` shows nothing at all. One line settles it, and both identities then agree:
+
+```jsonc
+"stateDir": "/var/lib/backupkit",
+```
+
+## One machine, one daemon
+
+`install` writes a single system unit - `/etc/systemd/system/backupkit.service` or `/Library/LaunchDaemons/com.daanvandenbergh.backupkit.plist`. There is no per-user instance, so two people who each keep their own `~/.backupkit/config.jsonc` cannot both have a service: the second `install` overwrites the first one's unit. Pick one:
+
+- **Shared:** merge the targets into `/etc/backupkit/config.jsonc`, the root-owned location every default aims at. One config, one daemon, and no `--config` anywhere.
+- **Per-user, unscheduled:** each user keeps their own config and runs `backupkit run` from their own cron or user timer - no root needed. `backupkit daemon` also runs the scheduler in the foreground under their own identity, which a systemd **user** unit or a launchd **LaunchAgent** can supervise.
+
+Mind the order in that second case: `/etc/backupkit/` is probed **before** `~/.backupkit/` for *every* identity, so the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file. Where both exist, each user's commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` exported in their shell profile) to reach their own.
+
+Per-user configs stay separate all the way down: each one's `stateDir`, its `<configDir>/known_hosts`, and its agent socket live under that user's home.
+
 ## Drive the lifecycle
 
 `backupkit service` takes one verb. Each is idempotent, and each refusal names the exact next command to run.
