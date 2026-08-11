@@ -1154,7 +1154,7 @@ export class Backupkit {
 
         const jailLines: JailLine[] = [];
         for (const target of this.config.targets) {
-            if (target.dst.kind !== "remote") {
+            if (target.dst.kind !== "remote" || !target.jail) {
                 continue;
             }
             const remote = target.dst.remote;

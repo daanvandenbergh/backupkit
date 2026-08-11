@@ -138,7 +138,7 @@ export interface CheckReport {
     sshOk: boolean;
     /** One probe row per configured remote, in config order. */
     remotes: RemoteCheck[];
-    /** Jail-line data for every push target. */
+    /** Jail-line data for every push target with the jail enabled (`jail: false` targets are omitted). */
     jailLines: JailLine[];
     /** Every collected error, in discovery order. */
     errors: string[];

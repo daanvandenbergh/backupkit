@@ -359,6 +359,19 @@ describe("targets", () => {
     it("rejects a non-boolean enabled", () => {
         expectFail(base({ targets: { t1: { ...TARGET, enabled: "yes" } } }), "expected a boolean");
     });
+
+    it.each([[true], [false]])("accepts jail: %s on a push target", (jail) => {
+        const parsed = validate(base({ targets: { t1: { ...TARGET, direction: "push", jail } } }));
+        expect(parsed.targets[0].target.jail).toBe(jail);
+    });
+
+    it("rejects jail on a pull target", () => {
+        expectFail(base({ targets: { t1: { ...TARGET, jail: false } } }), "only valid on a push target");
+    });
+
+    it("rejects a non-boolean jail", () => {
+        expectFail(base({ targets: { t1: { ...TARGET, direction: "push", jail: "no" } } }), "expected a boolean");
+    });
 });
 
 describe("schedule matrix", () => {

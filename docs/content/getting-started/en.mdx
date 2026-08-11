@@ -86,7 +86,7 @@ The config is JSONC: `//` and `/* */` comments and one trailing comma per object
 sudo backupkit check --config /etc/backupkit/config.jsonc
 ```
 
-It validates the config (stopping at the first error), verifies your local `rsync` and `ssh` versions, loads the keys your explicit remotes name, probes each remote's `rsync` over ssh, and - on a TTY - pins any unpinned host key. For push targets it prints the exact `authorized_keys` jail line to install on the archive server. Fix whatever it reports and run it again until it is clean. `check` exits `2` on a config error and `1` on any probe failure.
+It validates the config (stopping at the first error), verifies your local `rsync` and `ssh` versions, loads the keys your explicit remotes name, probes each remote's `rsync` over ssh, and - on a TTY - pins any unpinned host key. For push targets it prints the exact `authorized_keys` jail line to install on the archive server (recommended but optional - a target with `"jail": false` gets a note instead; the jail itself is never probed). Fix whatever it reports and run it again until it is clean. `check` exits `2` on a config error and `1` on any probe failure.
 
 ## Step 4: take a snapshot by hand
 

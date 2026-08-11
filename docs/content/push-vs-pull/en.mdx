@@ -35,7 +35,7 @@ Push exists for the case where the source host must initiate the connection - fo
 
 ## What push locks down
 
-When you push, the key the source host authenticates with is never an unrestricted shell key. Backupkit jails it behind a forced command, `backupkit-remote`, installed on the archive server. `backupkit check` prints the exact `authorized_keys` line to install:
+When you push, the key the source host authenticates with should not be an unrestricted shell key. By default backupkit expects it jailed behind a forced command, `backupkit-remote`, installed on the archive server (this is recommended, but [optional](#running-without-the-jail)). `backupkit check` prints the exact `authorized_keys` line to install:
 
 ```
 restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...
@@ -44,6 +44,31 @@ restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA
 The `restrict` prefix disables port forwarding, agent forwarding, PTY allocation, and X11. The forced command then permits only the exact `rsync --server` transfers and the handful of directory operations backupkit's snapshot store issues, each confined to the jail root you name. Anything else the key tries to run exits with a rejection. The [Security Model](/security-model) covers the jail - including its symlink-resolution defense - in full.
 
 **Upgrade the jail script with the package.** `backupkit-remote` is a copy on the archive server, not something the client can update, and it validates every command against the exact name grammar the client uses. So when you upgrade backupkit on a source host, re-copy `dist/snapshots/internal/backupkit-remote.sh` to each archive server it pushes to. A jail older than its client rejects operations with a bare `backupkit-remote: rejected`, which surfaces as a failed run naming no cause. (A test in the package pins the script's grammar to the client's, so the two only diverge across versions, never within one.)
+
+## Running without the jail
+
+The jail is recommended, not required. Set `"jail": false` on a push target to run against a plain account instead:
+
+```jsonc
+"nas-www": {
+    "direction": "push",
+    "remote": "nas",
+    "source": "/var/www",
+    "destination": "/srv/backups",
+    "jail": false  // accepted risk: the push key is not confined
+}
+```
+
+Two situations call for it:
+
+- **Accepted risk.** You have weighed the threat model and are fine with the push key holding normal account access - for example a LAN NAS that nothing hostile can reach.
+- **A restricted host where the jail cannot be installed.** Storage appliances and hosted "storage box" products often offer rsync over ssh but no way to install a script or edit `authorized_keys` forced commands. The jail simply cannot exist there.
+
+Transfers are identical either way. The client always speaks plain `rsync` plus ordinary POSIX commands over ssh - the jail only *validates* them and then executes them verbatim - so removing the jail changes nothing about how a backup runs. For an unjailed target, `backupkit check` skips the `authorized_keys` line and prints a note naming the accepted risk instead. The jail itself is never probed: `check` cannot tell whether the forced command is installed, so installing it (or not) is entirely your act.
+
+What you give up is containment: an unjailed key can do whatever the account allows, including deleting the entire archive in one command from a compromised source host. That is exactly the scenario versioned backups exist for, so prefer the jail - or better, [pull](#why-pull-is-the-safe-default) - whenever you control the archive server.
+
+For a restricted host, the account must accept these commands over ssh, which is what backupkit issues: `rsync --server` (both directions), `mkdir -p --`, `mkdir --`, `mv --`, `find <dir> -maxdepth 1 -mindepth 1 -print0`, `rm -rf --`, `df -Pk --`, and `rsync --version`. If the provider's restricted shell supports those, an unjailed push target works; verify with `backupkit run <target> --dry-run` followed by a real run against a scratch destination.
 
 ## What the pipeline does for each direction
 

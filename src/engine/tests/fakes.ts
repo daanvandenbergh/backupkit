@@ -133,6 +133,7 @@ export function makeTarget(overrides: Partial<ResolvedTarget> = {}): ResolvedTar
         retention: null,
         retry: { attempts: 5 },
         minFree: null,
+        jail: overrides.direction === "push",
         rsync: {
             compress: true,
             bwlimit: null,

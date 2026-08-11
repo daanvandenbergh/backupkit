@@ -108,6 +108,7 @@ export function resolveConfig(
                 remoteRsyncBin: target.rsync?.remoteRsyncBin ?? null,
                 verify: target.rsync?.verify ?? false,
             },
+            jail: target.direction === "push" ? (target.jail ?? true) : false,
             enabled: target.enabled ?? true,
             src,
             dst,

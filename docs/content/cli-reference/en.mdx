@@ -96,7 +96,7 @@ Apply retention now. `--dry-run` prints the plan (the keeps with their reasons, 
 
 ### check
 
-The interactive readiness gate: validate the config (stopping at the first error), verify local `rsync` and `ssh` versions, load keys, probe remotes, pin unpinned host keys on a TTY, and print the push-jail `authorized_keys` lines. It exits 2 on a config error and 1 on any probe failure. Run it after each reboot for a `prompt`-passphrase deployment.
+The interactive readiness gate: validate the config (stopping at the first error), verify local `rsync` and `ssh` versions, load keys, probe remotes, pin unpinned host keys on a TTY, and print the push-jail `authorized_keys` lines (informational: the jail is recommended but optional and never probed; a `"jail": false` target gets a jail-disabled note instead). It exits 2 on a config error and 1 on any probe failure. Run it after each reboot for a `prompt`-passphrase deployment.
 
 ### init
 

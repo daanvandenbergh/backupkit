@@ -113,11 +113,12 @@ Each target is keyed by name; the key becomes the snapshot subdirectory and the 
 | `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
 | `minFree` | string \| `false` | `"5%"` | Free-space floor; `false` disables the guard |
 | `rsync` | object | `{}` | Per-target rsync tuning (below) |
+| `jail` | boolean | `true` | Push only. `false` = skip the recommended `backupkit-remote` forced-command jail (accepted risk, or a restricted host where it cannot be installed); `backupkit check` then omits the jail line. See [running without the jail](/push-vs-pull#running-without-the-jail) |
 | `enabled` | boolean | `true` | `false` = configured but never scheduled |
 
 All path fields are absolute (`~` is rejected), contain no NUL or newline, and must not start with `-`. They must also carry no `.` or `..` component - write the resolved path. Every path is normalized on load (duplicate slashes collapsed, a trailing slash stripped), so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination. This matters for push targets: the destination is baked verbatim into the archive host's forced command as the jail root, and the jail compares it against each incoming path as a literal prefix, so a non-normal form would be rejected on every operation. `minFree` is `"N%"` (0-50) or an absolute binary size like `"10G"` / `"500M"`.
 
-A **push** `destination` additionally may not contain whitespace or quote characters. rsync backslash-escapes a space when it re-serializes its own `--server` argv, and the jail word-splits that argv, so a destination like `/Volumes/My Backups` validates, prints a plausible jail line, lets every lifecycle command through - and then has the actual data transfer rejected on every run. A pull destination is purely local and is unaffected.
+A **push** `destination` additionally may not contain whitespace or quote characters, whether the target is jailed or not. rsync backslash-escapes a space when it re-serializes its own `--server` argv, and the jail (or, with `"jail": false`, the remote login shell) word-splits that argv, so a destination like `/Volumes/My Backups` validates, prints a plausible jail line, lets every lifecycle command through - and then has the actual data transfer rejected on every run. A pull destination is purely local and is unaffected.
 
 ### Schedules
 

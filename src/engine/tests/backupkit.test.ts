@@ -384,6 +384,22 @@ describe("Backupkit", () => {
         );
     });
 
+    it("check: a jail-disabled push target produces no jail line (and no .pub read error)", async () => {
+        const fixture = track(
+            await makeKit({
+                target: {
+                    direction: "push",
+                    jail: false,
+                    dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+                    destination: "/srv/backups",
+                },
+            }),
+        );
+        const report = await fixture.kit.check();
+        expect(report.jailLines).toEqual([]);
+        expect(report.ok).toBe(true);
+    });
+
     it("check: explicit push target embeds the real public key after the restriction prefix", async () => {
         const fixture = track(await makeKit());
         const keyPath = join(fixture.root, "id_ed25519");

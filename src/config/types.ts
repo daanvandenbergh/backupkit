@@ -169,6 +169,16 @@ export interface TargetConfig {
     minFree?: string | false;
     /** Default {}. */
     rsync?: RsyncOptions;
+    /**
+     * Push only: whether the push key on the archive server is confined by the
+     * `backupkit-remote` forced command (recommended - a compromised source
+     * host can then never delete a completed snapshot). Set false to run
+     * against a plain account or a restricted host where the jail cannot be
+     * installed (e.g. a storage-box appliance): transfers work identically,
+     * but the key has whatever access the server grants it, and `backupkit
+     * check` stops printing the jail line for this target. Default true.
+     */
+    jail?: boolean;
     /** false = configured but never scheduled. Default true. */
     enabled?: boolean;
 }
@@ -247,6 +257,8 @@ export interface ResolvedTarget {
     minFree: MinFree | null;
     /** Fully resolved rsync tuning. */
     rsync: ResolvedRsyncOptions;
+    /** Push: whether check() emits a jail `authorized_keys` line for this target. Always false for pull (which has no jail). */
+    jail: boolean;
     /** Whether the scheduler considers this target. */
     enabled: boolean;
     /** Transfer source endpoint (mapped once from direction). */

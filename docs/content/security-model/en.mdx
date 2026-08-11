@@ -44,7 +44,7 @@ This baseline is injected for both remote kinds, so even an alias remote whose `
 
 > **Upgrading an existing archive server:** `backupkit-remote` is a copy deployed out-of-band on each archive host, so it does not update when the npm package does. Re-copy it whenever you upgrade backupkit. The current script narrows `rm -rf` (below) and accepts the `--link-dest` form real rsync sends; an older copy on the server will reject every incremental push snapshot with a bare `backupkit-remote: rejected`. `backupkit check` verifies the connection, not the script version - compare the file itself.
 
-A push key is never a plain shell key. It is wired into `authorized_keys` behind the `backupkit-remote` forced command, and `backupkit check` generates the exact line from your loaded config and real key:
+By default a push key is not a plain shell key: it is wired into `authorized_keys` behind the `backupkit-remote` forced command, and `backupkit check` generates the exact line from your loaded config and real key. The jail is recommended, not enforced - the client cannot verify it is installed, and a target can opt out with `"jail": false` (accepted risk, or a restricted host that cannot run it; see [running without the jail](/push-vs-pull#running-without-the-jail)). Everything in this section describes what the jail guarantees **when installed**:
 
 ```
 restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA...

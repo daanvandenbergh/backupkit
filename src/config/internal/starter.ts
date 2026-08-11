@@ -39,8 +39,9 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
     "targets": {
         "example-var-www": {
             // "pull": this machine fetches from the remote (recommended).
-            // "push": this machine sends to the remote (the key is jailed; see
-            // \`backupkit check\`, which prints the authorized_keys line to install).
+            // "push": this machine sends to the remote. Recommended: jail the key
+            // with the forced command \`backupkit check\` prints; or set
+            // "jail": false to push to a plain account (accepted risk).
             "direction": "pull",
             // A key of "remotes" above.
             "remote": "example",

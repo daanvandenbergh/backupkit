@@ -93,6 +93,12 @@ describe("resolveConfig defaults", () => {
             verify: false,
         });
         expect(target.enabled).toBe(true);
+        expect(target.jail).toBe(false);
+    });
+
+    it("defaults jail to true for a push target and honors an explicit false", () => {
+        expect(resolve(minimal({ target: { direction: "push" } })).targets[0].jail).toBe(true);
+        expect(resolve(minimal({ target: { direction: "push", jail: false } })).targets[0].jail).toBe(false);
     });
 
     it("resolves an explicit remote with port 22 and the configDir known_hosts default", () => {

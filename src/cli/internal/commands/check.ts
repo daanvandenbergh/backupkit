@@ -1,8 +1,10 @@
 /**
  * The `backupkit check` command: print the engine's readiness report - local
  * binary versions, per-remote reachability + rsync version, `ssh -G` alias
- * resolution, the push-jail `authorized_keys` lines with the backupkit-remote
- * install instruction, and every collected error. TOFU pinning and passphrase
+ * resolution, the push-jail `authorized_keys` lines (informational - the jail
+ * is recommended but optional, and never probed) with the backupkit-remote
+ * install instruction, a note per jail-disabled push target, and every
+ * collected error. TOFU pinning and passphrase
  * prompts happen inside `Backupkit.check()` when a TTY is present (the engine
  * reads the real TTY by default - the CLI adds nothing). Exit 1 on any probe
  * failure; a config error exits 2 via the shared error mapping.
@@ -43,7 +45,7 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
 
     if (report.jailLines.length > 0) {
         deps.stdout("");
-        deps.stdout("push jail - add to the archive server's authorized_keys:");
+        deps.stdout("push jail (recommended, optional) - add to the archive server's authorized_keys:");
         for (const jail of report.jailLines) {
             deps.stdout(`# target ${jail.target} via remote ${jail.remote}`);
             deps.stdout(jail.line);
@@ -51,6 +53,14 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
         deps.stdout(
             "install the jail: copy dist/snapshots/internal/backupkit-remote.sh to /usr/local/bin/backupkit-remote on the archive server and chmod 755 it",
         );
+        deps.stdout('to skip the jail for a target (accepted risk), set "jail": false on it');
+    }
+    for (const target of config.targets) {
+        if (target.direction === "push" && !target.jail) {
+            deps.stdout(
+                `push target ${target.name}: jail disabled ("jail": false) - the push key gets whatever access the server grants it`,
+            );
+        }
     }
 
     for (const error of report.errors) {

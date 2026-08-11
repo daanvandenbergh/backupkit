@@ -42,7 +42,9 @@ even when nothing visibly fails.
    on a group-writable config, before any store access") - expect: one row per remote-I/O verb.*
 9. All remote-derived data is untrusted: shape-validated before use, control-char-sanitized
    before logging, never interpolated into a subsequent command.
-10. Push-mode keys are always jailed by the `backupkit-remote` forced command; the
+10. Push-mode keys are jailed by the `backupkit-remote` forced command by default - opting out
+    is an EXPLICIT per-target `"jail": false` in config (accepted risk, e.g. a storage-box host
+    with no shell), never an implicit omission; the
     `authorized_keys` line (explicit remotes) or restriction prefix + key instruction (alias
     remotes) is generated only by `backupkit check` from the loaded config; no example or
     generated line ANYWHERE in the repo - source, `scripts/`, README, or docs - ever shows an

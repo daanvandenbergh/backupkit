@@ -496,6 +496,7 @@ class Validator {
             "retry",
             "minFree",
             "rsync",
+            "jail",
             "enabled",
         ]);
         for (const required of ["direction", "remote", "source", "destination"]) {
@@ -514,14 +515,16 @@ class Validator {
         // command - and real rsync backslash-escapes a space in the path it
         // sends. Every rsync through the jail is then rejected while the
         // lifecycle commands still succeed, so the config validates, `backupkit
-        // check` reports OK, and no backup ever completes. A PULL destination is
-        // purely local and works fine with spaces.
+        // check` reports OK, and no backup ever completes. With the jail
+        // disabled the remote LOGIN SHELL word-splits the same command string,
+        // so the restriction holds for every push target, jailed or not. A PULL
+        // destination is purely local and works fine with spaces.
         if (target.direction === "push" && /[\s'"]/.test(target.destination)) {
             this.fail(
                 obj.entries.get("destination")!,
                 `${path}.destination`,
-                "a push destination may not contain whitespace or quote characters - it is the jail root of " +
-                    "the archive host's forced command, which word-splits the remote command",
+                "a push destination may not contain whitespace or quote characters - the remote command " +
+                    "layer (the jail's parser, or the login shell when the jail is disabled) word-splits it",
             );
         }
         const excludeNode = obj.entries.get("exclude");
@@ -590,6 +593,17 @@ class Validator {
                         "command fixes the remote rsync binary; set it on the jail account's PATH instead",
                 );
             }
+        }
+        const jailNode = obj.entries.get("jail");
+        if (jailNode !== undefined) {
+            if (target.direction === "pull") {
+                this.fail(
+                    jailNode,
+                    `${path}.jail`,
+                    "jail is only valid on a push target - pull mode keeps every credential local and has no jail",
+                );
+            }
+            target.jail = this.expectBool(jailNode, `${path}.jail`);
         }
         const enabledNode = obj.entries.get("enabled");
         if (enabledNode !== undefined) {
