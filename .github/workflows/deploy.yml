@@ -46,7 +46,7 @@ jobs:
             pages: write
         defaults:
             run:
-                working-directory: site   # the Next app lives in site/ (repo root is the library)
+                working-directory: docs   # the Next app lives in docs/ (repo root is the library)
         steps:
             - name: Checkout
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -59,7 +59,7 @@ jobs:
                   # `cache: npm` needs a committed package-lock.json (same as `npm ci` below).
                   # No lockfile? Remove this line and change `npm ci` to `npm install`.
                   cache: npm
-                  cache-dependency-path: site/package-lock.json
+                  cache-dependency-path: docs/package-lock.json
 
             # Outputs `base_path` (e.g. "/<repo>" for a project site, empty/"/" for root hosting).
             # We do NOT use `static_site_generator: next` here: the app sets its own basePath from
@@ -85,7 +85,7 @@ jobs:
             - name: Upload artifact
               uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
               with:
-                  path: site/out
+                  path: docs/out
 
     deploy:
         needs: build

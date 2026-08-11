@@ -29,8 +29,8 @@
         "typecheck": "tsc --noEmit",
         "prepublishOnly": "npm run build",
         "push-and-publish": "npm run build && npm publish",
-        "docs": "npm run build && npm --prefix site run dev",
-        "docs:build": "npm run build && npm --prefix site run build"
+        "docs": "npm run build && npm --prefix docs run dev",
+        "docs:build": "npm run build && npm --prefix docs run build"
     },
     "engines": {
         "node": ">=20"

@@ -104,7 +104,7 @@ await kit.restore({ target: "web1-www", snapshot: "latest", output: "/tmp/restor
 npm run typecheck   # tsc --noEmit
 npm test            # vitest
 npm run build       # emit dist/
-npm run docs:build  # build the docs site (site/out)
+npm run docs:build  # build the docs site (docs/out)
 ```
 
 `scripts/smoke-test.sh` is an interactive two-host release-gate test; run it before first production use.
