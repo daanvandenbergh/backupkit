@@ -1,6 +1,6 @@
 ---
 title: "Versioning & Retention"
-description: "How each run becomes a hard-linked dated snapshot, and how the grandfather-father-son retention rules decide which snapshots survive a prune."
+description: "How each run becomes a hard-linked dated snapshot, and how the retention rules decide which snapshots survive a prune."
 tab: "Guide"
 group: "Concepts"
 order: 3
@@ -12,31 +12,37 @@ keywords:
     - prune
     - GFS
 image: "/assets/docs/retention/hero.en.jpg"
-updated: "2026-08-10"
+updated: "2026-08-11"
 ---
 
-Every backup run is a dated snapshot, and retention rules decide how many of those snapshots you keep over time. This page explains how versioning works and how the grandfather-father-son (GFS) policy chooses which snapshots survive a prune.
+Every run leaves behind a dated snapshot. Retention decides how many of those you keep as they pile up. This page covers both.
 
-## Each run is a hard-linked snapshot
+## Every run is a hard-linked snapshot
 
-A target's snapshots live at `<destination>/<target>/<timestamp>/`, one directory per run, named by a UTC timestamp. Files that did not change since the previous complete snapshot are hard-linked rather than copied, so an unchanged tree costs almost no additional disk - only changed and new files consume space. The result is a full, browsable copy at every timestamp, with the storage cost of an incremental.
+A target's snapshots live at `<destination>/<target>/<timestamp>/`, one directory per run, named with a UTC timestamp.
 
-Snapshot names are the single sortable timestamp codec, so "newest" is always well defined and history reads in order.
+Files that have not changed since the previous complete snapshot are hard-linked instead of copied - meaning the new snapshot points at the same data on disk rather than duplicating it. So an unchanged tree costs almost nothing, and only changed and new files take up space.
+
+What you get is a full, browsable copy at every timestamp, for roughly the storage cost of an incremental backup. Snapshot names sort as plain strings, so "newest" is always unambiguous and history reads in order.
 
 ## A snapshot survives if any rule claims it
 
-Retention is GFS and deterministic: it counts backward through the snapshots that exist, never through a wall clock. A snapshot is kept if **any** configured rule claims it, and each rule records why. The rules, from `RetentionConfig`:
+Retention follows a grandfather-father-son scheme: keep recent backups densely, older ones sparsely. It counts backwards through the snapshots that actually exist, never against a wall clock.
+
+Each rule keeps one tier, and a snapshot is kept if **any** rule claims it:
 
 | Rule | Keeps |
 | --- | --- |
-| `keepLast` | the N newest snapshots, unconditionally |
-| `keepHourly` | the newest snapshot of each of the N most recent UTC hours |
-| `keepDaily` | the newest snapshot of each of the N most recent UTC days |
-| `keepWeekly` | the newest snapshot of each of the N most recent ISO weeks (Monday-start) |
-| `keepMonthly` | the newest snapshot of each of the N most recent UTC months |
-| `keepYearly` | the newest snapshot of each of the N most recent UTC years |
+| `keepLast` | The N newest snapshots, no other condition |
+| `keepHourly` | The newest snapshot of each of the N most recent UTC hours |
+| `keepDaily` | The newest snapshot of each of the N most recent UTC days |
+| `keepWeekly` | The newest snapshot of each of the N most recent ISO weeks (Monday-start) |
+| `keepMonthly` | The newest snapshot of each of the N most recent UTC months |
+| `keepYearly` | The newest snapshot of each of the N most recent UTC years |
 
-Each tier walks the snapshots newest-first, computes that tier's UTC bucket key for each, and keeps the first snapshot it sees in each distinct bucket until it has kept N buckets. A snapshot claimed by more than one tier carries every reason - for example `last` and `daily=2026-08-10`.
+Each tier walks the snapshots newest first, works out which hour, day, week, month, or year each one falls in, and keeps the first snapshot it sees in each of those buckets until it has kept N of them.
+
+A snapshot claimed by more than one tier records every reason - for example `last` and `daily=2026-08-10`.
 
 The starter config ships a sensible default:
 
@@ -49,43 +55,47 @@ The starter config ships a sensible default:
 }
 ```
 
-That keeps dense recent history and thins older history to one-per-week then one-per-month, so a year of daily backups collapses to a few dozen snapshots.
+That keeps recent history dense and thins the older end to one per week, then one per month. A year of daily backups collapses to a few dozen snapshots.
 
 ## The newest complete snapshot is always kept
 
-The newest complete snapshot is kept unconditionally, with the reason `newest`, before any rule runs - so a prune can never delete your most recent backup, even if every retention tier is set to zero. This is a hard invariant, not a side effect of the rules.
+Before any rule runs, the newest complete snapshot is kept with the reason `newest`. A prune can never delete your most recent backup, even if every tier is set to zero. This is a hard rule, not a side effect of how the tiers happen to work out.
 
 ## Turning retention off
 
-Retention counts are non-negative integers. Two spellings turn pruning off, both deliberate:
+Counts are non-negative integers. There are two ways to keep everything, and the difference is deliberate:
 
-- Omit the top-level `retention` object entirely to keep every snapshot forever.
-- Set a target's `retention` to `false` to keep everything for that one target, overriding the default.
+- **Omit the top-level `retention` object** to keep every snapshot of every target forever.
+- **Set a target's `retention` to `false`** to keep everything for that one target, overriding the default.
 
-An empty object (`"retention": {}`) is rejected by the validator - it would be ambiguous, so `false` is the explicit "keep everything" spelling. A target's `retention` replaces the top-level default wholesale; it is never merged.
+An empty object (`"retention": {}`) is rejected, because it would be ambiguous - `false` is the explicit spelling. A target's `retention` replaces the top-level default outright; the two are never merged.
 
-Schedules and retention are independent. Retention keeps its hourly-through-yearly tiers regardless of how often a target runs; for `minute` and `hour` schedules, `keepLast` and `keepHourly` are what govern sub-daily density.
+Schedules and retention are independent of each other. The tiers work the same however often a target runs. For `minute` and `hour` schedules, `keepLast` and `keepHourly` are what control how dense sub-daily history stays.
 
 ## Applying retention
 
-The daemon prunes after each run, but you can apply retention by hand at any time:
+The daemon prunes after each run, but you can do it by hand any time:
 
 ```bash
 backupkit prune              # apply retention to every target now
-backupkit prune --dry-run    # print the plan (keeps with reasons, then the prune list) and stop
+backupkit prune --dry-run    # print the plan and stop
 ```
 
-`--dry-run` shows exactly which snapshots each rule claims and which would be deleted, so you can confirm a policy before it removes anything. Pruning runs under the snapshot store lock, and deletion is two-phase, so a prune interrupted midway never leaves a half-deleted snapshot in the archive.
+`--dry-run` shows which rule claims each snapshot and which ones would go, so you can confirm a policy before it deletes anything.
+
+Pruning runs under the snapshot store lock, and deletion happens in two phases, so a prune interrupted halfway never leaves a half-deleted snapshot behind.
 
 ## The content-collapse tripwire
 
-Retention selects on names and counts, never on content - which means a source that suddenly presents a near-empty tree would promote near-empty snapshots, and retention would dutifully age out the snapshots holding the real data. That is how an archive gets destroyed from the source side without a single delete command.
+Retention picks snapshots by name and count, never by content. So a source that suddenly hands over a near-empty tree would produce near-empty snapshots, and retention would dutifully age out the ones holding your real data. That is how an archive gets destroyed from the source side without anyone running a delete.
 
-So when a promoted snapshot's file count collapses against the previous snapshot, **the automatic prune after that run is skipped**. The snapshot itself is still stored - the data has already crossed the wire, and discarding it would be the more destructive choice - but the archive only grows until a human looks. The run is logged at error level and the collapse is recorded on the run report, so it surfaces in `backupkit status` rather than sitting silent.
+To catch it: when a promoted snapshot's file count collapses compared to the previous one, **the automatic prune after that run is skipped**.
 
-`backupkit prune` never consults the tripwire. Once you have confirmed the shrink is real (you did delete half the source, the application moved its data directory), run it by hand and retention applies normally.
+The snapshot itself is still stored - the data has already crossed the wire, and throwing it away would be the more destructive choice. The archive just grows until a human looks. The run is logged at error level and the collapse is recorded on the run report, so it shows up in `backupkit status` instead of passing unnoticed.
+
+`backupkit prune` never consults the tripwire. Once you have confirmed the shrink was real - you did delete half the source, or the application moved its data directory - run it by hand and retention applies as normal.
 
 ## Related
 
-- [Configuration Reference](/configuration) - the `retention` field and its per-target override
-- [Getting Started](/getting-started) - the linear setup that lands your first snapshot
+- [Configuration Reference](/configuration#retention) - the `retention` field and its per-target override
+- [Getting Started](/getting-started) - the setup that lands your first snapshot

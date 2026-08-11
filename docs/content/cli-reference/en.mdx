@@ -1,6 +1,6 @@
 ---
 title: "CLI Reference"
-description: "Every backupkit command, its flags and positionals, the service lifecycle verbs, the logs tail, JSON output scope, and the exit-code set."
+description: "Every backupkit command with its flags: run, daemon, service, logs, list, status, restore, prune, check, init, jail - plus JSON output and exit codes."
 tab: "Reference"
 group: "CLI"
 order: 1
@@ -12,14 +12,14 @@ keywords:
     - exit codes
     - service
 image: "/assets/docs/cli-reference/hero.en.jpg"
-updated: "2026-08-10"
+updated: "2026-08-11"
 ---
 
-The `backupkit` binary is a thin view over the engine. Subcommands dispatch through a static table; flags and positional target names are parsed with Node's `parseArgs`. An unknown flag, subcommand, or target name is a hard error that lists the valid names. This page lists every command, its flags, and the exit codes.
+The `backupkit` binary is a thin layer over the engine. An unknown flag, subcommand, or target name is a hard error that lists the valid names, so a typo never turns into a surprise. This page covers every command, its flags, and the exit codes.
 
-## Bare invocation and help
+## Running it with no arguments
 
-Running `backupkit` with no arguments is a help request, not misuse - it prints the task-oriented setup help and exits 0:
+That is a help request, not a mistake. It prints the setup steps and exits 0:
 
 ```
 backupkit - versioned rsync-over-SSH backups
@@ -44,9 +44,9 @@ Commands:
 backupkit <command> --help for details.
 ```
 
-`--help` (and `-h`) prints the same text; `backupkit <command> --help` prints that command's flags. `backupkit --version` prints the version. Every command also accepts `--config <path>` to point at a specific config file.
+`--help` and `-h` print the same thing. `backupkit <command> --help` prints that command's flags, and `backupkit --version` prints the version. Every command takes `--config <path>` to point at a specific config file.
 
-## Commands
+## The commands
 
 ```
 backupkit run       [TARGET...] [--force] [--dry-run] [--config P]
@@ -62,72 +62,94 @@ backupkit init      [--force] [--config P]
 backupkit jail      install|status [--path P]
 ```
 
-Target names are positional and optional on `run`, `status`, `list`, and `prune`; with none, the command applies to every target.
+`run`, `status`, `list`, and `prune` take optional target names. Name none and the command applies to every target.
 
 ### run
 
-Back up every due target once, or only the named targets. `--force` bypasses due-ness, backoff, and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move (retention is planned but not executed).
+Back up every due target once, or only the targets you name.
+
+`--force` runs a target whether or not it is due, ignoring backoff and bucket dedup. `--dry-run` writes nothing and shows what a transfer would move; retention is planned but not applied.
 
 ### daemon
 
-Run the foreground scheduler loop - this is exactly what the installed service unit runs. Use `backupkit service` to install and drive it rather than running `daemon` directly.
+Run the scheduler in the foreground. This is exactly what the installed service unit runs. Use `backupkit service` to install and drive it instead of running this yourself.
 
 ### service
 
-Manage the OS service unit: `install | uninstall | start | stop | restart | status`. Every verb is idempotent, and `install`, `uninstall`, `start`, `stop`, and `restart` require root; `status` does not. A lifecycle verb with no installed unit says the service is not installed, names the command that registers it, and exits 1. See [Daemon Setup](/daemon-setup) for the full lifecycle.
+Manage the OS service unit: `install | uninstall | start | stop | restart | status`.
+
+Every verb is idempotent. All of them except `status` need root. Run a lifecycle verb with no unit installed and it tells you the service is not installed, names the command that registers it, and exits 1. See [Daemon Setup](/daemon-setup) for the whole lifecycle.
 
 ### logs
 
-Tail the daemon logs - `journalctl -u backupkit` on Linux, a `tail` of the launchd log files on macOS. `-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. With no log source it says so, names the command that registers the service, and exits 1. There is no `--json` (journald offers `-o json`).
+Tail the daemon's logs - `journalctl -u backupkit` on Linux, a `tail` of the launchd log files on macOS.
+
+`-n`/`--lines` defaults to 100; `-f`/`--follow` streams until Ctrl-C. stdio is inherited and the child's exit code passes through. With no log source it says so, names the command that registers the service, and exits 1. There is no `--json` - journald already has `-o json`.
 
 ### list (alias: ls)
 
-List complete snapshots per target, oldest first, with a partial-resume indicator. `ls` is the one alias for `list`. A missing archive directory says there are no snapshots yet, names `backupkit run`, and exits 0.
+List complete snapshots per target, oldest first, with a marker on any partial snapshot waiting to resume. `ls` is the only alias in the CLI. If the archive directory does not exist yet it says there are no snapshots, points at `backupkit run`, and exits 0.
 
 ### status
 
-One row per target: last snapshot, next due, last result, consecutive failures, and lock state. Derived from the run reports and the due computation, so it is always instant and needs no root. `service status` adds a unit-state header to the same table.
+One row per target: last snapshot, next due, last result, consecutive failures, and lock state.
+
+It is derived from the run reports and the due calculation, so it is instant and needs no root. `service status` prints the same table with a unit-state header on top.
 
 ### restore
 
-Copy one snapshot to a non-existent `--output` path; `SNAPSHOT` may be `latest`. `--verify` runs a post-copy checksum pass. See [Restoring a Backup](/restore).
+Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--verify` adds a checksum pass after the copy. See [Restoring a Backup](/restore).
 
 ### prune
 
-Apply retention now. `--dry-run` prints the plan (the keeps with their reasons, then the prune list) and stops without deleting anything.
+Apply retention now. `--dry-run` prints the plan - what is kept and why, then what would be deleted - and stops without deleting anything.
 
 ### check
 
-The interactive readiness gate: validate the config (stopping at the first error), verify local `rsync` and `ssh` versions, load keys, probe remotes, pin unpinned host keys on a TTY, and print the push-jail `authorized_keys` lines (informational: the jail is recommended but optional and never probed; a `"jail": false` target gets a jail-disabled note instead). It exits 2 on a config error and 1 on any probe failure. Run it after each reboot for a `prompt`-passphrase deployment.
+The readiness gate you run before trusting a config. It validates the config (stopping at the first error), checks your local `rsync` and `ssh` versions, loads keys, opens a test connection to each remote, records host keys for unknown hosts when run on a terminal, and prints the `authorized_keys` line for push targets.
+
+That last part is informational: the jail is recommended but optional and is never probed, and a `"jail": false` target gets a note instead.
+
+It exits 2 on a config error and 1 if any connection check fails. Run it after each reboot if any remote uses a `prompt` passphrase.
 
 ### init
 
-Write the fully commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force`, naming the config already in the way. Its stdout is three lines.
+Write the commented starter `config.jsonc` at the resolved path. It refuses to overwrite without `--force`, naming the config already in the way. Its output is three lines.
 
 ### jail
 
-The one command meant for the **archive server**, not the push client (install backupkit there too; neither verb reads a config). `install` copies the `backupkit-remote` forced-command script this package ships to `/usr/local/bin/backupkit-remote` (or `--path`) - atomically via a temp file and rename, re-asserting mode `0755`, idempotent, root required. `status` (no root) compares the installed copy against the shipped one and exits 1 when it is missing or outdated - an old copy rejects every push, so pair `npm update -g` with `sudo backupkit jail install`, and use `status` from monitoring to catch drift. The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. As a safety net, **every** `backupkit` invocation on a machine with a script installed at the well-known path prints a stderr warning when that copy differs from the package - a machine with no installed script stays silent. See [the push jail](/security-model#the-push-jail-a-forced-command-that-validates-the-resolved-path).
+The one command meant for the **archive server** rather than the push client. Install backupkit there too; neither verb reads a config.
+
+`install` copies the `backupkit-remote` forced-command script this package ships to `/usr/local/bin/backupkit-remote` (or `--path`). It writes to a temp file and renames, re-asserts mode `0755`, is idempotent, and needs root.
+
+`status` needs no root. It compares the installed copy against the shipped one and exits 1 if it is missing or out of date - which matters, because an old copy rejects every push. Pair `npm update -g` with `sudo backupkit jail install`, and use `status` from monitoring to catch drift.
+
+As a backstop, **every** `backupkit` command on a machine that has a script at the well-known path warns on stderr when that copy differs from the package. Machines with no script installed stay quiet.
+
+The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. See [the push jail](/security-model#the-push-jail).
 
 ## JSON output
 
-`--json` exists on exactly the two read-only view commands machines consume: `status` and `list`. Each emits one JSON document on stdout with logs on stderr only. `run`, `prune`, `check`, `service`, and `logs` have no `--json` - the persisted run reports, the printed prune plan, and journald's own `-o json` are already the machine-readable record.
+`--json` exists on the two read-only commands machines actually consume: `status` and `list`. Each prints one JSON document on stdout, with logs going to stderr only.
 
-Other output is plain text with columns aligned by padding - no table module and no ANSI color, so everything is greppable. Errors go to stderr as `error <CODE>: message`; stack traces appear only when `logging.level` is `debug`.
+`run`, `prune`, `check`, `service`, and `logs` have no `--json`. The stored run reports, the printed prune plan, and journald's `-o json` already cover the machine-readable side.
+
+Everything else is plain text, aligned with padding - no table library and no ANSI color, so it all stays greppable. Errors go to stderr as `error <CODE>: message`. Stack traces appear only when `logging.level` is `debug`.
 
 ## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | success (including bare `backupkit`, `--help`, and idempotent service no-ops) |
-| `1` | runtime failure (a target failed, a deletion failed, a probe failed, a lifecycle verb without an installed unit, no logs found) |
-| `2` | config error |
-| `3` | lock held (try again later) |
-| `64` | bad CLI usage (unknown flag, subcommand, or target) |
+| `0` | Success - including bare `backupkit`, `--help`, and idempotent service no-ops |
+| `1` | Runtime failure - a target failed, a deletion failed, a connection check failed, a lifecycle verb ran with no unit installed, or no logs were found |
+| `2` | Config error |
+| `3` | Lock held - try again later |
+| `64` | Bad usage - unknown flag, subcommand, or target |
 
-`logs` passes through the child's exit code when it ran.
+`logs` passes through the child's exit code when it managed to run.
 
 ## Related
 
-- [Getting Started](/getting-started) - the commands in setup order
+- [Getting Started](/getting-started) - these commands in setup order
 - [Daemon Setup](/daemon-setup) - the service lifecycle in depth
 - [Configuration Reference](/configuration) - the config every command reads

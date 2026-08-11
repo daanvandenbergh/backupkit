@@ -1,6 +1,6 @@
 ---
 title: "Getting Started"
-description: "Install backupkit, write a config, verify it, and register the daemon - the linear init to check to service path to your first snapshot."
+description: "Install backupkit, write a config, check it, and start the daemon - the three commands that get you from nothing to scheduled backups."
 tab: "Guide"
 group: "Start"
 order: 1
@@ -11,49 +11,47 @@ keywords:
     - quickstart
     - setup
 image: "/assets/docs/getting-started/hero.en.jpg"
-updated: "2026-08-10"
+updated: "2026-08-11"
 ---
 
-By the end of this page you have backupkit installed, a validated config, and a daemon taking versioned snapshots on a schedule. The whole setup is three commands - `init`, `check`, `service install` - and this page walks each one.
+By the end of this page you will have backupkit installed, a config that passes validation, and a daemon taking dated snapshots on a schedule. Three commands do the setup: `init`, `check`, `service install`.
 
-**Prerequisites:** Node.js 20 or newer, and `rsync` 3.2.5 or newer plus `ssh` on both this host and every machine you back up. `backupkit check` verifies the versions for you in step 3, so you do not have to check by hand first.
+**You need:** Node.js 20+, plus `rsync` 3.2.5+ and `ssh` on this machine and on every machine you back up. Step 3 checks the versions for you.
 
 ## Install backupkit
-
-Install the package. It has zero runtime dependencies - just Node's own modules.
 
 ```bash
 npm install -g @daanvandenbergh/backupkit
 ```
 
-Confirm the binary is on your path:
+It has no runtime dependencies beyond Node itself. Check that the binary is on your path:
 
 ```bash
 backupkit --version
 ```
 
-Running `backupkit` with no arguments prints the same three-step setup you are about to follow, so it doubles as a reminder later.
+Run `backupkit` with no arguments any time and it prints the three setup steps again.
 
 ## Step 1: write a starter config
 
-`backupkit init` writes a fully commented `config.jsonc` and stops. It refuses to overwrite an existing file unless you pass `--force`.
+`backupkit init` writes a `config.jsonc` full of comments and stops. It will not overwrite an existing file unless you pass `--force`.
 
 ```bash
 sudo backupkit init --config /etc/backupkit/config.jsonc
 ```
 
-The output is three lines: the path it wrote, and the next two commands to run (`backupkit check`, then `backupkit service install`). Every explanation lives in the comments of the file it wrote, so open that file next.
+It prints three lines: where it wrote the file, and the next two commands. The explanations are in the file itself, so open it next.
 
-Backupkit resolves the config path the same way for every command: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `${XDG_CONFIG_HOME:-~/.config}/backupkit/`. Pick a location and stay with it.
+Every command looks for the config in the same order: `--config <path>`, then `$BACKUPKIT_CONFIG`, then `/etc/backupkit/config.jsonc` (or `.json`), then `${XDG_CONFIG_HOME:-~/.config}/backupkit/`. Pick one location and stick with it.
 
 ## Step 2: edit the config
 
-Open the file you just wrote. It ships with one example remote and one example target. At minimum, set:
+The starter ships with one example remote and one example target. At minimum you set:
 
-- a **remote** - either an explicit host with `host`, `user`, and `identityFile`, or a one-line `{ "alias": "myserver" }` that reuses an entry from your `~/.ssh/config`;
-- a **target** - its `direction` (`"pull"` is the safe default), the `source` directory to back up, the `destination` archive root, and a `schedule`.
+- a **remote** - the machine to connect to. Either spell it out with `host`, `user`, and `identityFile`, or point at an entry in your `~/.ssh/config` with `{ "alias": "myserver" }`.
+- a **target** - what to back up. It needs a `direction` (use `"pull"` unless you have a reason not to), a `source`, a `destination`, and a `schedule`.
 
-A minimal pull target looks like this:
+A minimal pull target:
 
 ```jsonc
 {
@@ -76,54 +74,58 @@ A minimal pull target looks like this:
 }
 ```
 
-The config is JSONC: `//` and `/* */` comments and one trailing comma per object or array are allowed, and duplicate keys are a hard error rather than a silently dropped target. See the [Configuration Reference](/configuration) for every field, and [Push vs Pull Architecture](/push-vs-pull) for why pull is the default.
+The file is JSONC, so `//` and `/* */` comments and a trailing comma are fine. A duplicate key is an error rather than a silently overwritten target.
 
-## Step 3: verify readiness
+See the [Configuration Reference](/configuration) for every field, and [Push vs Pull](/push-vs-pull) for why pull is the default.
 
-`backupkit check` is the readiness gate. Run it on a terminal (a TTY), because it is the one command allowed to pin host keys and prompt for key passphrases.
+## Step 3: check it
+
+`backupkit check` is the gate you run before trusting anything. Run it in a terminal, because it is the only command allowed to record host keys and ask for key passphrases.
 
 ```bash
 sudo backupkit check --config /etc/backupkit/config.jsonc
 ```
 
-It validates the config (stopping at the first error), verifies your local `rsync` and `ssh` versions, loads the keys your explicit remotes name, probes each remote's `rsync` over ssh, and - on a TTY - pins any unpinned host key. For push targets it prints the exact `authorized_keys` jail line to install on the archive server (recommended but optional - a target with `"jail": false` gets a note instead; the jail itself is never probed). Fix whatever it reports and run it again until it is clean. `check` exits `2` on a config error and `1` on any probe failure.
+It validates the config, checks your local `rsync` and `ssh` versions, loads your keys, and opens a test connection to each remote. On a terminal it also records the host key of any remote you have not connected to before. For push targets it prints the `authorized_keys` line to install on the archive server.
 
-## Step 4: take a snapshot by hand
+Fix whatever it reports and run it again until it is clean. It exits `2` on a config error and `1` if a connection check fails.
 
-Before handing the work to a daemon, run one pass yourself to confirm the whole pipeline works:
+## Step 4: take one snapshot by hand
+
+Before you hand the job to a daemon, run one pass yourself:
 
 ```bash
 sudo backupkit run --config /etc/backupkit/config.jsonc
 ```
 
-This backs up every due target once. Add `--force` to run a target regardless of whether it is due, or `--dry-run` to see what a transfer would move without writing anything. Then list what landed:
+That backs up every target that is due. Add `--force` to run a target whether or not it is due, or `--dry-run` to see what would move without writing anything.
+
+Then look at what landed:
 
 ```bash
 backupkit list
 ```
 
-Each complete snapshot is a dated directory under `<destination>/<target>/`, with unchanged files hard-linked against the previous snapshot so history costs almost nothing.
+Each finished snapshot is a dated directory under `<destination>/<target>/`. Files that did not change are hard-linked to the previous snapshot, so keeping history costs very little disk.
 
-## Step 5: register the daemon
+## Step 5: start the daemon
 
-Install the OS service unit (systemd on Linux, launchd on macOS) and start it:
+Install the OS service (systemd on Linux, launchd on macOS) and start it:
 
 ```bash
 sudo backupkit service install
 sudo backupkit service start
 ```
 
-`service install` writes the unit and ends by naming the command that starts it. The daemon then runs the foreground scheduler for you, taking one snapshot per due window and pruning on your retention policy. Check on it any time:
+The daemon now runs the scheduler: one snapshot per due window, then a prune against your retention policy. Check on it whenever:
 
 ```bash
-backupkit status          # last run and next due per target
+backupkit status          # last run and next due, per target
 backupkit logs            # tail the daemon's log
 ```
-
-That is the full path from nothing to a scheduled, self-pruning backup.
 
 ## Related
 
 - [Configuration Reference](/configuration) - every config field and its default
-- [Daemon Setup](/daemon-setup) - the full service lifecycle and restart guarantees
-- [Security Model](/security-model) - keys, host pinning, and the push jail
+- [Daemon Setup](/daemon-setup) - the service lifecycle and what happens after a reboot
+- [Security Model](/security-model) - keys, host keys, and the push jail

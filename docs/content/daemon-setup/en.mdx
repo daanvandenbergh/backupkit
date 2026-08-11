@@ -1,6 +1,6 @@
 ---
 title: "Daemon Setup"
-description: "Install and drive the backupkit service, tail its logs, and understand the restart and reboot-recovery guarantees the unit ships with."
+description: "Install and drive the backupkit service, tail its logs, and understand how it recovers from a crash or a reboot."
 tab: "Guide"
 group: "Operate"
 order: 1
@@ -12,16 +12,14 @@ keywords:
     - launchd
     - logs
 image: "/assets/docs/daemon-setup/hero.en.jpg"
-updated: "2026-08-10"
+updated: "2026-08-11"
 ---
 
-The daemon runs the scheduler that takes one snapshot per due window and prunes on your retention policy. This guide installs it, drives its lifecycle, tails its logs, and explains the restart and reboot-recovery behaviour the unit is configured for.
+The daemon runs the scheduler: one snapshot per due window, then a prune against your retention policy. This page installs it, drives it, tails its logs, and explains what happens after a crash or a reboot.
 
-**Prerequisites:** a config that passes `backupkit check` (see [Getting Started](/getting-started)). Every lifecycle verb except `status` requires root.
+**You need:** a config that passes `backupkit check` (see [Getting Started](/getting-started)). Every service verb except `status` needs root.
 
-## The three-step setup
-
-The whole setup is `init`, `check`, `service install` - then start it:
+## Install and start it
 
 ```bash
 sudo backupkit init      # write the starter config
@@ -30,24 +28,36 @@ sudo backupkit service install
 sudo backupkit service start
 ```
 
-`service install` writes the OS unit (a systemd unit on Linux, a launchd plist on macOS), enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
+`service install` writes the OS unit - a systemd unit on Linux, a launchd plist on macOS - enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
 
 ## Drive the lifecycle
 
-`backupkit service` takes one verb. Each is idempotent, and each "cannot" message names the exact next command.
+`backupkit service` takes one verb. Each is idempotent, and each refusal names the exact next command to run.
 
 | Verb | What it does |
 | --- | --- |
-| `install` | write the unit (+ enable on systemd, + newsyslog conf on macOS) |
-| `uninstall` | stop the unit if running, then remove everything install wrote |
-| `start` | start the unit; `Service is already running.` if it is up (exit 0) |
-| `stop` | stop the unit; `Service is already stopped.` if it is down (exit 0) |
-| `restart` | restart the running unit |
-| `status` | the unit-state header line plus the per-target table |
+| `install` | Write the unit (plus enable on systemd, plus a newsyslog conf on macOS) |
+| `uninstall` | Stop the unit if it is running, then remove everything `install` wrote |
+| `start` | Start the unit. Already up? `Service is already running.` and exit 0 |
+| `stop` | Stop the unit. Already down? `Service is already stopped.` and exit 0 |
+| `restart` | Restart the running unit |
+| `status` | The unit-state header line, plus the per-target table |
 
-Any lifecycle verb run without an installed unit says the service is not installed, names the command that registers it, and exits 1. On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`. `service status` is the one verb that needs no root: it prepends a one-line unit-state header - running (with the pid), installed but stopped, or not installed - to the ordinary `status` table, and never errors just because the unit is absent.
+Run any lifecycle verb with no unit installed and it says the service is not installed, names the command that registers it, and exits 1.
 
-**The unit follows your config.** Parts of it are derived from the config - most importantly `ReadWritePaths`, which lists every path the daemon may write: each local destination root, the `stateDir`, the config directory, and the `logging.file` directory. Under `ProtectSystem=strict` the rest of the filesystem is read-only, so a unit written before you added a target would leave the daemon unable to write the new archive at all. You do not have to remember this: `start` and `restart` re-derive the unit from the current config, and if it differs they rewrite it, print `config changed since install - refreshed the service unit`, and reload (on macOS a changed plist is reloaded with `bootout` + `bootstrap`, since `kickstart` would re-exec the cached one). Adding a target is therefore just an edit plus `sudo backupkit service restart`.
+On Linux the verbs drive `systemctl`; on macOS they drive `launchctl bootstrap` / `bootout` / `kickstart`.
+
+`service status` is the one verb that needs no root. It puts a one-line unit-state header - running with the pid, installed but stopped, or not installed - above the ordinary `status` table, and never errors just because the unit is missing.
+
+### The unit follows your config
+
+Parts of the unit are derived from the config. The important one is `ReadWritePaths`, which lists every path the daemon is allowed to write to: each local destination root, the `stateDir`, the config directory, and the `logging.file` directory.
+
+Under `ProtectSystem=strict` the rest of the filesystem is read-only. So a unit written *before* you added a target would leave the daemon unable to write that target's archive at all.
+
+You do not have to remember this. `start` and `restart` re-derive the unit from the current config; if it differs, they rewrite it, print `config changed since install - refreshed the service unit`, and reload. (On macOS a changed plist is reloaded with `bootout` plus `bootstrap`, because `kickstart` would re-exec the cached one.)
+
+So adding a target is an edit plus:
 
 ```bash
 sudo backupkit service restart
@@ -64,32 +74,47 @@ backupkit logs -f         # follow until Ctrl-C
 backupkit logs -n 500     # last 500 lines
 ```
 
-`-n`/`--lines` defaults to 100; `-f`/`--follow` streams live. If there is no log source yet - no journal unit, or no macOS log files - it says so, names the command that registers the service, and exits 1. There is no `--json`, because journald already offers `-o json` for machines.
+If there is no log source yet - no journal unit, or no macOS log files - it says so, names the command that registers the service, and exits 1. There is no `--json`, because journald already offers `-o json`.
 
-## How restart and reboot recovery work
+## Restarts and reboots
 
-The unit is configured so the daemon comes back on its own, but a clean shutdown stays down.
+The unit is set up so the daemon comes back on its own, while a clean shutdown stays down.
 
-On **systemd** the unit sets `Restart=on-failure`, `RestartSec=15`, and `StartLimitIntervalSec=0`: a crash or non-zero exit always restarts after 15 seconds, a clean exit stays stopped, and systemd never gives up retrying. On **launchd** the plist sets `KeepAlive` to `SuccessfulExit: false` with `ThrottleInterval: 15` for the same semantics, plus `RunAtLoad` so the daemon starts at boot.
+On **systemd**: `Restart=on-failure`, `RestartSec=15`, `StartLimitIntervalSec=0`. A crash or non-zero exit restarts after 15 seconds, a clean exit stays stopped, and systemd never gives up retrying.
 
-After a crash or a reboot the daemon rebuilds its world from the run reports on disk - there is no separate state file. Recovery does four things: it resumes any in-progress `.partial` snapshot rather than starting over, re-derives every target's failure counters from the run reports, re-primes `file:` passphrase keys automatically, and runs exactly one catch-up run per missed window. A host that was down overnight comes back and takes one snapshot per target, not one per missed hour.
+On **launchd**: `KeepAlive` set to `SuccessfulExit: false` with `ThrottleInterval: 15` for the same behaviour, plus `RunAtLoad` so the daemon starts at boot.
 
-Key behaviour across a reboot differs by passphrase source:
+After a crash or a reboot the daemon rebuilds its picture of the world from the run reports on disk - there is no separate state file. Recovery does four things:
 
-- **Unencrypted keys and `file:` passphrases** re-prime with zero operator action - the daemon reloads them itself.
-- **`prompt` passphrases** cannot be re-primed unattended; only that remote's targets fail, and the error points at `backupkit check`, the one command you run after each reboot for a `prompt` deployment.
-- **Alias remotes** need nothing - the user's own agent and `ssh_config` are authoritative.
+- resumes any in-progress `.partial` snapshot instead of starting over;
+- re-derives each target's failure counters from the run reports;
+- re-primes `file:` passphrase keys automatically;
+- runs exactly **one** catch-up run per missed window.
+
+So a host that was down overnight comes back and takes one snapshot per target, not one per missed hour.
+
+Keys behave differently across a reboot depending on how the passphrase is supplied:
+
+- **Unencrypted keys and `file:` passphrases** need nothing - the daemon reloads them itself.
+- **`prompt` passphrases** cannot be re-primed unattended. Only that remote's targets fail, and the error points at `backupkit check`, which is the command to run after each reboot on a `prompt` deployment.
+- **Alias remotes** need nothing - your own agent and `ssh_config` are in charge.
 
 ## Crash-loop backoff
 
-A repeatedly failing target does not spin. Its per-target backoff grows as `15 min * 2^(n-1)` from the consecutive-failure count, capped at 6 hours. Backoff can only delay a target's next run - it never stops scheduling it - and every backoff transition (enter, extend, reach the ceiling, clear) is logged at error level. The service-level restarts stay paced at 15 seconds independently. A failing target's `nextDueAt` in `backupkit status` already includes any active backoff delay, so you can see exactly when it retries.
+A target that keeps failing does not spin. Its backoff grows as `15 min * 2^(n-1)` from the consecutive-failure count, capped at 6 hours.
+
+Backoff only ever delays a target's next run - it never stops scheduling it. Every transition (entering backoff, extending it, hitting the ceiling, clearing) is logged at error level. Service-level restarts stay paced at 15 seconds independently of this.
+
+A failing target's `nextDueAt` in `backupkit status` already includes any active backoff, so you can see exactly when it will retry.
 
 ## Log rotation
 
-The logger never rotates anything - rotation belongs to the platform. On Linux that is journald. On macOS, `service install` writes `/etc/newsyslog.d/backupkit.conf` (rotate at 10 MiB, keep 5, compressed), which `uninstall` removes.
+The logger never rotates anything; rotation belongs to the platform.
+
+On Linux that is journald. On macOS, `service install` writes `/etc/newsyslog.d/backupkit.conf` - rotate at 10 MiB, keep 5, compressed - and `uninstall` removes it.
 
 ## Related
 
-- [Getting Started](/getting-started) - the linear path to a passing `check`
+- [Getting Started](/getting-started) - the path to a passing `check`
 - [CLI Reference](/cli-reference) - every command and flag
-- [Security Model](/security-model) - the hardened systemd unit and key handling
+- [Security Model](/security-model) - key handling and archive hardening
