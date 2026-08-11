@@ -9,7 +9,7 @@
 import { describe, expect, it } from "vitest";
 
 import { main } from "../main.js";
-import { fakeDeps, makeRunReport } from "./fakes.js";
+import { fakeDeps, makeConfig, makeRunReport, makeTarget } from "./fakes.js";
 
 describe("run", () => {
     it("passes force/dry-run/targets to the engine and reports per-target lines", async () => {
@@ -51,6 +51,12 @@ describe("daemon", () => {
         expect(await main(["daemon"], h.deps)).toBe(0);
         expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "start"]);
         expect(h.stops).toHaveLength(1);
+    });
+
+    it("brackets the scheduler loop with a start and a stop line", async () => {
+        const h = fakeDeps();
+        expect(await main(["daemon"], h.deps)).toBe(0);
+        expect(h.out).toEqual(["daemon started - scheduling 1 of 1 target(s)", "daemon stopped"]);
     });
 });
 
@@ -219,7 +225,26 @@ describe("check", () => {
         expect(text).toContain('restrict,command="/usr/local/bin/backupkit-remote /srv/backups" ssh-ed25519 AAAA');
         expect(text).toContain("# target push-www via remote example");
         expect(text).toContain("/usr/local/bin/backupkit-remote");
+        expect(text).toContain("push jail (recommended, optional)");
+        expect(text).toContain('set "jail": false');
         expect(text).toContain("check ok");
+    });
+
+    it("prints a note for each jail-disabled push target instead of a jail line", async () => {
+        const target = makeTarget({
+            name: "push-www",
+            direction: "push",
+            jail: false,
+            dst: { kind: "remote", remote: { kind: "alias", name: "srv", alias: "myserver" }, path: "/srv/backups" },
+            destination: "/srv/backups",
+        });
+        const h = fakeDeps({ config: makeConfig({ configPath: "/etc/backupkit/config.jsonc", stateDir: "/var/lib/backupkit", targets: [target] }) });
+        expect(await main(["check"], h.deps)).toBe(0);
+        const text = h.out.join("\n");
+        expect(text).not.toContain("push jail (recommended, optional)");
+        expect(text).toContain(
+            'push target push-www: jail disabled ("jail": false) - the push key gets whatever access the server grants it',
+        );
     });
 
     it("exits 1 and surfaces every error when a probe failed", async () => {

@@ -10,7 +10,7 @@
  * tools through exec/.
  */
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadConfig } from "../config/config.js";
@@ -157,8 +157,34 @@ export async function main(argv: string[], deps: CliDeps = defaultDeps()): Promi
     }
 }
 
+/**
+ * True when `moduleUrl` is the script node was told to run - so the CLI runs
+ * as the bin entry but stays inert when tests import it.
+ *
+ * `argv1` is resolved through realpath first, because the bin is ALWAYS reached
+ * via a symlink in a real install (`/usr/local/bin/backupkit` ->
+ * `node_modules/.../dist/cli/main.js`, and under `npm link` a second hop to the
+ * checkout). Node resolves `import.meta.url` to the realpath while `argv[1]`
+ * stays as-invoked, so a raw string compare is false in EVERY installed
+ * scenario and true only when running the file by its real path: the CLI exits
+ * 0 having printed nothing, for every command. A path that cannot be resolved
+ * is compared as given - node has already executed it, so it exists.
+ */
+export function isEntryPoint(moduleUrl: string, argv1: string | undefined): boolean {
+    if (argv1 === undefined) {
+        return false;
+    }
+    let resolved: string;
+    try {
+        resolved = realpathSync(argv1);
+    } catch {
+        resolved = argv1;
+    }
+    return moduleUrl === pathToFileURL(resolved).href;
+}
+
 // Run only when executed as the bin entry, not when imported by tests.
-if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (isEntryPoint(import.meta.url, process.argv[1])) {
     main(process.argv.slice(2)).then(
         (code) => {
             process.exitCode = code;

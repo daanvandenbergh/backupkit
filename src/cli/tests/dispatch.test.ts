@@ -7,10 +7,15 @@
  * stderr format.
  */
 
+import { mkdtempSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 import { ConfigError, LockHeldError, SshError } from "../../shared/errors.js";
-import { main } from "../main.js";
+import { isEntryPoint, main } from "../main.js";
 import { fakeDeps } from "./fakes.js";
 
 describe("bare invocation and global flags", () => {
@@ -161,5 +166,30 @@ describe("exit-code mapping", () => {
         loud.deps.debugEnabled = true;
         await main(["status"], loud.deps);
         expect(loud.err.join("\n")).toContain("SshError: host down");
+    });
+});
+
+/**
+ * The bin is ALWAYS reached through a symlink in a real install, and node
+ * reports `import.meta.url` as the realpath while leaving `argv[1]` as
+ * invoked. Before `isEntryPoint` resolved that, `main()` never ran off a
+ * symlink: every command - `--version`, `service start`, all of them - exited
+ * 0 having printed nothing at all. Nothing in-process catches that, so this is
+ * the test that does.
+ */
+describe("bin entry detection", () => {
+    it("matches the module's own path", () => {
+        expect(isEntryPoint(import.meta.url, fileURLToPath(import.meta.url))).toBe(true);
+    });
+
+    it("matches a symlink pointing at the module, as every install does", () => {
+        const link = join(mkdtempSync(join(tmpdir(), "backupkit-entry-")), "backupkit");
+        symlinkSync(fileURLToPath(import.meta.url), link);
+        expect(isEntryPoint(import.meta.url, link)).toBe(true);
+    });
+
+    it("does not match another script, an unresolvable path, or no argv[1]", () => {
+        expect(isEntryPoint(import.meta.url, join(tmpdir(), "some-other-script.js"))).toBe(false);
+        expect(isEntryPoint(import.meta.url, undefined)).toBe(false);
     });
 });

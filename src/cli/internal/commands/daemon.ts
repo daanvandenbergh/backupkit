@@ -15,9 +15,16 @@ export async function daemonCommand(argv: string[], deps: CliDeps): Promise<numb
         deps.stdout(COMMAND_HELP.daemon);
         return 0;
     }
-    const { engine } = deps.loadContext(values.config as string | undefined);
+    const { config, engine } = deps.loadContext(values.config as string | undefined);
     deps.wireSignals(() => engine.stop());
     await engine.preflight();
+    // The unit's ExecStart is this command, so these two lines are what the
+    // journal (and `backupkit logs`) shows for a clean start and a clean stop -
+    // without them a healthy daemon is indistinguishable from one that died
+    // silently during preflight.
+    const enabled = config.targets.filter((target) => target.enabled).length;
+    deps.stdout(`daemon started - scheduling ${enabled} of ${config.targets.length} target(s)`);
     await engine.start();
+    deps.stdout("daemon stopped");
     return 0;
 }
