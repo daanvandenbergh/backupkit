@@ -16,7 +16,7 @@ updated: "2026-08-11"
 
 By the end of this page you will have backupkit installed, a config that passes validation, and a scheduler taking dated snapshots.
 
-The setup is the same for everyone up to the last step, where it forks into the **two ways to run backupkit** - [yourself, in your own session](/run-it-yourself), or [as a root service](/daemon-setup). They are genuinely different setups: different commands, different config files, different state directories, and only one of them accepts a key with a passphrase. `backupkit check` ends by telling you which are open to your config, so you do not have to decide before you get there.
+The setup is the same for everyone up to the last step, where it forks into the **two ways to run backupkit** - [yourself, in your own session](/run-it-yourself/), or [as a root service](/daemon-setup/). They are genuinely different setups: different commands, different config files, different state directories, and only one of them accepts a key with a passphrase. `backupkit check` ends by telling you which are open to your config, so you do not have to decide before you get there.
 
 **You need:** Node.js 20+, plus `rsync` 3.2.5+ and `ssh` on this machine and on every machine you back up. Step 3 checks the rsync version for you, here and on every remote.
 
@@ -38,7 +38,7 @@ Run `backupkit` with no arguments any time for the full command list; it ends wi
 
 You do not have to commit yet, but it decides one thing right away - **whether you run the setup commands under `sudo` or as yourself** - because that is what decides where the config lands.
 
-| | [Run it yourself](/run-it-yourself) | [Run it as a service](/daemon-setup) |
+| | [Run it yourself](/run-it-yourself/) | [Run it as a service](/daemon-setup/) |
 | --- | --- | --- |
 | Scheduler command | `backupkit start` | `sudo backupkit service install` + `start` |
 | Runs as | you, in a terminal | root, supervised by systemd/launchd |
@@ -109,7 +109,7 @@ sudo ssh-copy-id -i /etc/backupkit/keys/example_ed25519.pub backup-reader@10.0.0
 
 The key must be mode `0600` and owned by you or root - `ssh-keygen` writes it that way, and `check` tells you the exact `chmod` if it is not.
 
-See the [Configuration Reference](/configuration) for every field, and [Push vs Pull](/push-vs-pull) for why pull is the default.
+See the [Configuration Reference](/configuration/) for every field, and [Push vs Pull](/push-vs-pull/) for why pull is the default.
 
 ## Step 3: check it
 
@@ -147,7 +147,7 @@ Each finished snapshot is a dated directory under `<destination>/<target>/`. Fil
 
 This is where the two tracks part. Both run the same scheduler - one snapshot per due window, then a prune against your retention policy - so what you are choosing is who supervises it and where its config, state, and logs live.
 
-**[Run it yourself](/run-it-yourself)** - in this terminal, as you. The only mode that accepts a key with a passphrase:
+**[Run it yourself](/run-it-yourself/)** - in this terminal, as you. The only mode that accepts a key with a passphrase:
 
 ```bash
 backupkit start
@@ -155,7 +155,7 @@ backupkit start
 
 It unlocks every key into backupkit's ssh-agent (prompting once per key file), schedules until Ctrl-C, and dies with the process. Add `--force` to back up every target once immediately and then schedule.
 
-**[Run it as a service](/daemon-setup)** - as root, under systemd or launchd, surviving logout and reboot. Only for keys with no passphrase:
+**[Run it as a service](/daemon-setup/)** - as root, under systemd or launchd, surviving logout and reboot. Only for keys with no passphrase:
 
 ```bash
 sudo backupkit service install
@@ -175,7 +175,7 @@ Run `status` as the **same user** that runs the scheduler, or set an explicit `s
 
 ## Related
 
-- [Run It Yourself](/run-it-yourself) - the session scheduler, passphrases, and surviving a logout
-- [Run It as a Service](/daemon-setup) - the service lifecycle and what happens after a reboot
-- [Configuration Reference](/configuration) - every config field and its default
-- [Security Model](/security-model) - keys, host keys, and the push jail
+- [Run It Yourself](/run-it-yourself/) - the session scheduler, passphrases, and surviving a logout
+- [Run It as a Service](/daemon-setup/) - the service lifecycle and what happens after a reboot
+- [Configuration Reference](/configuration/) - every config field and its default
+- [Security Model](/security-model/) - keys, host keys, and the push jail

@@ -31,7 +31,7 @@ On success it prints one line naming the target, the snapshot, and where it land
 The copy runs `rsync -a --sparse -H --numeric-ids --chmod=ug-s`, plus `--no-devices --no-specials` unless the target sets `rsync.preserveDevices`, and `-e <ssh>` when the archive lives on a remote. So modes, ownership (by numeric id), sparse files, and hard links inside the snapshot come back intact - with two deliberate exceptions:
 
 - **setuid and setgid bits are stripped.** `--chmod=ug-s` is unconditional: a snapshot holding a setuid-root binary must not be faithfully recreated by a root `backupkit restore`, because the output path is forced outside every archive root and therefore outside any `nosuid` mount. Re-`chmod` such a file by hand if you really need it back.
-- **device nodes, fifos, and sockets are skipped**, exactly as they were on the way in, unless that target sets `"preserveDevices": true` in its [rsync options](/configuration).
+- **device nodes, fifos, and sockets are skipped**, exactly as they were on the way in, unless that target sets `"preserveDevices": true` in its [rsync options](/configuration/).
 
 Symlinks are copied as symlinks and never followed. `--delete` is never passed - restore only ever writes into a fresh path.
 
@@ -88,6 +88,6 @@ The same rules apply: `snapshot` accepts `latest`, `output` has to be a fresh pa
 
 ## Related
 
-- [Getting Started](/getting-started) - list snapshots and run a backup
-- [Versioning & Retention](/retention) - how snapshots are named and kept
-- [CLI Reference](/cli-reference#restore) - the full `restore` flag set
+- [Getting Started](/getting-started/) - list snapshots and run a backup
+- [Versioning & Retention](/retention/) - how snapshots are named and kept
+- [CLI Reference](/cli-reference/#restore) - the full `restore` flag set

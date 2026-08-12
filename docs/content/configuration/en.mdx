@@ -42,7 +42,7 @@ Every command looks in the same order:
 
 A path from `--config` or `$BACKUPKIT_CONFIG` is resolved against the current directory and normalized - it may hold no `.` or `..` component, and no whitespace or quote character, because its directory becomes the default `known_hosts` location that ends up inside rsync's `-e` string. An empty `$BACKUPKIT_CONFIG` counts as unset and falls through to the probe directories. If nothing is at a path you named, that is an error, not a reason to keep looking. Having both `config.jsonc` and `config.json` in one directory is also an error, and it names both files.
 
-**The two run modes normally keep two different files.** `/etc/backupkit/config.jsonc` is the system config - root-owned, and the only one [a service](/daemon-setup) finds by itself, since its unit runs as root. `~/.backupkit/config.jsonc` is your own, the one [a scheduler you run yourself](/run-it-yourself) uses. `backupkit init` writes whichever matches the identity that ran it.
+**The two run modes normally keep two different files.** `/etc/backupkit/config.jsonc` is the system config - root-owned, and the only one [a service](/daemon-setup/) finds by itself, since its unit runs as root. `~/.backupkit/config.jsonc` is your own, the one [a scheduler you run yourself](/run-it-yourself/) uses. `backupkit init` writes whichever matches the identity that ran it.
 
 That order is the same for *every* identity, though, so a `/etc/backupkit/config.jsonc` shadows every user's personal file. On a machine that has both, unprivileged commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` in the shell profile) to reach their own.
 
@@ -61,7 +61,7 @@ That order is the same for *every* identity, though, so a `/etc/backupkit/config
 
 Remote and target keys have to match `/^[a-z0-9][a-z0-9._-]*$/` and be at most 64 characters.
 
-The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup#root-service-per-user-config).
+The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup/#root-service-per-user-config).
 
 ## Remotes
 
@@ -91,9 +91,9 @@ Backupkit owns the identity, loads the key, and manages known_hosts.
 }
 ```
 
-`passphrase` accepts only `"file:/..."` or exactly `"prompt"`. A raw passphrase or an `env:` form is rejected. The path after `file:` is validated like every other path field. See the [Security Model](/security-model#permissions-are-checked-before-anything-talks-to-the-network) for how each form is loaded.
+`passphrase` accepts only `"file:/..."` or exactly `"prompt"`. A raw passphrase or an `env:` form is rejected. The path after `file:` is validated like every other path field. See the [Security Model](/security-model/#permissions-are-checked-before-anything-talks-to-the-network) for how each form is loaded.
 
-**A passphrase-protected key rules out the service.** `backupkit daemon` refuses to start when any configured key is encrypted - by declaration or in fact - because a service has no terminal to unlock one on. A config with this field therefore belongs to the mode you [run yourself](/run-it-yourself), where `backupkit start` prompts once per key and then schedules identically; the alternative is giving the service a key with no passphrase. See [a service cannot hold an encrypted key](/daemon-setup#a-service-cannot-hold-an-encrypted-key).
+**A passphrase-protected key rules out the service.** `backupkit daemon` refuses to start when any configured key is encrypted - by declaration or in fact - because a service has no terminal to unlock one on. A config with this field therefore belongs to the mode you [run yourself](/run-it-yourself/), where `backupkit start` prompts once per key and then schedules identically; the alternative is giving the service a key with no passphrase. See [a service cannot hold an encrypted key](/daemon-setup/#a-service-cannot-hold-an-encrypted-key).
 
 `host` is validated against a list of allowed characters rather than a list of banned ones, because the failure modes are quiet: a value containing `/` makes rsync read `user@host/x:/path` as a *local* path and write your archive into a relative directory, and a leading `-` or a control character reaches ssh's option parser or your terminal. A pre-bracketed `[::1]` is rejected because backupkit adds the brackets itself.
 
@@ -138,7 +138,7 @@ Each target is keyed by name. That name becomes the snapshot subdirectory and th
 | `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
 | `minFree` | string \| `false` | `"5%"` | Free-space floor; `false` turns the guard off |
 | `rsync` | object | `{}` | Per-target rsync tuning - see below |
-| `jail` | boolean | `true` (push targets) | Push only - writing it on a pull target is a config error. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` prints a warning in place of the `authorized_keys` line. See [running without the jail](/push-vs-pull#running-without-the-jail) |
+| `jail` | boolean | `true` (push targets) | Push only - writing it on a pull target is a config error. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` prints a warning in place of the `authorized_keys` line. See [running without the jail](/push-vs-pull/#running-without-the-jail) |
 | `enabled` | boolean | `true` | `false` means configured but never scheduled |
 
 ### Path rules
@@ -233,7 +233,7 @@ All counts are non-negative integers.
 - Set a target's `retention` to `false` to keep everything for that target.
 - An empty `{}` is rejected, because it would be ambiguous.
 
-A target's `retention` replaces the default wholesale; the two are never merged. See [Versioning & Retention](/retention) for how the tiers pick snapshots.
+A target's `retention` replaces the default wholesale; the two are never merged. See [Versioning & Retention](/retention/) for how the tiers pick snapshots.
 
 ## Start from the starter
 
@@ -241,7 +241,7 @@ A target's `retention` replaces the default wholesale; the two are never merged.
 
 ## Related
 
-- [Versioning & Retention](/retention) - how retention rules pick snapshots
-- [Security Model](/security-model) - keys, passphrases, and known_hosts
-- [Run It Yourself](/run-it-yourself) / [Run It as a Service](/daemon-setup) - which file each mode reads
-- [CLI Reference](/cli-reference) - the commands that read this config
+- [Versioning & Retention](/retention/) - how retention rules pick snapshots
+- [Security Model](/security-model/) - keys, passphrases, and known_hosts
+- [Run It Yourself](/run-it-yourself/) / [Run It as a Service](/daemon-setup/) - which file each mode reads
+- [CLI Reference](/cli-reference/) - the commands that read this config

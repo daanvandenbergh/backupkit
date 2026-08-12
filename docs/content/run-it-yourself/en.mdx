@@ -15,7 +15,7 @@ image: "/assets/docs/run-it-yourself/hero.en.jpg"
 updated: "2026-08-11"
 ---
 
-There are exactly two ways to run backupkit on a schedule, and this page is one of them: **you run the scheduler, in your own session, under your own user**. The other is [an OS service](/daemon-setup) supervised by systemd or launchd. They use different commands, different config files, different state directories, and they differ on the one thing that decides most setups - whether a key can have a passphrase.
+There are exactly two ways to run backupkit on a schedule, and this page is one of them: **you run the scheduler, in your own session, under your own user**. The other is [an OS service](/daemon-setup/) supervised by systemd or launchd. They use different commands, different config files, different state directories, and they differ on the one thing that decides most setups - whether a key can have a passphrase.
 
 ```bash
 backupkit start
@@ -27,12 +27,12 @@ That is the whole thing. It runs in the foreground until Ctrl-C.
 
 Pick this mode when any of these is true:
 
-- **Your SSH key has a passphrase.** This is the only mode that supports one. A service has no terminal to type it on, and [refuses to start](/daemon-setup#a-service-cannot-hold-an-encrypted-key) rather than fail on every tick forever.
+- **Your SSH key has a passphrase.** This is the only mode that supports one. A service has no terminal to type it on, and [refuses to start](/daemon-setup/#a-service-cannot-hold-an-encrypted-key) rather than fail on every tick forever.
 - **You do not have root**, or would rather not install a system-wide unit on this machine.
 - **It is a laptop or workstation** that is not up around the clock anyway.
 - **You want to watch a schedule run** before handing it to a daemon.
 
-The trade is simple: nothing runs while you are logged out, and nothing comes back after a reboot. If you need unattended backups on an always-on host, that is [the service](/daemon-setup).
+The trade is simple: nothing runs while you are logged out, and nothing comes back after a reboot. If you need unattended backups on an always-on host, that is [the service](/daemon-setup/).
 
 ## Your config, not the system one
 
@@ -51,7 +51,7 @@ It writes `~/.backupkit/config.jsonc` - unless `--config` or `$BACKUPKIT_CONFIG`
 | Run reports (`stateDir`) | `$XDG_STATE_HOME/backupkit`, else `~/.local/state/backupkit` |
 | ssh-agent socket | `$XDG_RUNTIME_DIR/backupkit/agent.sock`, else `~/.backupkit/run/agent.sock` |
 
-Every file backupkit needs is one you own - and running unprivileged, ownership is enforced strictly: a key, passphrase file, or state directory belonging to a *different* unprivileged user is refused before anything talks to the network. See the [Security Model](/security-model#permissions-are-checked-before-anything-talks-to-the-network).
+Every file backupkit needs is one you own - and running unprivileged, ownership is enforced strictly: a key, passphrase file, or state directory belonging to a *different* unprivileged user is refused before anything talks to the network. See the [Security Model](/security-model/#permissions-are-checked-before-anything-talks-to-the-network).
 
 > **If a `/etc/backupkit/config.jsonc` also exists on this machine, it wins.** The lookup order is `--config`, `$BACKUPKIT_CONFIG`, `/etc/backupkit/`, then `~/.backupkit/` - and that order is the same for *every* user, so a system config shadows yours. Where both exist, name yours on every command: `backupkit start --config ~/.backupkit/config.jsonc`. Or export `BACKUPKIT_CONFIG=~/.backupkit/config.jsonc` in your shell profile once and forget it. Run `backupkit check --config ~/.backupkit/config.jsonc`: it echoes that same `--config` into the `backupkit start` line it prints at the end, so copy that line. (A bare `backupkit check` on such a machine validates the *system* config and prints no flag at all, since `/etc/backupkit` is the one directory found without one.)
 
@@ -130,7 +130,7 @@ The schedule dies with the process. Three ways to live with that:
 - **Cron, per pass.** With a key that needs no passphrase, drop the scheduler and let cron drive single passes: `0 3 * * * /usr/local/bin/backupkit run --config /home/dan/.backupkit/config.jsonc`. Spell both paths out - cron's `PATH` is usually just `/usr/bin:/bin`, which does not hold a globally installed `backupkit`. Retention still runs after each pass.
 - **A user-level unit.** A systemd **user** unit or a launchd **LaunchAgent** can supervise `backupkit daemon` under your own uid - no root anywhere. `daemon` is the same loop as `start` minus the prompting, so this needs a key with **no** passphrase.
 
-For anything that must survive a reboot on a server, install [the service](/daemon-setup) instead.
+For anything that must survive a reboot on a server, install [the service](/daemon-setup/) instead.
 
 ## Two people, one machine
 
@@ -140,7 +140,7 @@ Mind the lookup order again: the moment a shared `/etc/backupkit/config.jsonc` e
 
 ## Related
 
-- [Run It as a Service](/daemon-setup) - the other mode: root, systemd/launchd, no passphrases
-- [Getting Started](/getting-started) - the setup path up to the point these two modes fork
-- [CLI Reference](/cli-reference) - every command and flag
-- [Security Model](/security-model) - how keys, passphrases, and file permissions are handled
+- [Run It as a Service](/daemon-setup/) - the other mode: root, systemd/launchd, no passphrases
+- [Getting Started](/getting-started/) - the setup path up to the point these two modes fork
+- [CLI Reference](/cli-reference/) - every command and flag
+- [Security Model](/security-model/) - how keys, passphrases, and file permissions are handled

@@ -23,7 +23,7 @@ Direction is the control that does the most work here; everything below it is de
 
 In a **pull** target, the archive server reaches out to the source, and the source holds no key that reaches the archive. Take over the source host and you still cannot read, delete, or alter a stored snapshot. That is why pull is the default.
 
-**Push** exists for hosts that have to start the connection themselves. The source then does hold a key that reaches the archive, so backupkit confines that key (see [the push jail](#the-push-jail)). [Push vs Pull](/push-vs-pull) compares the two in full.
+**Push** exists for hosts that have to start the connection themselves. The source then does hold a key that reaches the archive, so backupkit confines that key (see [the push jail](#the-push-jail)). [Push vs Pull](/push-vs-pull/) compares the two in full.
 
 ### What no direction can fix
 
@@ -33,9 +33,9 @@ It can serve an empty tree, or one quietly missing half its data. Retention deci
 
 Backupkit watches for that. If a promoted snapshot holds fewer than **half** the files of the previous trusted run - or if this run's file count could not be measured at all while a baseline exists, since a hostile source decides whether its rsync emits a parsable stats block - **the prune after that run is skipped** and the event is logged at error level and recorded on the run report. The snapshot itself is kept, because the data already crossed the wire and throwing it away would be the more destructive move. The archive only grows until a human looks at it.
 
-`backupkit prune` never consults this tripwire, so it is your override once you have confirmed the shrink was real. See [the content-collapse tripwire](/retention#the-content-collapse-tripwire) for what you see and what to do.
+`backupkit prune` never consults this tripwire, so it is your override once you have confirmed the shrink was real. See [the content-collapse tripwire](/retention/#the-content-collapse-tripwire) for what you see and what to do.
 
-A second tripwire on the same path catches the mirror-image trick: complete snapshots appearing *below* the previous run's newest mean names were planted rather than taken, and that also promotes, skips retention, and logs at error level - see [the planted-snapshot guard](/retention#the-planted-snapshot-guard).
+A second tripwire on the same path catches the mirror-image trick: complete snapshots appearing *below* the previous run's newest mean names were planted rather than taken, and that also promotes, skips retention, and logs at error level - see [the planted-snapshot guard](/retention/#the-planted-snapshot-guard).
 
 This fails safe in one direction on purpose: a false alarm costs disk, a missed one costs the archive.
 
@@ -71,7 +71,7 @@ restrict,command="/usr/local/bin/backupkit-remote '/srv/backups'" ssh-ed25519 AA
 
 Anything else is rejected. There is no `eval` anywhere in the script - validated arguments are `exec`'d directly, so no shell ever re-parses text an attacker controls.
 
-The jail is recommended rather than enforced. The client cannot verify it is installed, and a target can opt out with `"jail": false` - see [running without the jail](/push-vs-pull#running-without-the-jail). A remote with `"restrictedShell": true` is the second opt-out, and the two do not compose: bare-word commands do not match the jail's quoted grammar, so such a remote needs `"jail": false` as well. Everything in this section describes what you get **when it is installed**.
+The jail is recommended rather than enforced. The client cannot verify it is installed, and a target can opt out with `"jail": false` - see [running without the jail](/push-vs-pull/#running-without-the-jail). A remote with `"restrictedShell": true` is the second opt-out, and the two do not compose: bare-word commands do not match the jail's quoted grammar, so such a remote needs `"jail": false` as well. Everything in this section describes what you get **when it is installed**.
 
 ### Deletion is blocked on three routes, not one
 
@@ -95,7 +95,7 @@ The client-side "never delete the newest complete snapshot" guard does not help 
 
 In push mode, the pushing host is the one running retention. The archive server holds no retention policy of its own, so it cannot tell a policy-driven prune from a targeted deletion. A compromised push client can retire finished snapshots one at a time, exactly the way the legitimate client does.
 
-The jail bounds the damage to one snapshot per command pair rather than a whole history. It does **not** protect the newest complete snapshot: that guard lives in the client's snapshot store, and a compromised client is precisely the thing that does not run it - the server has no notion of "newest" at all. The authority is real, and it comes with the direction. This is the structural reason [pull is the recommendation](/push-vs-pull).
+The jail bounds the damage to one snapshot per command pair rather than a whole history. It does **not** protect the newest complete snapshot: that guard lives in the client's snapshot store, and a compromised client is precisely the thing that does not run it - the server has no notion of "newest" at all. The authority is real, and it comes with the direction. This is the structural reason [pull is the recommendation](/push-vs-pull/).
 
 ### Symlinks cannot be used to escape
 
@@ -139,7 +139,7 @@ The *mode* check (no group or other access) always runs - it is what keeps other
 
 Passphrases never appear in a config value, an environment variable, argv, or a log. There are exactly two ways one is ever carried: ssh-add's own terminal prompt (`passphrase: "prompt"` - and any encrypted key when a terminal is present, declared or not), or a `0600` askpass file (`passphrase: "file:/abs/path"`). An alias remote cannot carry a passphrase at all - the field is not part of its shape.
 
-**The service never carries one.** `backupkit daemon` refuses to start if any configured key is passphrase-protected, so an unattended backupkit only ever holds keys that need no secret to unlock. Encrypted keys belong to the mode you [run yourself](/run-it-yourself): `backupkit start` runs the same scheduler in your session and can prompt. See [a service cannot hold an encrypted key](/daemon-setup#a-service-cannot-hold-an-encrypted-key).
+**The service never carries one.** `backupkit daemon` refuses to start if any configured key is passphrase-protected, so an unattended backupkit only ever holds keys that need no secret to unlock. Encrypted keys belong to the mode you [run yourself](/run-it-yourself/): `backupkit start` runs the same scheduler in your session and can prompt. See [a service cannot hold an encrypted key](/daemon-setup/#a-service-cannot-hold-an-encrypted-key).
 
 ## Harden the archive filesystem
 
@@ -153,7 +153,7 @@ Back that up at the mount layer anyway. Mount the filesystem holding your destin
 
 ## Related
 
-- [Push vs Pull](/push-vs-pull) - the trust direction in depth
-- [Configuration Reference](/configuration) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
-- [Run It as a Service](/daemon-setup) - the hardened service unit and how keys behave across reboots
-- [Run It Yourself](/run-it-yourself) - the session scheduler, its ssh-agent, and passphrase-protected keys
+- [Push vs Pull](/push-vs-pull/) - the trust direction in depth
+- [Configuration Reference](/configuration/) - `identityFile`, `passphrase`, `knownHostsFile`, `preserveDevices`
+- [Run It as a Service](/daemon-setup/) - the hardened service unit and how keys behave across reboots
+- [Run It Yourself](/run-it-yourself/) - the session scheduler, its ssh-agent, and passphrase-protected keys

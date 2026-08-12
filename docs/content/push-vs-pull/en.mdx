@@ -42,7 +42,7 @@ The cost is that the source host now holds a key that reaches the archive. To li
 restrict,command="/usr/local/bin/backupkit-remote '/srv/backups'" ssh-ed25519 AAAA...
 ```
 
-`restrict` turns off port forwarding, agent forwarding, PTY allocation, and X11. The forced command then allows only the `rsync --server` transfers and the few directory operations backupkit actually needs, all confined to the directory you name. Everything else is rejected. The [Security Model](/security-model) covers exactly what it lets through.
+`restrict` turns off port forwarding, agent forwarding, PTY allocation, and X11. The forced command then allows only the `rsync --server` transfers and the few directory operations backupkit actually needs, all confined to the directory you name. Everything else is rejected. The [Security Model](/security-model/) covers exactly what it lets through.
 
 This is strongly recommended but not required - see [running without the jail](#running-without-the-jail).
 
@@ -119,5 +119,5 @@ Because of that symmetry you can mix directions in one config - pull most of you
 
 ## Related
 
-- [Security Model](/security-model) - the jail, host keys, and file permissions
-- [Configuration Reference](/configuration) - the `direction`, `source`, and `destination` fields
+- [Security Model](/security-model/) - the jail, host keys, and file permissions
+- [Configuration Reference](/configuration/) - the `direction`, `source`, and `destination` fields

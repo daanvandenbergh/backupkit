@@ -16,7 +16,7 @@ image: "/assets/docs/daemon-setup/hero.en.jpg"
 updated: "2026-08-11"
 ---
 
-There are exactly two ways to run backupkit on a schedule, and this page is one of them: **the OS runs it, as root, unattended** - a systemd unit on Linux, a launchd daemon on macOS. The other is [running the scheduler yourself](/run-it-yourself) in your own session. They use different commands, different config files, different state directories, and they differ on one hard constraint: **a service cannot hold a key that has a passphrase.**
+There are exactly two ways to run backupkit on a schedule, and this page is one of them: **the OS runs it, as root, unattended** - a systemd unit on Linux, a launchd daemon on macOS. The other is [running the scheduler yourself](/run-it-yourself/) in your own session. They use different commands, different config files, different state directories, and they differ on one hard constraint: **a service cannot hold a key that has a passphrase.**
 
 ```bash
 sudo backupkit service install
@@ -65,7 +65,7 @@ sudo ssh-keygen -t ed25519 -N "" -f /etc/backupkit/keys/archive_ed25519
 ssh-copy-id -i /etc/backupkit/keys/archive_ed25519.pub backup@archive.example.com
 ```
 
-**Or keep the passphrase and [run the scheduler yourself](/run-it-yourself)** with `backupkit start` - the same scheduler, the same windows, the same retention, in your own session where it can prompt.
+**Or keep the passphrase and [run the scheduler yourself](/run-it-yourself/)** with `backupkit start` - the same scheduler, the same windows, the same retention, in your own session where it can prompt.
 
 Alias remotes are unaffected either way: `ssh_config` and an agent are in charge of those, not backupkit. Note that a root service resolves an alias against **root's** `ssh_config` and root's agent, which is a different arrangement from the one your `backupkit check` just verified - `check` says so when it sees one.
 
@@ -102,7 +102,7 @@ A root service may read a config you own: installing as root, the only rule is t
 `install` writes a single system unit - `/etc/systemd/system/backupkit.service` or `/Library/LaunchDaemons/com.daanvandenbergh.backupkit.plist`. There is no per-user instance, so two people who each keep their own `~/.backupkit/config.jsonc` cannot both have a service: the second `install` overwrites the first one's unit. Pick one:
 
 - **Shared:** merge the targets into `/etc/backupkit/config.jsonc`, the root-owned location every default aims at. One config, one daemon, and no `--config` anywhere.
-- **Per-user:** each user runs their own schedule instead - see [Run It Yourself](/run-it-yourself), which covers cron, a terminal multiplexer, and supervising `backupkit daemon` from a systemd **user** unit or a launchd **LaunchAgent** under their own uid.
+- **Per-user:** each user runs their own schedule instead - see [Run It Yourself](/run-it-yourself/), which covers cron, a terminal multiplexer, and supervising `backupkit daemon` from a systemd **user** unit or a launchd **LaunchAgent** under their own uid.
 
 Mind the order in that second case: `/etc/backupkit/` is probed **before** `~/.backupkit/` for *every* identity, so the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file. Where both exist, each user's commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` exported in their shell profile) to reach their own.
 
@@ -156,7 +156,7 @@ On macOS the log directory `/var/log/backupkit` is `0750 root:wheel` and newsysl
 
 If there is no log source yet it distinguishes the two reasons: no unit installed (it names the command that registers one), or a unit that has written nothing yet (it points at `backupkit service status`, since the usual cause is a daemon failing to start). Either way it exits 1. There is no `--json`, because journald already offers `-o json`.
 
-This command reads the *service's* logs only. A scheduler you started yourself logs to its own terminal - see [Run It Yourself](/run-it-yourself#while-it-runs).
+This command reads the *service's* logs only. A scheduler you started yourself logs to its own terminal - see [Run It Yourself](/run-it-yourself/#while-it-runs).
 
 ## Restarts and reboots
 
@@ -193,7 +193,7 @@ On Linux that is journald. On macOS, `service install` writes `/etc/newsyslog.d/
 
 ## Related
 
-- [Run It Yourself](/run-it-yourself) - the other mode: your session, your config, passphrases allowed
-- [Getting Started](/getting-started) - the setup path up to the point these two modes fork
-- [CLI Reference](/cli-reference) - every command and flag
-- [Security Model](/security-model) - key handling and archive hardening
+- [Run It Yourself](/run-it-yourself/) - the other mode: your session, your config, passphrases allowed
+- [Getting Started](/getting-started/) - the setup path up to the point these two modes fork
+- [CLI Reference](/cli-reference/) - every command and flag
+- [Security Model](/security-model/) - key handling and archive hardening

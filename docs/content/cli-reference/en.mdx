@@ -109,7 +109,7 @@ backupkit jail      install|status [--path P]
 
 `run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target.
 
-**Three of these commands run the same scheduler**, and picking between them is the one architectural choice backupkit asks of you. `start` runs it in your session ([Run It Yourself](/run-it-yourself)); `service` installs and drives it as a root daemon ([Run It as a Service](/daemon-setup)); `daemon` is the loop that service unit executes, which you rarely type yourself. Of the three, only `start` can unlock a passphrase-protected key and keep a schedule running against it.
+**Three of these commands run the same scheduler**, and picking between them is the one architectural choice backupkit asks of you. `start` runs it in your session ([Run It Yourself](/run-it-yourself/)); `service` installs and drives it as a root daemon ([Run It as a Service](/daemon-setup/)); `daemon` is the loop that service unit executes, which you rarely type yourself. Of the three, only `start` can unlock a passphrase-protected key and keep a schedule running against it.
 
 ### run
 
@@ -125,7 +125,7 @@ Run the scheduler in the foreground **in your own session**, for as long as the 
 
 This is the supported home for **passphrase-protected keys**. On startup it launches backupkit's ssh-agent and adds every explicit remote's key to it, prompting on your terminal for each encrypted one; the schedule then runs against that unlocked agent. Everything else - windows, retention, locking, the disk guard - is identical to the service.
 
-Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot. See [Run It Yourself](/run-it-yourself) for the whole mode - which config it reads, where its state lives, and how to survive a logout.
+Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot. See [Run It Yourself](/run-it-yourself/) for the whole mode - which config it reads, where its state lives, and how to survive a logout.
 
 `--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
 
@@ -133,13 +133,13 @@ Use it when a key has a passphrase, when you want to watch a schedule run before
 
 Run the scheduler in the foreground. This is exactly what the installed service unit runs. Use `backupkit service` to install and drive it instead of running this yourself.
 
-**It refuses to start when any configured key is passphrase-protected**, naming each offending key and remote. A service has no terminal to unlock a key on, so such a key could never be primed - the run would simply fail on every tick forever. A key counts as protected when its remote declares a `passphrase` (`file:` or `prompt`) *or* when the key file itself turns out to be encrypted. Fix it by giving the service a key of its own with no passphrase (`ssh-keygen -t ed25519 -N ""`), or stop the service and [run the scheduler yourself](/run-it-yourself) with `backupkit start` instead.
+**It refuses to start when any configured key is passphrase-protected**, naming each offending key and remote. A service has no terminal to unlock a key on, so such a key could never be primed - the run would simply fail on every tick forever. A key counts as protected when its remote declares a `passphrase` (`file:` or `prompt`) *or* when the key file itself turns out to be encrypted. Fix it by giving the service a key of its own with no passphrase (`ssh-keygen -t ed25519 -N ""`), or stop the service and [run the scheduler yourself](/run-it-yourself/) with `backupkit start` instead.
 
 ### service
 
 Manage the OS service unit: `install | uninstall | start | stop | restart | status`.
 
-Every verb is idempotent. All of them except `status` need root. Run `start`, `stop`, or `restart` with no unit installed and it tells you the service is not installed, names the command that registers it, and exits 1; `uninstall` with no unit is a success - it says there is nothing to remove and exits 0. See [Run It as a Service](/daemon-setup) for the whole lifecycle.
+Every verb is idempotent. All of them except `status` need root. Run `start`, `stop`, or `restart` with no unit installed and it tells you the service is not installed, names the command that registers it, and exits 1; `uninstall` with no unit is a success - it says there is nothing to remove and exits 0. See [Run It as a Service](/daemon-setup/) for the whole lifecycle.
 
 `install` bakes the resolved config's **absolute path** into the unit's `ExecStart`, so the daemon the OS launches keeps reading that same file. The lifecycle verbs do not inherit it: `start`, `restart`, and `status` re-resolve the config themselves, so repeat the same `--config` on each of them (or export `BACKUPKIT_CONFIG`), or they will rewrite the unit from whatever config they find instead.
 
@@ -165,13 +165,13 @@ It is derived from the run reports and the due calculation, so it is instant and
 
 ### restore
 
-Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--verify` adds a checksum pass after the copy. See [Restoring a Backup](/restore).
+Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--verify` adds a checksum pass after the copy. See [Restoring a Backup](/restore/).
 
 ### prune
 
 Apply retention now. `--dry-run` prints the plan - what is kept and why, then what would be deleted - and stops without deleting anything.
 
-`prune` refuses if snapshots have appeared in the archive that no run created (see [the planted-snapshot guard](/retention#the-planted-snapshot-guard)), because retention picks by name and a list with extra names in it would have it delete the real snapshots. Review with `--dry-run`, remove anything that is not yours, then `--force` to prune anyway.
+`prune` refuses if snapshots have appeared in the archive that no run created (see [the planted-snapshot guard](/retention/#the-planted-snapshot-guard)), because retention picks by name and a list with extra names in it would have it delete the real snapshots. Review with `--dry-run`, remove anything that is not yours, then `--force` to prune anyway.
 
 ### unlock
 
@@ -208,7 +208,7 @@ Check passed - backupkit is ready. Schedule it either way:
     as a root service: sudo backupkit service install --config /home/dan/.backupkit/config.jsonc
 ```
 
-Two details there are deliberate. Each command carries `--config` unless the checked config lives in `/etc/backupkit`, because that is the only directory a root service finds on its own - a bare `sudo backupkit service install` after checking a config in your home directory would install a service over root's `/etc` copy, or over nothing at all. And when any configured key is passphrase-protected, the service line is replaced by `NOT POSSIBLE` naming the key, since [a service can never unlock one](/daemon-setup#a-service-cannot-hold-an-encrypted-key). That is not a failure - the check still passes and still exits 0; only one of the two ways to schedule is open to it.
+Two details there are deliberate. Each command carries `--config` unless the checked config lives in `/etc/backupkit`, because that is the only directory a root service finds on its own - a bare `sudo backupkit service install` after checking a config in your home directory would install a service over root's `/etc` copy, or over nothing at all. And when any configured key is passphrase-protected, the service line is replaced by `NOT POSSIBLE` naming the key, since [a service can never unlock one](/daemon-setup/#a-service-cannot-hold-an-encrypted-key). That is not a failure - the check still passes and still exits 0; only one of the two ways to schedule is open to it.
 
 If any remote is an `ssh_config` alias, it adds a note alongside that service line: the check resolved that alias against *your* `ssh_config` and *your* agent, and a root service resolves it against root's. The note rides with the service line, so a config that also holds a passphrase-protected key prints the `NOT POSSIBLE` line instead and no alias note.
 
@@ -226,7 +226,7 @@ The one command meant for the **archive server** rather than the push client. In
 
 As a backstop, **every** `backupkit` command except `jail` itself - whose verbs report that state precisely - warns on stderr when the copy at the well-known path differs from the package. Machines with no script installed stay quiet.
 
-The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. See [the push jail](/security-model#the-push-jail).
+The `authorized_keys` lines that point at the script come from `backupkit check` on each push client. See [the push jail](/security-model/#the-push-jail).
 
 ## JSON output
 
@@ -262,7 +262,7 @@ Three deliberate exceptions:
 
 ## Related
 
-- [Getting Started](/getting-started) - these commands in setup order
-- [Run It Yourself](/run-it-yourself) - `start` as a whole mode: your config, your keys
-- [Run It as a Service](/daemon-setup) - the service lifecycle in depth
-- [Configuration Reference](/configuration) - the config every command reads
+- [Getting Started](/getting-started/) - these commands in setup order
+- [Run It Yourself](/run-it-yourself/) - `start` as a whole mode: your config, your keys
+- [Run It as a Service](/daemon-setup/) - the service lifecycle in depth
+- [Configuration Reference](/configuration/) - the config every command reads
