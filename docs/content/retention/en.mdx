@@ -12,10 +12,12 @@ keywords:
     - prune
     - GFS
 image: "/assets/docs/retention/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 Every run leaves behind a dated snapshot. Retention decides how many of those you keep as they pile up. This page covers both.
+
+Retention is a `"mode": "snapshot"` concern only. A [mirror target](/configuration/#snapshot-or-mirror) keeps one in-place copy and no history at all, so it has nothing to prune - writing `retention` on one is a config error rather than a silent no-op.
 
 ## Every run is a hard-linked snapshot
 
@@ -100,6 +102,14 @@ The baseline it compares against is the newest run that did **not** itself trip 
 A sustained collapse therefore keeps retention off run after run. That is bounded rather than permanent: run reports rotate at 50 per target, so once every pre-collapse report has aged out the wire stops tripping on its own and scheduled retention resumes.
 
 `backupkit prune` never consults the tripwire. Once you have confirmed the shrink was real - you did delete half the source, or the application moved its data directory - run it by hand and retention applies as normal.
+
+### On a mirror it fires earlier, and refuses
+
+A [mirror target](/configuration/#snapshot-or-mirror) has the same wire at the same threshold, moved one step ahead of the transfer: backupkit estimates the source first, and if the count has collapsed it **refuses to transfer at all**, reporting the run as `content-collapse` and leaving the destination untouched.
+
+It has to be that way round. A snapshot target can promote and then skip the prune, because the previous snapshots are still there to protect; a mirror deletes in place, so by the time its transfer has finished there is nothing left to protect. The typical trigger is not a hostile source at all - it is a volume that failed to mount, or a directory restored halfway.
+
+`backupkit run --force <target>` is the override here, the way `backupkit prune` is for a snapshot target: it performs the run once you have confirmed the shrink is real.
 
 ## The planted-snapshot guard
 

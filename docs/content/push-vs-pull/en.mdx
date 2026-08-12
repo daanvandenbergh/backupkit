@@ -12,7 +12,7 @@ keywords:
     - architecture
     - storage box
 image: "/assets/docs/push-vs-pull/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 Every target has a `direction`, either `"pull"` or `"push"`. It decides which machine holds the data and which one holds the archive. It is the biggest security decision in a backup setup, so it is worth two minutes.
@@ -71,6 +71,7 @@ Set `"jail": false` on a push target to use a plain account instead. It defaults
 
 ```jsonc
 "nas-www": {
+    "mode": "snapshot",
     "direction": "push",
     "remote": "nas",
     "source": "/var/www",
@@ -79,10 +80,11 @@ Set `"jail": false` on a push target to use a plain account instead. It defaults
 }
 ```
 
-Two reasons to do that:
+Three reasons to do that:
 
 - **You accept the risk.** The push key gets normal account access, and you are fine with it - a NAS on a LAN that nothing hostile can reach, say.
 - **The host will not let you install one.** Storage appliances and hosted "storage box" products often offer rsync over ssh but no way to install a script or set a forced command.
+- **The target is a mirror.** A `"mode": "mirror"` push has no choice, and the validator refuses the pair rather than letting it fail at run time.
 
 Backups run exactly the same either way. The client always sends plain `rsync` plus ordinary POSIX commands; the jail only checks them and then runs them unchanged. For an unjailed target, `backupkit check` prints a warning in place of the `authorized_keys` line: `Warning: push target <name> has the jail disabled ("jail": false) - its key gets whatever access the server grants it.` It never probes the jail - `check` cannot tell whether the forced command is installed, so installing it is entirely on you.
 
@@ -100,6 +102,7 @@ Some appliance shells go further and parse **no quoting at all**: a Hetzner Stor
 },
 "targets": {
     "nas-www": {
+        "mode": "snapshot",
         "direction": "push",
         "remote": "storagebox",
         "source": "/var/www",
@@ -108,6 +111,14 @@ Some appliance shells go further and parse **no quoting at all**: a Hetzner Stor
     },
 }
 ```
+
+## A push mirror cannot be jailed
+
+A [mirror target](/configuration/#snapshot-or-mirror) writes its destination in place, and the jail cannot accept that. The forced command pins every transfer's destination to `<root>/<target>/<snapshot>.partial`, and that pin is exactly what makes the `--delete --force` it also permits harmless: a delete can only ever reach inside the scratch directory of the run in flight. A mirror's destination *is* the root, so the jail rejects its every transfer - and teaching it otherwise would mean permitting "delete anything under the root the sender no longer has", which is the one command the jail exists to refuse.
+
+So a push mirror is an unjailed key by construction, and the config has to say so with `"jail": false`. Since `jail` defaults to `true` on push, backupkit refuses the combination at validation rather than flipping that default quietly - a downgrade of the archive host's protection should be written down, not inferred.
+
+**Prefer `"direction": "pull"` for a mirror.** The machine holding the copy then reaches out and fetches, and the source host needs no credential for it at all - the same reason pull is the default everywhere else, and here it costs nothing, since a mirror has no archive history for the jail to protect either way.
 
 ## What changes downstream
 

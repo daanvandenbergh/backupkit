@@ -13,7 +13,7 @@ keywords:
     - service
     - start
 image: "/assets/docs/cli-reference/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 The `backupkit` binary is a thin layer over the engine. An unknown flag, subcommand, or target name is a hard error that lists the valid names, so a typo never turns into a surprise. This page covers every command, its flags, and the exit codes.
@@ -155,9 +155,11 @@ It reads the **service's** logs and nothing else. A scheduler you run yourself l
 
 List complete snapshots per target, oldest first. A snapshot counts as complete only once it has been renamed out of `<name>.partial`, so an interrupted run is invisible here. `ls` is the only alias in the CLI. If the archive directory does not exist yet it says there are no snapshots, points at `backupkit run`, and exits 0.
 
+A [mirror target](/configuration/#snapshot-or-mirror) contributes nothing here: it holds one live copy at its destination and no snapshots at all. Directories inside a mirrored tree are the source's own files, never archive entries, so backupkit never reads one as a listing.
+
 ### status
 
-One row per target: last snapshot, next due, last result, consecutive failures, and lock state.
+One row per target: last snapshot, next due, last result, consecutive failures, and lock state. A mirror target has no snapshot to name, so its `LAST SNAPSHOT` is empty and it never reports a lock (it takes none); everything else on the row works the same, dated from its newest completed run.
 
 The `LOCK` column covers **local** destinations only. A push target's lock lives on the archive server, and probing it would cost an ssh round-trip on a command that promises to be instant, so a push target always reports no lock here - `backupkit unlock` is what reads the real remote state.
 
@@ -167,15 +169,17 @@ It is derived from the run reports and the due calculation, so it is instant and
 
 Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--verify` adds a checksum pass after the copy. See [Restoring a Backup](/restore/).
 
+Restoring a mirror target is an error naming its destination: a mirror keeps one live copy and no history, so there is no point in time to restore - copy from the destination directly.
+
 ### prune
 
-Apply retention now. `--dry-run` prints the plan - what is kept and why, then what would be deleted - and stops without deleting anything.
+Apply retention now. `--dry-run` prints the plan - what is kept and why, then what would be deleted - and stops without deleting anything. Mirror targets are skipped: they keep no history to prune.
 
 `prune` refuses if snapshots have appeared in the archive that no run created (see [the planted-snapshot guard](/retention/#the-planted-snapshot-guard)), because retention picks by name and a list with extra names in it would have it delete the real snapshots. Review with `--dry-run`, remove anything that is not yours, then `--force` to prune anyway.
 
 ### unlock
 
-Clear a destination lock a killed run left behind.
+Clear a destination lock a killed run left behind. A mirror target always reports nothing to clear - it takes no lock, because the lock directory would sit inside the mirrored tree where the transfer's own `--delete` would remove it.
 
 Each target's archive root is locked for the length of a run, and the release is structural - it happens in a `finally`, so an ordinary failure or Ctrl-C always frees it. A `kill -9`, a lost ssh connection, or a power cut has no `finally`. What is left then depends on where the archive is: a **local** lock records its holder's pid, so the next run sees the process is gone and takes it over by itself. A **remote** lock cannot - there is no pid on this side to probe - so it blocks the target until its 24-hour TTL expires, and one interrupted inside the acquire window (between the lock and its timestamp marker) never expires at all.
 

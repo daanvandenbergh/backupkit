@@ -12,7 +12,7 @@ keywords:
     - host key
     - permissions
 image: "/assets/docs/security-model/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 Backupkit moves data over ssh and writes it to an archive, so its security model comes down to one question: who can reach what. This page walks through each defence - the trust direction, the jail around a push key, host-key pinning, the permission preflight, and how to harden the filesystem the archive lives on.
@@ -35,7 +35,9 @@ Backupkit watches for that. If a promoted snapshot holds fewer than **half** the
 
 `backupkit prune` never consults this tripwire, so it is your override once you have confirmed the shrink was real. See [the content-collapse tripwire](/retention/#the-content-collapse-tripwire) for what you see and what to do.
 
-A second tripwire on the same path catches the mirror-image trick: complete snapshots appearing *below* the previous run's newest mean names were planted rather than taken, and that also promotes, skips retention, and logs at error level - see [the planted-snapshot guard](/retention/#the-planted-snapshot-guard).
+A [mirror target](/configuration/#snapshot-or-mirror) gets the same check ahead of its transfer instead of after it, where it **refuses the run** rather than skipping a prune - a mirror deletes in place, so it has no earlier version to fall back on. `backupkit run --force <target>` is the override there.
+
+A second tripwire on the same path catches the opposite trick: complete snapshots appearing *below* the previous run's newest mean names were planted rather than taken, and that also promotes, skips retention, and logs at error level - see [the planted-snapshot guard](/retention/#the-planted-snapshot-guard).
 
 This fails safe in one direction on purpose: a false alarm costs disk, a missed one costs the archive.
 

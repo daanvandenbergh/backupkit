@@ -11,12 +11,12 @@ keywords:
     - snapshot
     - verify
 image: "/assets/docs/restore/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 Restoring copies one snapshot out of the archive to a fresh path you pick. It never writes into an existing directory and never deletes anything, so a restore cannot damage the archive or an existing tree.
 
-**You need:** a target with at least one complete snapshot. Check with `backupkit list`.
+**You need:** a `"mode": "snapshot"` target with at least one complete snapshot. Check with `backupkit list`. A [mirror target](/configuration/#snapshot-or-mirror) has no history to restore from - `restore` refuses one and names its destination, which holds the single live copy; copy from there directly.
 
 ## Restore a snapshot
 

@@ -13,7 +13,7 @@ keywords:
     - remotes
     - passphrase
 image: "/assets/docs/configuration/hero.en.jpg"
-updated: "2026-08-11"
+updated: "2026-08-12"
 ---
 
 Backupkit reads one `config.jsonc` describing your remotes, targets, schedules, and retention. This page lists every field and its default.
@@ -124,22 +124,65 @@ Backupkit still adds its own safety options on the command line, which override 
 
 ## Targets
 
-Each target is keyed by name. That name becomes the snapshot subdirectory and the identifier in the logs.
+Each target is keyed by name. For a snapshot target that name becomes the snapshot subdirectory; for every target it is the identifier in the logs.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `mode` | `"snapshot"` \| `"mirror"` | **required, no default** | A versioned archive, or one in-place copy - see below |
 | `direction` | `"pull"` \| `"push"` | required | Pull fetches from the remote; push sends to it |
 | `remote` | string | required | A key from `remotes` |
 | `source` | string | required | Directory to back up (pull: on the remote; push: local) |
-| `destination` | string | required | Archive root (pull: local; push: on the remote) |
+| `destination` | string | required | Snapshot mode: the archive root. Mirror mode: the copy itself (pull: local; push: on the remote) |
 | `exclude` | string[] | `[]` | rsync exclude patterns |
 | `schedule` | object | `{ interval: "day" }` | When to run - see below |
-| `retention` | object \| `false` | the top-level default | Retention for this target; `false` means never prune |
+| `retention` | object \| `false` | the top-level default | **Snapshot only.** Retention for this target; `false` means never prune |
 | `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
-| `minFree` | string \| `false` | `"5%"` | Free-space floor; `false` turns the guard off |
+| `minFree` | string \| `false` | `"5%"` | **Snapshot only.** Free-space floor; `false` turns the guard off |
 | `rsync` | object | `{}` | Per-target rsync tuning - see below |
-| `jail` | boolean | `true` (push targets) | Push only - writing it on a pull target is a config error. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` prints a warning in place of the `authorized_keys` line. See [running without the jail](/push-vs-pull/#running-without-the-jail) |
+| `jail` | boolean | `true` (push targets) | Push only - writing it on a pull target is a config error. `false` skips the recommended `backupkit-remote` jail, and `backupkit check` prints a warning in place of the `authorized_keys` line. A push mirror **must** set it to `false`. See [running without the jail](/push-vs-pull/#running-without-the-jail) |
 | `enabled` | boolean | `true` | `false` means configured but never scheduled |
+
+### Snapshot or mirror
+
+`mode` is the one field with no default. The two modes have opposite properties - one keeps every previous version, the other overwrites and deletes in place - so backupkit will not pick for you. A config that omits it fails validation naming the target.
+
+```jsonc
+"targets": {
+    // Versioned archive: /srv/backups/web/2026-08-10T030000Z/, and one more each day.
+    "web": {
+        "mode": "snapshot",
+        "direction": "pull",
+        "remote": "example",
+        "source": "/var/www",
+        "destination": "/srv/backups",
+    },
+    // One in-place copy: /Volumes/persistance IS the tree, kept identical to the source.
+    "persistance": {
+        "mode": "mirror",
+        "direction": "pull",
+        "remote": "example",
+        "source": "/home/me/persistance",
+        "destination": "/Volumes/persistance",
+        "schedule": { "interval": "hour" },
+    },
+}
+```
+
+**Snapshot** is the archive: each run writes `<destination>/<name>/<timestamp>/`, hardlinked against the previous snapshot so unchanged files cost no space, and [retention](/retention/) prunes the history on a schedule. You can restore any kept point in time.
+
+**Mirror** is a sync: `<destination>` *is* the tree, one copy, no history. Use it to keep two clones of the same directory in step - a working directory and its copy on another machine or an external volume. What it gives up is every recovery property of the archive: **anything the source no longer has is deleted from the destination on the next run**, including a file you deleted by accident an hour ago, and there is no earlier version to go back to.
+
+What changes for a mirror:
+
+- `retention` and `minFree` are config errors, not silent no-ops - a mirror keeps no history to prune, and it replaces its destination rather than growing it.
+- `backupkit list` and `backupkit prune` skip it, and `backupkit restore` refuses it - there is no point in time to restore.
+- `backupkit status` still shows it: last result, next due, and consecutive failures all work, and `lastSnapshot` is empty.
+- Its schedule window is fulfilled by its own run reports rather than by an archive listing, so the reports in `stateDir` are what keep it from re-running every tick.
+- It takes no destination lock, so `backupkit unlock` always reports nothing to clear.
+
+**A mirror will not run a transfer that has collapsed.** Before each run backupkit estimates the source, and if it holds under half the files the last successful run moved, the transfer is refused and the run is reported as `content-collapse` - the mirror is left exactly as it was. That is the case where an unmounted volume or a half-restored directory would otherwise delete the good copy. Check the source, then `backupkit run --force <target>` performs it anyway.
+
+**A push mirror cannot be jailed** and must write `"jail": false`. The jail's forced command pins every transfer to `<destination>/<target>/<snapshot>.partial`, and that pin is exactly what keeps the `--delete` it also allows confined to the snapshot being built. A mirror writes the destination root itself, so the jail rejects it - and could not safely be taught to accept it. Mirror with `"direction": "pull"` instead wherever you can: the machine holding the copy then does the fetching, and the source needs no access to it at all.
 
 ### Path rules
 
@@ -147,7 +190,7 @@ Every path field has to be absolute (`~` is rejected), free of NUL and newline, 
 
 The paths that end up inside rsync's `-e` string or a remote command are stricter still: `identityFile`, `knownHostsFile`, `rsyncBin`, `sshBin`, `rsync.remoteRsyncBin`, the path after `passphrase: "file:"`, and a push `destination` additionally reject whitespace and quote characters. `source`, `stateDir`, `logging.file`, and a pull `destination` accept both, so `/Volumes/My Backups` is a perfectly good pull destination.
 
-**Two targets may not have nesting snapshot roots.** The snapshot root is `<destination>/<name>`, and no target's may equal or sit inside another's in the same place - destinations `/b` for target `a` and `/b/a` for target `b` collide, and validation says so by name rather than letting one target's archive grow inside another's.
+**Two targets may not have nesting write roots.** The write root is `<destination>/<name>` for a snapshot target and `<destination>` itself for a mirror, and no target's may equal or sit inside another's in the same place - destinations `/b` for target `a` and `/b/a` for target `b` collide, and validation says so by name rather than letting one target's archive grow inside another's. With a mirror in the mix this stops something worse than untidiness: a mirror deletes whatever its source does not have, so a mirror whose destination contained another target's archive would delete that archive on its first run.
 
 Paths are normalized when the config loads: duplicate slashes collapse and a trailing slash is stripped, so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination.
 

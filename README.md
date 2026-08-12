@@ -4,7 +4,7 @@
 
 Automated, versioned backups over SSH - a thin, dependency-free TypeScript layer on top of `rsync`.
 
-- **Versioned** - each run is a dated snapshot, unchanged files hard-linked against the previous one, so history costs almost nothing.
+- **Versioned, or in place** - every target states its `mode`: `"snapshot"` makes each run a dated snapshot with unchanged files hard-linked against the previous one, so history costs almost nothing; `"mirror"` keeps one in-place copy of the source, for two clones of the same tree rather than an archive. Required on every target, with no default - the two have opposite recovery properties.
 - **Push or pull** - the source host can push to the backup server, or the backup server can pull from the source. Pull is the safe default: a compromised source host holds no credentials to reach the archive.
 - **Automated** - a scheduler runs each target on its own interval and prunes old snapshots on a GFS retention policy, under systemd or launchd.
 - **Safe by construction** - snapshots are atomic (write to `<name>.partial`, rename on success), locked per destination, and only complete snapshots ever seed the next hard-link base. rsync and ssh are always spawned as argv arrays, never a shell string.
@@ -45,6 +45,7 @@ A minimal **pull** config (`/etc/backupkit/config.jsonc`) - the backup server fe
     },
     "targets": {
         "web1-www": {
+            "mode": "snapshot",            // versioned archive (the alternative is "mirror")
             "direction": "pull",           // this host fetches from the remote
             "remote": "web1",
             "source": "/var/www",          // path on the remote
@@ -57,6 +58,25 @@ A minimal **pull** config (`/etc/backupkit/config.jsonc`) - the backup server fe
 ```
 
 Then `backupkit run` performs one pass over every due target; `backupkit start` (or the installed service) does it on schedule.
+
+### Snapshot or mirror
+
+`mode` is required on every target and has no default, because the two modes have opposite properties and a silent one is the wrong one to inherit:
+
+```jsonc
+"persistance": {
+    "mode": "mirror",                     // <destination> IS the tree - one copy, no history
+    "direction": "pull",                  // this host fetches; the source needs no access here
+    "remote": "laptop",
+    "source": "/Users/me/persistance",
+    "destination": "/Volumes/persistance",
+    "schedule": { "interval": "hour" }
+}
+```
+
+A **mirror** keeps two clones of one directory in step - a working directory and its copy on another machine or an external volume. It writes the destination in place, so there is no snapshot subdirectory, no hard-link history, no retention (`retention` and `minFree` are config errors on a mirror rather than silent no-ops), and nothing for `list`, `prune`, or `restore` to work with. **Anything the source no longer has is deleted from the destination on the next run, with no earlier version to go back to** - that is the trade against a snapshot target.
+
+The one guard that stays is the one a mirror cannot recover from without: before each run backupkit estimates the source, and refuses the transfer if it holds under half the files the last successful run moved, leaving the destination untouched. An unmounted volume or a half-restored directory therefore skips its run instead of deleting the good copy; `backupkit run --force <target>` performs it once you have checked. A push mirror must also set `"jail": false` - the jail pins every transfer to a scratch `<snapshot>.partial`, which is what confines the `--delete` it allows, so it cannot accept a mirror; prefer `"direction": "pull"` for a mirror wherever you can.
 
 ## CLI
 

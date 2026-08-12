@@ -196,7 +196,8 @@ const PAGES: Record<string, HelpPage> = {
     list: {
         usage: "backupkit list|ls [options] [TARGET...]",
         summary: "List complete snapshots (alias: ls)",
-        description: "List the complete snapshots of every target (or only the ones named), oldest first.",
+        description:
+            'List the complete snapshots of every target (or only the ones named), oldest first. Mirror targets hold one live copy and no snapshots, so they are not listed.',
         args: [targetsArg("Targets to list (default: all of them)")],
         options: [
             { term: "--json", text: "Print one JSON document on stdout instead of a table" },
@@ -207,7 +208,7 @@ const PAGES: Record<string, HelpPage> = {
         usage: "backupkit status [options] [TARGET...]",
         summary: "One row per target: last run, next due, lock state",
         description:
-            "One row per target: its last snapshot, when it is next due, its last result, consecutive failures, and whether a destination lock is held.",
+            "One row per target: its last snapshot, when it is next due, its last result, consecutive failures, and whether a destination lock is held. A mirror target has no snapshot to name and takes no lock, so both columns stay empty.",
         args: [targetsArg("Targets to report on (default: all of them)")],
         options: [
             { term: "--json", text: "Print one JSON document on stdout instead of a table" },
@@ -218,7 +219,7 @@ const PAGES: Record<string, HelpPage> = {
         usage: "backupkit restore [options] <TARGET> <SNAPSHOT>",
         summary: "Copy a snapshot to a fresh path",
         description:
-            "Copy one snapshot out of the archive into a path that does not exist yet. Restoring never writes over an existing directory, and never touches the archive.",
+            "Copy one snapshot out of the archive into a path that does not exist yet. Restoring never writes over an existing directory, and never touches the archive. Only for a snapshot target: a mirror keeps one live copy and no history, so copy from its destination directly.",
         args: [
             { term: "TARGET", text: "The target the snapshot belongs to" },
             { term: "SNAPSHOT", text: "A snapshot name from `backupkit list`, or `latest`" },
@@ -233,7 +234,7 @@ const PAGES: Record<string, HelpPage> = {
         usage: "backupkit prune [options] [TARGET...]",
         summary: "Apply the retention policy now",
         description:
-            "Apply each target's retention policy immediately, instead of waiting for the next run to do it.",
+            "Apply each snapshot target's retention policy immediately, instead of waiting for the next run to do it. Mirror targets keep no history and are skipped.",
         args: [targetsArg("Targets to prune (default: all of them)")],
         options: [
             { term: "--dry-run", text: "Print the plan (what is kept, and why) and delete nothing" },
