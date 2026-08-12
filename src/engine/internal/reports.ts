@@ -242,8 +242,16 @@ export interface DerivedBackoff {
     lastFailedAt: Date | null;
     /** Status of the newest report of any kind, or null when the target never ran. */
     lastResult: RunStatus | null;
-    /** Newest snapshot recorded by a success/warning report, or null. */
+    /** Newest snapshot recorded by a success/warning report, or null (always null for a mirror target). */
     lastSnapshot: string | null;
+    /**
+     * `startedAt` of the newest success/warning report, or null when the target
+     * never completed a run. This is a MIRROR target's only record that its
+     * schedule window was fulfilled - it writes no snapshot, so there is no
+     * archive listing to ask. A snapshot target uses its listing instead (which
+     * also sees snapshots this host did not create), so this is unused there.
+     */
+    lastSuccessAt: Date | null;
 }
 
 /**
@@ -255,35 +263,36 @@ export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBacko
     let consecutiveFailures = 0;
     let lastFailedAt: Date | null = null;
     let lastSnapshot: string | null = null;
-    let counting = true;
+    let lastSuccessAt: Date | null = null;
     for (const report of reports) {
-        if (counting) {
-            if (report.status === "failed") {
-                consecutiveFailures += 1;
-                if (lastFailedAt === null) {
-                    const finished = new Date(report.finishedAt);
-                    lastFailedAt = Number.isNaN(finished.getTime()) ? null : finished;
-                }
-            } else if (report.status === "success" || report.status === "warning") {
-                counting = false;
+        if (report.status === "failed") {
+            consecutiveFailures += 1;
+            if (lastFailedAt === null) {
+                const finished = new Date(report.finishedAt);
+                lastFailedAt = Number.isNaN(finished.getTime()) ? null : finished;
             }
-            // aborted and skipped never increment and never stop the count.
+            continue;
         }
-        if (
-            lastSnapshot === null &&
-            (report.status === "success" || report.status === "warning") &&
-            typeof report.snapshot === "string"
-        ) {
-            lastSnapshot = report.snapshot;
+        // aborted and skipped never increment the count and never stop the scan.
+        if (report.status !== "success" && report.status !== "warning") {
+            continue;
         }
-        if (!counting && lastSnapshot !== null) {
-            break;
-        }
+        // The newest COMPLETED run ends the scan: it stops the failure count and
+        // answers both "last" fields, and nothing older can change either. A
+        // mirror's reports carry no snapshot at all, so scanning on until one
+        // turns up would walk the whole history on every call - and would answer
+        // with a snapshot older than the newest completed run, which is exactly
+        // the wrong record of where the archive stands.
+        lastSnapshot = typeof report.snapshot === "string" ? report.snapshot : null;
+        const started = new Date(report.startedAt);
+        lastSuccessAt = Number.isNaN(started.getTime()) ? null : started;
+        break;
     }
     return {
         consecutiveFailures,
         lastFailedAt,
         lastResult: reports[0]?.status ?? null,
         lastSnapshot,
+        lastSuccessAt,
     };
 }

@@ -53,7 +53,7 @@ const NAME_CANDIDATES = [
 function validatorAccepts(name: string): boolean {
     const config = {
         remotes: { r1: { host: "h", user: "backup", identityFile: "/k/id" } },
-        targets: { [name]: { direction: "pull", remote: "r1", source: "/s", destination: "/d" } },
+        targets: { [name]: { mode: "snapshot", direction: "pull", remote: "r1", source: "/s", destination: "/d" } },
     };
     try {
         validateConfig(parseJsonc(JSON.stringify(config), "test.jsonc"), "test.jsonc");

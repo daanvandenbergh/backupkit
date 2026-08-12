@@ -150,8 +150,25 @@ export interface RsyncOptions {
     verify?: boolean;
 }
 
+/**
+ * How a target writes its destination. Deliberately REQUIRED on every target
+ * (no default): the two modes have opposite safety properties - one keeps every
+ * previous version, the other overwrites and deletes in place - so a mode
+ * silently inherited from a default is the one mistake this config cannot
+ * afford. Writing it out makes every target state which it is.
+ */
+export type TargetMode = "snapshot" | "mirror";
+
 /** One backup target. Keyed by name in BackupkitConfig.targets. */
 export interface TargetConfig {
+    /**
+     * "snapshot": versioned archive at `<destination>/<name>/<snapshot>/`,
+     * hardlinked against the previous snapshot, pruned by retention.
+     * "mirror": `<destination>` IS the tree - one in-place copy of the source,
+     * no snapshot directory, no history, no retention. Required, no default.
+     * @see TargetMode
+     */
+    mode: TargetMode;
     /** "pull": this machine fetches remote source into local destination (preferred). "push": this machine sends local source to remote destination. Required. */
     direction: "pull" | "push";
     /** Key into BackupkitConfig.remotes. Required. */
@@ -163,15 +180,21 @@ export interface TargetConfig {
      * absolute path ON the remote (must equal the jail root of the forced
      * command) and may NOT contain whitespace or quote characters - it is
      * word-split by the jail's remote-command parser, which would reject every
-     * rsync while the lifecycle commands still succeed. Snapshots at
-     * <destination>/<name>/<snapshot>/. Required.
+     * rsync while the lifecycle commands still succeed. Snapshot mode writes
+     * <destination>/<name>/<snapshot>/; mirror mode writes <destination>
+     * itself, and everything in it that the source does not have is DELETED.
+     * Required.
      */
     destination: string;
     /** rsync exclude patterns, one --exclude=<p> argv element each. Default []. */
     exclude?: string[];
     /** When to run (validation matrix in spec section 2). Default { interval: "day" }. */
     schedule?: ScheduleInput;
-    /** Overrides top-level retention wholesale (no merge). false = never prune this target. */
+    /**
+     * Overrides top-level retention wholesale (no merge). false = never prune
+     * this target. Snapshot mode only - a mirror keeps no history to retain,
+     * and the validator rejects the key rather than ignoring it.
+     */
     retention?: RetentionConfig | false;
     /**
      * Transfer retry: total attempts per run for transient failures, integer
@@ -182,7 +205,13 @@ export interface TargetConfig {
         /** Total transfer attempts per run, integer 1-10. Default 5. */
         attempts?: number;
     };
-    /** Free-space floor after transfer: "N%" of the filesystem or absolute "10G"/"500M" (binary units). false disables the guard and its dry-run pre-pass. Default "5%". */
+    /**
+     * Free-space floor after transfer: "N%" of the filesystem or absolute
+     * "10G"/"500M" (binary units). false disables the guard and its dry-run
+     * pre-pass. Default "5%". Snapshot mode only - the guard exists because
+     * every snapshot ADDS to the archive, while a mirror replaces it in place;
+     * the validator rejects the key on a mirror rather than ignoring it.
+     */
     minFree?: string | false;
     /** Default {}. */
     rsync?: RsyncOptions;
@@ -249,6 +278,12 @@ export interface ResolvedRsyncOptions {
 export interface ResolvedTarget {
     /** Target name (its key in the config `targets` record). */
     name: string;
+    /**
+     * Snapshot archive or in-place mirror. The one field downstream code DOES
+     * branch on (unlike `direction`, which the endpoint mapping absorbs): it
+     * decides whether a run goes through the snapshot store at all.
+     */
+    mode: TargetMode;
     /** Human-facing transfer direction word (no downstream code branches on it after endpoint mapping). */
     direction: "pull" | "push";
     /** The referenced remote's short name. */
@@ -257,20 +292,20 @@ export interface ResolvedTarget {
     remoteRef: ResolvedRemote;
     /** Directory backed up (contents synced). */
     source: string;
-    /** Archive root (snapshots at <destination>/<name>/<snapshot>/). */
+    /** Archive root: snapshots at <destination>/<name>/<snapshot>/, or the mirrored tree itself. */
     destination: string;
     /** rsync exclude patterns. */
     exclude: string[];
     /** Fully resolved schedule. */
     schedule: ScheduleConfig;
-    /** Effective retention rules, or null for keep-everything (target `false` or nothing configured). */
+    /** Effective retention rules, or null for keep-everything (target `false`, nothing configured, or mirror mode). */
     retention: RetentionConfig | null;
     /** Transfer retry attempts (1-10). */
     retry: {
         /** Total transfer attempts per run. */
         attempts: number;
     };
-    /** Parsed free-space floor, or null when the guard is disabled. */
+    /** Parsed free-space floor, or null when the guard is disabled (always null in mirror mode). */
     minFree: MinFree | null;
     /** Fully resolved rsync tuning. */
     rsync: ResolvedRsyncOptions;
@@ -280,7 +315,11 @@ export interface ResolvedTarget {
     enabled: boolean;
     /** Transfer source endpoint (mapped once from direction). */
     src: Endpoint;
-    /** Transfer destination endpoint - the archive root side (mapped once from direction). */
+    /**
+     * Transfer destination endpoint - the archive root side (mapped once from
+     * direction). Snapshot mode transfers into `<dst>/<name>/<snap>.partial`;
+     * mirror mode transfers into `<dst>` itself.
+     */
     dst: Endpoint;
 }
 

@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { LockHeldError } from "../../shared/errors.js";
+import { parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { ScheduleSpec } from "../../shared/time.js";
 import { deriveBackoff } from "../internal/reports.js";
 import { BACKOFF_CAP_MS, backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "../internal/scheduler.js";
@@ -29,7 +30,9 @@ function report(target: string, status: TargetRunReport["status"], snapshot: str
         snapshot,
         status,
         reason: null,
-        startedAt: "",
+        // Load-bearing: the loop caches a completed run's startedAt as the
+        // window it fulfilled (a mirror run has no snapshot name to cache).
+        startedAt: new Date().toISOString(),
         finishedAt: new Date().toISOString(),
         attempts: [],
         stats: null,
@@ -150,7 +153,7 @@ describe("Scheduler loop (fake timers)", () => {
         targets: ReturnType<typeof makeTarget>[];
         newest?: Record<string, string | null>;
         outcome?: (target: string) => TargetRunReport;
-        listNewest?: (target: ReturnType<typeof makeTarget>) => Promise<string | null>;
+        lastFulfilledAt?: (target: ReturnType<typeof makeTarget>) => Promise<Date | null>;
     }): { scheduler: Scheduler; runs: string[]; tracker: BackoffTracker; recorded: TargetRunReport[] } {
         const { log } = captureLogger("error");
         const tracker = new BackoffTracker(log);
@@ -162,7 +165,15 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: params.listNewest ?? (async (target) => params.newest?.[target.name] ?? null),
+            // `newest` stays snapshot-NAMED in these fixtures (that is what a
+            // snapshot target's store answers with); the engine's own parse to a
+            // Date is mirrored here.
+            lastFulfilledAt:
+                params.lastFulfilledAt ??
+                (async (target) => {
+                    const name = params.newest?.[target.name] ?? null;
+                    return name === null ? null : parseSnapshotName(name);
+                }),
             runTarget: async (target) => {
                 runs.push(target.name);
                 const result = params.outcome?.(target.name) ?? report(target.name, "success", "2026-08-10T120000Z");
@@ -250,7 +261,7 @@ describe("Scheduler loop (fake timers)", () => {
         let listCalls = 0;
         const { scheduler, runs, recorded } = makeLoop({
             targets: [target],
-            listNewest: async () => {
+            lastFulfilledAt: async () => {
                 listCalls++;
                 throw new Error("ssh: host unreachable");
             },
@@ -292,7 +303,7 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: async () => null,
+            lastFulfilledAt: async () => null,
             runTarget: async () => {
                 throw new LockHeldError("another backupkit holds it");
             },
@@ -321,9 +332,9 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: async () => {
+            lastFulfilledAt: async () => {
                 listCalls += 1;
-                return newest;
+                return newest === null ? null : parseSnapshotName(newest);
             },
             runTarget: async () => {
                 runs.push("web");
@@ -357,7 +368,7 @@ describe("Scheduler loop (fake timers)", () => {
         const target = makeTarget({ name: "web", schedule: HOURLY });
         const { scheduler, runs, tracker, recorded } = makeLoop({
             targets: [target],
-            listNewest: async () => {
+            lastFulfilledAt: async () => {
                 throw new Error("ssh: connect to host archive port 22: Connection refused");
             },
         });
@@ -430,7 +441,7 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: async () => null,
+            lastFulfilledAt: async () => null,
             runTarget: async () => {
                 throw new Error("rsync vanished");
             },
@@ -454,7 +465,7 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
-            listNewest: async () => {
+            lastFulfilledAt: async () => {
                 throw new Error("archive unreachable");
             },
             runTarget: async () => report("web", "success", null),

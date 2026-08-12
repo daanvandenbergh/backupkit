@@ -8,7 +8,7 @@ import { validateConfig, type ValidatedConfig } from "../internal/validate.js";
 const REMOTE = { host: "10.0.0.11", user: "backup-reader", identityFile: "/etc/backupkit/keys/id" };
 
 /** A minimal valid pull target referencing remote "r1". */
-const TARGET = { direction: "pull", remote: "r1", source: "/var/www", destination: "/srv/backups" };
+const TARGET = { mode: "snapshot", direction: "pull", remote: "r1", source: "/var/www", destination: "/srv/backups" };
 
 /** Serialize a plain object as JSON (a strict subset of JSONC) and validate it. */
 function validate(config: unknown): ValidatedConfig {
@@ -53,7 +53,7 @@ describe("minimal valid config", () => {
     it("keeps integer-like target names in document order", () => {
         // Raw text: a JS object literal would already reorder integer-like keys.
         const target = (destination: string) =>
-            `{ "direction": "pull", "remote": "r1", "source": "/var/www", "destination": "${destination}" }`;
+            `{ "mode": "snapshot", "direction": "pull", "remote": "r1", "source": "/var/www", "destination": "${destination}" }`;
         const text = `{
             "remotes": { "r1": ${JSON.stringify(REMOTE)} },
             "targets": { "2024": ${target("/srv/a")}, "zeta": ${target("/srv/b")}, "10": ${target("/srv/c")} }
@@ -344,7 +344,7 @@ describe("alias remotes (alias XOR explicit)", () => {
 });
 
 describe("targets", () => {
-    it.each([["direction"], ["remote"], ["source"], ["destination"]])(
+    it.each([["mode"], ["direction"], ["remote"], ["source"], ["destination"]])(
         "names a missing required field: %s",
         (field) => {
             const target: Record<string, unknown> = { ...TARGET };
@@ -359,6 +359,89 @@ describe("targets", () => {
 
     it("rejects a bad direction", () => {
         expectFail(base({ targets: { t1: { ...TARGET, direction: "sideways" } } }), 'expected one of "pull", "push"');
+    });
+
+    it("rejects a bad mode", () => {
+        expectFail(base({ targets: { t1: { ...TARGET, mode: "copy" } } }), 'expected one of "snapshot", "mirror"');
+    });
+
+    it("accepts a mirror target", () => {
+        const parsed = validate(base({ targets: { t1: { ...TARGET, mode: "mirror" } } }));
+        expect(parsed.targets[0].target.mode).toBe("mirror");
+    });
+
+    // Rejected rather than ignored: a mirror keeps one live copy and no
+    // history, so both keys describe behaviour it will never have - and a
+    // silently dropped retention block reads as "my versions are kept".
+    it("rejects retention on a mirror target", () => {
+        expectFail(
+            base({ targets: { t1: { ...TARGET, mode: "mirror", retention: { keepLast: 5 } } } }),
+            "targets.t1.retention",
+            'only valid on a "snapshot" target',
+        );
+    });
+
+    it("rejects retention: false on a mirror target too", () => {
+        expectFail(base({ targets: { t1: { ...TARGET, mode: "mirror", retention: false } } }), "targets.t1.retention");
+    });
+
+    it("rejects minFree on a mirror target", () => {
+        expectFail(
+            base({ targets: { t1: { ...TARGET, mode: "mirror", minFree: "5%" } } }),
+            "targets.t1.minFree",
+            'only valid on a "snapshot" target',
+        );
+    });
+
+    // The jail pins every rsync destination to <root>/<target>/<snap>.partial,
+    // which is what confines the --delete it also permits. A mirror writes the
+    // root itself, so a jailed push mirror would be rejected by the archive
+    // host on every single transfer - a mystery failure unless it is refused here.
+    it("rejects a jailed push mirror (the jail's default) with a fix for each way out", () => {
+        expectFail(
+            base({ targets: { t1: { ...TARGET, mode: "mirror", direction: "push" } } }),
+            "targets.t1.jail",
+            'a "mirror" push cannot be jailed',
+            '"jail": false',
+        );
+    });
+
+    it("rejects an explicitly jailed push mirror too", () => {
+        expectFail(
+            base({ targets: { t1: { ...TARGET, mode: "mirror", direction: "push", jail: true } } }),
+            "targets.t1.jail",
+        );
+    });
+
+    it("accepts a push mirror that writes down jail: false", () => {
+        const parsed = validate(
+            base({ targets: { t1: { ...TARGET, mode: "mirror", direction: "push", jail: false } } }),
+        );
+        expect(parsed.targets[0].target.jail).toBe(false);
+    });
+
+    it("a PULL mirror needs no such declaration - there is no jail on that side", () => {
+        expect(() => validate(base({ targets: { t1: { ...TARGET, mode: "mirror" } } }))).not.toThrow();
+    });
+
+    it("keeps every other knob available on a mirror", () => {
+        const parsed = validate(
+            base({
+                targets: {
+                    t1: {
+                        ...TARGET,
+                        mode: "mirror",
+                        exclude: ["*.tmp"],
+                        schedule: { interval: "hour" },
+                        retry: { attempts: 3 },
+                        rsync: { bwlimit: "10M", verify: true },
+                        enabled: false,
+                    },
+                },
+            }),
+        );
+        expect(parsed.targets[0].target.rsync).toEqual({ bwlimit: "10M", verify: true });
+        expect(parsed.targets[0].target.retry).toEqual({ attempts: 3 });
     });
 
     it("rejects an unknown remote reference listing the configured names", () => {
@@ -740,8 +823,65 @@ describe("cross-field rules", () => {
                 },
             }),
             "targets.db.destination",
-            "snapshot root /srv/backups/web/db collides with targets.web's snapshot root /srv/backups/web",
+            "write root /srv/backups/web/db collides with targets.web's write root /srv/backups/web",
         );
+    });
+
+    // A mirror's write root is its destination itself, and it transfers with
+    // `--delete --force` - so a mirror pointed at a directory that CONTAINS
+    // another target's archive would delete that archive on its first run.
+    // This is the one config mistake in this file that destroys data instead
+    // of failing, which is what makes the check load-bearing rather than tidy.
+    it("rejects a snapshot archive sitting inside a mirror's destination", () => {
+        expectFail(
+            base({
+                targets: {
+                    clone: { ...TARGET, mode: "mirror", destination: "/srv/backups" },
+                    db: { ...TARGET, destination: "/srv/backups/nested" },
+                },
+            }),
+            "targets.db.destination",
+            "collides with targets.clone's write root /srv/backups",
+        );
+    });
+
+    it("rejects a mirror nested inside another target's snapshot root", () => {
+        expectFail(
+            base({
+                targets: {
+                    web: { ...TARGET, destination: "/srv/backups" },
+                    clone: { ...TARGET, mode: "mirror", destination: "/srv/backups/web/inside" },
+                },
+            }),
+            "targets.clone.destination",
+            "collides with targets.web's write root /srv/backups/web",
+        );
+    });
+
+    it("rejects two mirrors sharing one destination", () => {
+        expectFail(
+            base({
+                targets: {
+                    a: { ...TARGET, mode: "mirror", destination: "/srv/clone" },
+                    b: { ...TARGET, mode: "mirror", source: "/other", destination: "/srv/clone" },
+                },
+            }),
+            "targets.b.destination",
+            "write root /srv/clone collides",
+        );
+    });
+
+    it("allows a mirror beside a snapshot archive in the same parent", () => {
+        expect(() =>
+            validate(
+                base({
+                    targets: {
+                        web: { ...TARGET, destination: "/srv/backups" },
+                        clone: { ...TARGET, mode: "mirror", destination: "/srv/clone" },
+                    },
+                }),
+            ),
+        ).not.toThrow();
     });
 
     // The push jail bakes the LITERAL destination into the authorized_keys
@@ -777,7 +917,7 @@ describe("cross-field rules", () => {
         ["a double quote", '/srv/"backups"'],
     ] as const)("rejects a push destination with %s", (_label, destination) => {
         expectFail(
-            base({ targets: { web: { direction: "push", remote: "r1", source: "/var/www", destination } } }),
+            base({ targets: { web: { mode: "snapshot", direction: "push", remote: "r1", source: "/var/www", destination } } }),
             "targets.web.destination",
             "a push destination may not contain whitespace or quote characters",
         );
@@ -793,7 +933,7 @@ describe("cross-field rules", () => {
     it("still accepts a clean push destination", () => {
         expect(() =>
             validate(
-                base({ targets: { web: { direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" } } }),
+                base({ targets: { web: { mode: "snapshot", direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" } } }),
             ),
         ).not.toThrow();
     });
@@ -817,7 +957,7 @@ describe("cross-field rules", () => {
                     db: { ...TARGET, destination: "/srv/backups/web" },
                 },
             }),
-            "snapshot root",
+            "write root",
         );
     });
 
@@ -840,8 +980,9 @@ describe("cross-field rules", () => {
                 base({
                     remotes: { r1: REMOTE, r2: { ...REMOTE, host: "10.0.0.12" } },
                     targets: {
-                        web: { direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" },
+                        web: { mode: "snapshot", direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" },
                         db: {
+                            mode: "snapshot",
                             direction: "push",
                             remote: "r2",
                             source: "/var/db",
@@ -857,11 +998,11 @@ describe("cross-field rules", () => {
         expectFail(
             base({
                 targets: {
-                    web: { direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" },
-                    db: { direction: "push", remote: "r1", source: "/var/db", destination: "/srv/backups/web" },
+                    web: { mode: "snapshot", direction: "push", remote: "r1", source: "/var/www", destination: "/srv/backups" },
+                    db: { mode: "snapshot", direction: "push", remote: "r1", source: "/var/db", destination: "/srv/backups/web" },
                 },
             }),
-            "snapshot root",
+            "write root",
         );
     });
 
@@ -872,6 +1013,7 @@ describe("cross-field rules", () => {
                     targets: {
                         web: { ...TARGET, destination: "/srv/backups" },
                         db: {
+                            mode: "snapshot",
                             direction: "push",
                             remote: "r1",
                             source: "/var/db",
@@ -896,6 +1038,7 @@ describe("error message shape", () => {
             '    "remotes": { "r1": { "host": "10.0.0.11", "user": "u", "identityFile": "/k/id" } },',
             '    "targets": {',
             '        "web": {',
+            '            "mode": "snapshot",',
             '            "direction": "pull",',
             '            "remote": "r1",',
             '            "source": "/var/www",',
@@ -911,10 +1054,10 @@ describe("error message shape", () => {
         } catch (error) {
             const configError = error as ConfigError;
             expect(configError.message).toBe(
-                'test.jsonc:9: targets.web.schedule.on: "on" is only valid for interval "week"',
+                'test.jsonc:10: targets.web.schedule.on: "on" is only valid for interval "week"',
             );
             expect(configError.file).toBe("test.jsonc");
-            expect(configError.line).toBe(9);
+            expect(configError.line).toBe(10);
             expect(configError.path).toBe("targets.web.schedule.on");
         }
     });

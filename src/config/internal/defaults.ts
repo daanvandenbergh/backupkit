@@ -98,9 +98,14 @@ export function resolveConfig(
         const src = target.direction === "pull" ? remoteEndpoint(target.source) : localEndpoint(target.source);
         const dst =
             target.direction === "pull" ? localEndpoint(target.destination) : remoteEndpoint(target.destination);
-        const minFreeText = target.minFree === undefined ? "5%" : target.minFree;
+        // A mirror has no growing archive to guard and no history to prune, so
+        // neither knob resolves to anything for it. The validator already
+        // refuses both keys on a mirror target; this is the resolver half of
+        // the same fact, so no downstream code has to re-derive it from `mode`.
+        const minFreeText = target.mode === "mirror" ? false : (target.minFree ?? "5%");
         return {
             name,
+            mode: target.mode,
             direction: target.direction,
             remoteName: target.remote,
             remoteRef,
@@ -108,7 +113,10 @@ export function resolveConfig(
             destination: target.destination,
             exclude: target.exclude ?? [],
             schedule: resolveSchedule(target.schedule),
-            retention: target.retention === false ? null : (target.retention ?? topRetention),
+            retention:
+                target.mode === "mirror" || target.retention === false
+                    ? null
+                    : (target.retention ?? topRetention),
             retry: { attempts: target.retry?.attempts ?? 5 },
             minFree: minFreeText === false ? null : parseMinFree(minFreeText),
             rsync: {

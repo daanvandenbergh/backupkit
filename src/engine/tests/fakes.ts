@@ -142,6 +142,7 @@ export class FakeStore implements SnapshotStore {
 export function makeTarget(overrides: Partial<ResolvedTarget> = {}): ResolvedTarget {
     return {
         name: "web",
+        mode: "snapshot",
         direction: "pull",
         remoteName: "example",
         remoteRef: { kind: "alias", restrictedShell: false, name: "example", alias: "example" },

@@ -8,7 +8,7 @@ import { loadConfig, resolveConfigPath } from "../config.js";
 /** A minimal valid config text. */
 const VALID_CONFIG = `{
     "remotes": { "r1": { "host": "10.0.0.11", "user": "u", "identityFile": "/k/id" } },
-    "targets": { "t1": { "direction": "pull", "remote": "r1", "source": "/var/www", "destination": "/srv/backups" } },
+    "targets": { "t1": { "mode": "snapshot", "direction": "pull", "remote": "r1", "source": "/var/www", "destination": "/srv/backups" } },
 }`;
 
 let root: string;

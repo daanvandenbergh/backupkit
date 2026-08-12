@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Backupkit, defaultRuntimeDir } from "../backupkit.js";
 import { writeTargetReport } from "../internal/reports.js";
 import { ConfigError, TransferError } from "../../shared/errors.js";
+import type { ResolvedTarget } from "../../config/types.js";
 import type { ResolvedRemote } from "../../shared/types.js";
 import {
     captureLogger,
@@ -1231,5 +1232,89 @@ describe("Backupkit", () => {
         } finally {
             await rm(root, { recursive: true, force: true });
         }
+    });
+});
+
+/**
+ * Mirror targets at the engine level: the in-place destination, window dedup
+ * driven by the run reports instead of an archive listing, and the four verbs
+ * that only make sense over a snapshot archive.
+ */
+describe("Backupkit mirror targets", () => {
+    const fixtures: KitFixture[] = [];
+
+    /** Track a fixture for cleanup. */
+    function track(fixture: KitFixture): KitFixture {
+        fixtures.push(fixture);
+        return fixture;
+    }
+
+    /** A kit whose single target mirrors into the fixture's archive root. */
+    async function mirrorKit(target: Partial<ResolvedTarget> = {}): Promise<KitFixture> {
+        return track(await makeKit({ target: { mode: "mirror", retention: null, minFree: null, ...target } }));
+    }
+
+    afterEach(async () => {
+        for (const fixture of fixtures.splice(0)) {
+            await rm(fixture.root, { recursive: true, force: true });
+        }
+    });
+
+    it("run --force: writes the destination in place - no target subdirectory, no snapshot", async () => {
+        const { kit, destination, stateDir } = await mirrorKit();
+        const report = await kit.run({ force: true });
+        expect(report.targets[0].status).toBe("success");
+        expect(report.targets[0].snapshot).toBeNull();
+        // The fake transfer writes into whatever dst the pipeline chose.
+        expect(existsSync(join(destination, "a.txt"))).toBe(true);
+        expect(existsSync(join(destination, "web"))).toBe(false);
+        // No lock directory is ever created inside the mirrored tree - it would
+        // be deleted by the transfer's own --delete on the next run.
+        expect(existsSync(join(destination, ".backupkit.lock"))).toBe(false);
+        expect(await readdir(join(stateDir, "runs", "web"))).toEqual(["2026-08-10T120000Z_web.json"]);
+    });
+
+    // A mirror writes no snapshot, so its run reports are the ONLY record that
+    // the window was fulfilled. Without that record it would re-run every tick.
+    it("run: the window is fulfilled by the run report, not by an archive listing", async () => {
+        const { kit, clock } = await mirrorKit();
+        await kit.run({ force: true });
+        clock.now = new Date("2026-08-10T13:00:00Z"); // same day window
+        expect((await kit.run()).targets).toHaveLength(0);
+        clock.now = new Date("2026-08-11T00:30:00Z"); // next window
+        expect((await kit.run()).targets).toHaveLength(1);
+    });
+
+    it("status: the row is dated from the last completed run and never reports a lock", async () => {
+        const { kit } = await mirrorKit();
+        await kit.run({ force: true });
+        const [row] = await kit.status();
+        expect(row.lastSnapshot).toBeNull();
+        expect(row.lastResult).toBe("success");
+        expect(row.lockHeld).toBe(false);
+        // Fulfilled for today, so the next daily window's anchor.
+        expect(row.nextDueAt).toBe("2026-08-11T00:00:00.000Z");
+    });
+
+    it("listSnapshots and prune skip a mirror rather than reading its tree as an archive", async () => {
+        const fixture = await mirrorKit();
+        // Directories inside the mirrored tree that happen to look like
+        // snapshots are the USER'S OWN FILES - never archive entries.
+        await mkdir(join(fixture.destination, "2026-08-02T000000Z"), { recursive: true });
+        expect(await fixture.kit.listSnapshots()).toEqual([]);
+        expect((await fixture.kit.prune()).targets).toEqual([]);
+        expect(existsSync(join(fixture.destination, "2026-08-02T000000Z"))).toBe(true);
+    });
+
+    it("restore refuses a mirror and points at the destination", async () => {
+        const fixture = await mirrorKit();
+        await expect(
+            fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.root, "out") }),
+        ).rejects.toThrow(/is a mirror/);
+    });
+
+    it("unlock reports a mirror as holding nothing (it takes no lock)", async () => {
+        const { kit } = await mirrorKit();
+        expect(await kit.unlock()).toEqual([{ target: "web", status: "none", detail: "" }]);
     });
 });

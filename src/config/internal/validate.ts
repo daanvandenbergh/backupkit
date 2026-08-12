@@ -505,6 +505,7 @@ class Validator {
     private validateTarget(node: JsoncNode, path: string): TargetConfig {
         const obj = this.expectObject(node, path);
         this.rejectUnknownKeys(obj, path, [
+            "mode",
             "direction",
             "remote",
             "source",
@@ -518,12 +519,17 @@ class Validator {
             "jail",
             "enabled",
         ]);
-        for (const required of ["direction", "remote", "source", "destination"]) {
+        // `mode` is required with NO default, unlike every other optional knob:
+        // "snapshot" keeps every previous version, "mirror" overwrites and
+        // deletes in place, and a config that forgot to say which one it wants
+        // must not be resolved into either by silence.
+        for (const required of ["mode", "direction", "remote", "source", "destination"]) {
             if (!obj.entries.has(required)) {
                 this.fail(obj, `${path}.${required}`, "required field missing");
             }
         }
         const target: TargetConfig = {
+            mode: this.expectEnum(obj.entries.get("mode")!, `${path}.mode`, ["snapshot", "mirror"] as const),
             direction: this.expectEnum(obj.entries.get("direction")!, `${path}.direction`, ["pull", "push"] as const),
             remote: this.expectString(obj.entries.get("remote")!, `${path}.remote`),
             source: this.expectPath(obj.entries.get("source")!, `${path}.source`, false),
@@ -556,6 +562,17 @@ class Validator {
         }
         const retentionNode = obj.entries.get("retention");
         if (retentionNode !== undefined) {
+            // Rejected, never ignored: a mirror keeps exactly one copy, so a
+            // retention block on it describes history that will never exist -
+            // and silently dropping it would read as "my snapshots are kept
+            // for a year" to whoever wrote it.
+            if (target.mode === "mirror") {
+                this.fail(
+                    retentionNode,
+                    `${path}.retention`,
+                    'retention is only valid on a "snapshot" target - a mirror keeps no history to prune',
+                );
+            }
             if (retentionNode.kind === "boolean" && !retentionNode.value) {
                 target.retention = false;
             } else if (retentionNode.kind === "boolean") {
@@ -582,6 +599,17 @@ class Validator {
         }
         const minFreeNode = obj.entries.get("minFree");
         if (minFreeNode !== undefined) {
+            // The disk guard's premise is a destination that GROWS by one
+            // snapshot per run; a mirror replaces its tree in place and frees
+            // as much as it writes, so the floor has nothing to protect.
+            if (target.mode === "mirror") {
+                this.fail(
+                    minFreeNode,
+                    `${path}.minFree`,
+                    'minFree is only valid on a "snapshot" target - a mirror replaces its destination in place ' +
+                        "rather than adding a snapshot to it",
+                );
+            }
             if (minFreeNode.kind === "boolean" && !minFreeNode.value) {
                 target.minFree = false;
             } else {
@@ -624,6 +652,31 @@ class Validator {
             }
             target.jail = this.expectBool(jailNode, `${path}.jail`);
         }
+        // Cross-field rule: a JAILED push cannot be a mirror, and this has to be
+        // refused here or it fails as a mystery at run time. The jail's forced
+        // command pins every rsync destination to `$ROOT/<target>/<snap>.partial`
+        // - that pin is precisely what makes the `--delete --force` it also
+        // permits harmless, since a delete can then only reach inside the scratch
+        // partial of the run in flight. A mirror's destination IS `$ROOT`, so the
+        // jail rejects its every transfer; and it could not safely be taught to
+        // accept one, because "delete anything under $ROOT the sender no longer
+        // has" is the exact command the jail exists to refuse.
+        //
+        // So a push mirror is an unjailed key by construction, and it must SAY so:
+        // `jail` defaults to true on push, and silently flipping that default for
+        // a mirror would downgrade the archive host's protection without the
+        // operator ever writing it down.
+        if (target.mode === "mirror" && target.direction === "push" && (target.jail ?? true)) {
+            this.fail(
+                jailNode ?? obj,
+                `${path}.jail`,
+                'a "mirror" push cannot be jailed: the forced command pins every transfer to ' +
+                    "<destination>/<target>/<snapshot>.partial, which is what keeps its permitted --delete " +
+                    "confined - a mirror writes the destination root itself. Set \"jail\": false to accept " +
+                    "that this key has whatever access the server grants it, or use \"mode\": \"snapshot\", " +
+                    "or mirror in the other direction with \"direction\": \"pull\"",
+            );
+        }
         const enabledNode = obj.entries.get("enabled");
         if (enabledNode !== undefined) {
             target.enabled = this.expectBool(enabledNode, `${path}.enabled`);
@@ -632,15 +685,21 @@ class Validator {
     }
 
     /**
-     * Cross-field rule: no target's snapshot root (`<destination>/<name>`)
-     * may equal or nest inside another target's snapshot root within the same
-     * storage location (local for pull, the target's remote for push).
+     * Cross-field rule: no target's write root may equal or nest inside
+     * another's within the same storage location (local for pull, the target's
+     * remote for push). The root is `<destination>/<name>` for a snapshot
+     * target and `<destination>` itself for a mirror.
+     *
+     * Mirrors are why this rule is now load-bearing rather than tidy: a mirror
+     * transfers with `--delete --force`, so a mirror whose destination CONTAINS
+     * another target's archive deletes that archive on its first run - the one
+     * config mistake in this file that destroys data rather than failing.
      */
     private checkSnapshotRoots(targets: ValidatedTarget[], nodes: Map<string, JsoncNode>): void {
         const roots: { name: string; scope: string; root: string }[] = targets.map(({ name, target }) => ({
             name,
             scope: target.direction === "pull" ? "local" : `remote:${target.remote}`,
-            root: `${normalizePath(target.destination)}/${name}`,
+            root: target.mode === "mirror" ? normalizePath(target.destination) : `${normalizePath(target.destination)}/${name}`,
         }));
         for (let i = 0; i < roots.length; i += 1) {
             for (let j = 0; j < i; j += 1) {
@@ -656,7 +715,7 @@ class Validator {
                     this.fail(
                         node,
                         `targets.${b.name}.destination`,
-                        `snapshot root ${b.root} collides with targets.${a.name}'s snapshot root ${a.root} - choose a distinct destination`,
+                        `write root ${b.root} collides with targets.${a.name}'s write root ${a.root} - choose a distinct destination`,
                     );
                 }
             }

@@ -41,7 +41,7 @@ import {
     writeTargetReport,
 } from "./internal/reports.js";
 import { backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "./internal/scheduler.js";
-import { runTarget, type TargetRunnerDeps } from "./internal/target-runner.js";
+import { runMirror, runTarget, type MirrorRunnerDeps, type TargetRunnerDeps } from "./internal/target-runner.js";
 import type {
     CheckReport,
     JailLine,
@@ -530,6 +530,17 @@ export class Backupkit {
      * `TimeoutStopSec` even when the archive host has gone unresponsive.
      */
     private storeFor(target: ResolvedTarget, context: SshContext, signal?: AbortSignal): SnapshotStore {
+        // A mirror target has no snapshot store, and opening one for it would
+        // not merely be useless - the store root would be `<destination>/<name>`,
+        // a path INSIDE the mirrored tree, so listing it would report whatever
+        // the source happens to have there and removing from it would delete the
+        // user's own files. Every caller must branch on `mode` before asking;
+        // this is the backstop that turns "forgot to" into a crash.
+        if (target.mode === "mirror") {
+            throw new ConfigError(
+                `target ${target.name} is a mirror - it has no snapshot store (this is a bug: the caller should have skipped it)`,
+            );
+        }
         const log = this.log.with({ target: target.name });
         return openStore(
             { name: target.name, dst: target.dst, jail: target.jail },
@@ -590,9 +601,24 @@ export class Backupkit {
         }
     }
 
-    /** The newest complete snapshot name of a target, or null when the archive is empty. */
-    private async newestComplete(target: ResolvedTarget): Promise<string | null> {
-        return (await this.storeFor(target, "unattended").listComplete()).at(-1) ?? null;
+    /**
+     * When a target last fulfilled a schedule window, or null when it never
+     * has - the single input to every due-ness decision (`run`, the scheduler
+     * tick, and the `status` row).
+     *
+     * The two modes answer from different records, and it has to be this way. A
+     * snapshot target answers from its ARCHIVE, because the archive is the truth
+     * about what exists: a snapshot another writer (a manual run on another
+     * host, an operator's `--force`) put there fulfils the window just as well
+     * as one of ours. A mirror writes no snapshot and keeps no history, so its
+     * only record that a window was fulfilled is its own run reports.
+     */
+    private async lastFulfilledAt(target: ResolvedTarget): Promise<Date | null> {
+        if (target.mode === "mirror") {
+            return deriveBackoff(await readTargetReports(this.config.stateDir, target.name, this.log)).lastSuccessAt;
+        }
+        const newest = (await this.storeFor(target, "unattended").listComplete()).at(-1) ?? null;
+        return newest === null ? null : parseSnapshotName(newest);
     }
 
     /** Resolve target names to targets in CONFIG order; unknown names are a ConfigError listing the valid ones. */
@@ -749,7 +775,24 @@ export class Backupkit {
 
         const wasDiskLow = this.diskLowTargets.has(target.name);
         let report = await this.remoteGate(target);
-        if (report === null) {
+        if (report === null && target.mode === "mirror") {
+            const { bin } = await this.localRsync();
+            const mirrorDeps: MirrorRunnerDeps = {
+                log: this.log.with({ target: target.name }),
+                now: this.deps.now,
+                rsyncBin: bin,
+                sshTokens: this.sshCommandFor(remoteOf(target)),
+                env: this.childEnvFor(target),
+                transfer: this.deps.transfer,
+                estimate: this.deps.estimate,
+                execFn: this.deps.execFn,
+                previousStats: async () =>
+                    newestStats(await readTargetReports(this.config.stateDir, target.name, this.log)),
+                lastRunAt: () => this.lastFulfilledAt(target),
+            };
+            // No lock to contend for, so nothing can throw LockHeldError here.
+            report = await runMirror(target, mirrorDeps, options);
+        } else if (report === null) {
             const { bin } = await this.localRsync();
             const deps: TargetRunnerDeps = {
                 store: this.storeFor(target, "unattended", options.signal),
@@ -877,9 +920,7 @@ export class Backupkit {
                     });
                     continue;
                 }
-                const newest = await this.newestComplete(target);
-                const newestDate = newest === null ? null : parseSnapshotName(newest);
-                if (!isDue(target.schedule, newestDate, now)) {
+                if (!isDue(target.schedule, await this.lastFulfilledAt(target), now)) {
                     continue;
                 }
             }
@@ -935,7 +976,7 @@ export class Backupkit {
             now: this.deps.now,
             tickMs: this.deps.tickMs,
             backoff: this.backoff,
-            listNewest: (target) => this.newestComplete(target),
+            lastFulfilledAt: (target) => this.lastFulfilledAt(target),
             runTarget: (target) => this.runOne(target, { signal }),
             recordOutcome: async (target, status, reason, error) => {
                 const report = this.syntheticReport(target, status, reason, sanitize(error));
@@ -980,12 +1021,23 @@ export class Backupkit {
                 derived.lastFailedAt === null || derived.consecutiveFailures === 0
                     ? null
                     : new Date(derived.lastFailedAt.getTime() + backoffDelayMs(derived.consecutiveFailures));
-            const newestDate = derived.lastSnapshot === null ? null : parseSnapshotName(derived.lastSnapshot);
+            // Deliberately NOT `lastFulfilledAt`: `status` is documented as
+            // read-only and always instant, and that method lists the archive
+            // (an ssh round-trip for a push target). Reports are what it reads,
+            // so a snapshot another writer added shows up here only after this
+            // host's next run - the same trade this row has always made.
+            const newestDate =
+                target.mode === "mirror"
+                    ? derived.lastSuccessAt
+                    : derived.lastSnapshot === null
+                      ? null
+                      : parseSnapshotName(derived.lastSnapshot);
             // ponytail: lockHeld is knowable instantly only for local stores; a
             // remote lock probe would be an ssh round-trip, so push targets
             // report false here (the run/prune verbs still see the real lock).
+            // A mirror takes no lock at all, so it always reports false.
             let lockHeld = false;
-            if (target.dst.kind === "local") {
+            if (target.mode !== "mirror" && target.dst.kind === "local") {
                 lockHeld = await lstat(join(target.dst.path, target.name, ".backupkit.lock")).then(
                     () => true,
                     () => false,
@@ -1017,6 +1069,11 @@ export class Backupkit {
         await this.preflight();
         const infos: SnapshotInfo[] = [];
         for (const target of this.selectTargets(options.targets)) {
+            // A mirror has no snapshots - it has one live copy at its
+            // destination - so it contributes no rows.
+            if (target.mode === "mirror") {
+                continue;
+            }
             for (const name of await this.storeFor(target, "unattended").listComplete()) {
                 const createdAt = parseSnapshotName(name);
                 if (createdAt !== null) {
@@ -1049,6 +1106,13 @@ export class Backupkit {
         await this.preflight();
         const rows: TargetUnlockReport[] = [];
         for (const target of this.selectTargets(options.targets)) {
+            // A mirror never takes the destination lock, so it can never leak
+            // one. Reported as "none" rather than skipped: an operator who named
+            // it explicitly gets an answer for every target they asked about.
+            if (target.mode === "mirror") {
+                rows.push({ target: target.name, status: "none", detail: "" });
+                continue;
+            }
             try {
                 const outcome = await this.storeFor(target, "unattended").unlock(options.force === true);
                 rows.push({
@@ -1074,6 +1138,12 @@ export class Backupkit {
         if (target === undefined) {
             throw new ConfigError(
                 `unknown target "${sanitize(options.target)}" (configured: ${this.config.targets.map((t) => t.name).join(", ")})`,
+            );
+        }
+        if (target.mode === "mirror") {
+            throw new RestoreError(
+                `target ${target.name} is a mirror, not a snapshot archive - it holds one live copy and no history, ` +
+                    `so there is nothing to restore FROM a point in time. Copy from ${sanitize(target.destination)} directly.`,
             );
         }
         await this.preflight();
@@ -1203,6 +1273,10 @@ export class Backupkit {
         await this.preflight();
         const reports: TargetPruneReport[] = [];
         for (const target of this.selectTargets(options.targets)) {
+            // A mirror has no snapshots to plan over and nothing to prune.
+            if (target.mode === "mirror") {
+                continue;
+            }
             const store = this.storeFor(target, "unattended");
             const errors: string[] = [];
 

@@ -40,10 +40,18 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
         // "myserver": { "alias": "myserver" },
     },
 
-    // What to back up. The key is the target name: it becomes the snapshot
-    // subdirectory (<destination>/<name>/<timestamp>/) and the log identifier.
+    // What to back up. The key is the target name: for a snapshot target it is
+    // the snapshot subdirectory (<destination>/<name>/<timestamp>/), and for
+    // every target it is the log identifier.
     "targets": {
         "example-var-www": {
+            // Required on every target, no default.
+            // "snapshot": versioned archive at <destination>/<name>/<timestamp>/,
+            //   hardlinked against the previous snapshot, pruned by retention.
+            // "mirror": <destination> IS the tree - one in-place copy of the
+            //   source, no history, no retention. Anything in the destination
+            //   that the source does not have is DELETED.
+            "mode": "snapshot",
             // "pull": this machine fetches from the remote (recommended).
             // "push": this machine sends to the remote. Recommended: jail the key
             // with the forced command \`backupkit check\` prints; or set
@@ -54,6 +62,8 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
             // Directory to back up. pull: path ON the remote. push: local path.
             "source": "/var/www",
             // Archive root. pull: local path. push: path ON the remote.
+            // snapshot mode writes <destination>/<name>/<timestamp>/;
+            // mirror mode writes <destination> itself.
             "destination": "/srv/backups",
             // rsync exclude patterns.
             "exclude": ["cache/", "*.tmp"],
@@ -76,6 +86,25 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
             // false = configured but never scheduled.
             // "enabled": true,
         },
+
+        // A mirror target: keep one directory an exact in-place copy of another
+        // (two clones of the same tree, not an archive). No snapshots, no
+        // history, no "retention" or "minFree" keys - and anything the source
+        // no longer has is deleted from the destination on the next run.
+        // A push mirror must also write "jail": false: the forced command pins
+        // every transfer to <destination>/<target>/<snapshot>.partial, which is
+        // what keeps its permitted --delete confined, and a mirror writes the
+        // destination root itself. Mirror the other way ("direction": "pull")
+        // to keep the archive host in control of the transfer.
+        // "persistance": {
+        //     "mode": "mirror",
+        //     "direction": "push",
+        //     "remote": "myserver",
+        //     "source": "/home/me/persistance",
+        //     "destination": "/srv/persistance",
+        //     "jail": false,
+        //     "schedule": { "interval": "hour" },
+        // },
     },
 
     // Default retention for targets that define none. A snapshot survives if ANY

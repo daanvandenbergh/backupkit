@@ -12,7 +12,6 @@ import type { ResolvedTarget } from "../../config/types.js";
 import type { Logger } from "../../shared/logger.js";
 import { isBackupkitError } from "../../shared/errors.js";
 import { formatUtc } from "../../shared/format.js";
-import { parseSnapshotName } from "../../shared/snapshot-name.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
 import type { RunStatus, TargetRunReport } from "../types.js";
@@ -37,8 +36,9 @@ export function backoffDelayMs(consecutiveFailures: number): number {
 /**
  * When a target is next due: the current window's anchor if unfulfilled, else
  * the next window's anchor - pushed out to `backoffUntil` when a failure
- * backoff is active. Pure; `newest` is the parsed time of the newest complete
- * snapshot (or null).
+ * backoff is active. Pure; `newest` is when the target last fulfilled a window
+ * (the newest complete snapshot's time, or - for a mirror, which writes none -
+ * the start of its newest completed run), or null when it never has.
  */
 export function nextDueAt(schedule: ScheduleSpec, newest: Date | null, backoffUntil: Date | null, now: Date): Date {
     const index = windowIndex(schedule, now);
@@ -138,8 +138,13 @@ export interface SchedulerDeps {
     tickMs?: number;
     /** Run one target now and return its (already persisted) report. */
     runTarget: (target: ResolvedTarget) => Promise<TargetRunReport>;
-    /** Newest complete snapshot name for a target (called once per target, then cached from reports). */
-    listNewest: (target: ResolvedTarget) => Promise<string | null>;
+    /**
+     * When a target last fulfilled a schedule window - the time of its newest
+     * complete snapshot, or for a mirror target (which writes none) the start
+     * of its newest completed run. Called once per target, then cached from the
+     * reports the loop itself produces.
+     */
+    lastFulfilledAt: (target: ResolvedTarget) => Promise<Date | null>;
     /**
      * Persist a report for a target whose run left no report of its own, and
      * feed the backoff tracker with it. Used by BOTH failure paths in the tick -
@@ -164,8 +169,8 @@ export class Scheduler {
     /** Injected dependencies. */
     private readonly deps: SchedulerDeps;
 
-    /** Cached newest-complete snapshot name per target (avoids per-tick store I/O). */
-    private readonly newestCache = new Map<string, string | null>();
+    /** Cached last-fulfilled time per target (avoids per-tick store I/O). */
+    private readonly newestCache = new Map<string, Date | null>();
 
     /** True once stop() was called; the loop exits at the next check. */
     private stopping = false;
@@ -226,7 +231,7 @@ export class Scheduler {
             let newest = this.newestCache.get(target.name);
             if (newest === undefined) {
                 try {
-                    newest = await this.deps.listNewest(target);
+                    newest = await this.deps.lastFulfilledAt(target);
                 } catch (error) {
                     // A failed due check is a FAILED RUN, not a quiet skip. For a
                     // push target this listing is an ssh round-trip, so every
@@ -251,19 +256,29 @@ export class Scheduler {
                 }
                 this.newestCache.set(target.name, newest);
             }
-            const newestDate = newest === null ? null : parseSnapshotName(newest);
-            if (!isDue(target.schedule, newestDate, now)) {
+            if (!isDue(target.schedule, newest, now)) {
                 continue;
             }
             try {
                 const report = await this.deps.runTarget(target);
-                if ((report.status === "success" || report.status === "warning") && report.snapshot !== null) {
-                    this.newestCache.set(target.name, report.snapshot);
+                if (report.status === "success" || report.status === "warning") {
+                    // The run's own start time, not its snapshot name: a snapshot
+                    // is named for exactly that instant, and a mirror run has no
+                    // name at all. An unparseable time is dropped rather than
+                    // cached - an Invalid Date compares false against every
+                    // window, so caching one would make this target due on every
+                    // 30 s tick for the rest of the process's life.
+                    const fulfilled = new Date(report.startedAt);
+                    if (Number.isNaN(fulfilled.getTime())) {
+                        this.newestCache.delete(target.name);
+                    } else {
+                        this.newestCache.set(target.name, fulfilled);
+                    }
                 } else if (report.status === "skipped" && report.reason === "window") {
-                    // A complete snapshot this loop did not create already fulfils
-                    // the window (a manual run, --force, or another writer): drop
-                    // the stale cache so the next tick re-lists instead of
-                    // re-entering the pipeline every 30 s for the rest of the window.
+                    // Something this loop did not create already fulfils the
+                    // window (a manual run, --force, or another writer): drop the
+                    // stale cache so the next tick re-reads instead of re-entering
+                    // the pipeline every 30 s for the rest of the window.
                     this.newestCache.delete(target.name);
                 }
             } catch (error) {

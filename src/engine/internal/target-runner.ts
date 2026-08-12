@@ -1,10 +1,19 @@
 /**
- * The per-target run pipeline (spec section 3): everything inside
+ * The per-target run pipelines and a `TargetRunReport` on every path.
+ *
+ * `runTarget` is the SNAPSHOT pipeline (spec section 3): everything inside
  * `store.withLock` - sweep/claim the partial, window dedup, clock-skew guard,
  * disk guard, transfer with retries into `<name>.partial`, optional verify
- * pass, promote on 0/23/24, retention - and a `TargetRunReport` on every
- * path. `LockHeldError` is the one error that escapes (engine policy: it
- * aborts the invocation); everything else lands in the report.
+ * pass, promote on 0/23/24, retention. `LockHeldError` is the one error that
+ * escapes (engine policy: it aborts the invocation); everything else lands in
+ * the report.
+ *
+ * `runMirror` is the MIRROR pipeline: window dedup, collapse guard, transfer
+ * straight into `<destination>`, optional verify pass. It shares the argv
+ * builder and the retry loop and nothing else - there is no snapshot store, so
+ * no lock, no partial, no promote, and no retention. The two are separate
+ * functions with separate dependency sets rather than one function with a mode
+ * flag, so neither can be handed a seam the other needs and it does not.
  */
 
 import { join, posix } from "node:path";
@@ -85,11 +94,21 @@ function partialEndpoint(target: ResolvedTarget, snapName: string): Endpoint {
     return { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, target.name, leaf) };
 }
 
-/** Build the TransferSpec for this run (argv is derived from it identically in every mode). */
-function specFor(target: ResolvedTarget, snapName: string, linkDestBase: string | null, deps: TargetRunnerDeps): TransferSpec {
+/**
+ * Build the TransferSpec for one run (argv is derived from it identically in
+ * every mode). `dst` is the `<snap>.partial` endpoint for a snapshot run and
+ * the destination root itself for a mirror run; `linkDestBase` is always null
+ * for a mirror, which has no previous snapshot to hardlink against.
+ */
+function specFor(
+    target: ResolvedTarget,
+    dst: Endpoint,
+    linkDestBase: string | null,
+    sshTokens: string[],
+): TransferSpec {
     return {
         src: target.src,
-        dst: partialEndpoint(target, snapName),
+        dst,
         options: {
             compress: target.rsync.compress,
             bwlimit: target.rsync.bwlimit,
@@ -100,7 +119,7 @@ function specFor(target: ResolvedTarget, snapName: string, linkDestBase: string 
             remoteRsyncBin: target.rsync.remoteRsyncBin,
         },
         exclude: target.exclude,
-        sshTokens: deps.sshTokens,
+        sshTokens,
         linkDestBase,
         // The receiver-uid decision: --fake-super when the receiving side is
         // THIS process and it is not root. ponytail: remote receivers (push)
@@ -111,8 +130,8 @@ function specFor(target: ResolvedTarget, snapName: string, linkDestBase: string 
 }
 
 /**
- * Content-collapse tripwire threshold: a new snapshot whose file count is below
- * this fraction of the previous run's is treated as a collapse.
+ * Content-collapse tripwire threshold: a run whose file count is below this
+ * fraction of the previous run's is treated as a collapse.
  *
  * Why it exists: every transfer runs `--delete --force`, so a compromised source
  * that presents an empty (or selectively emptied) tree on each scheduled run
@@ -121,11 +140,21 @@ function specFor(target: ResolvedTarget, snapName: string, linkDestBase: string 
  * a source can destroy its own archive despite the jail, and it contradicts the
  * README's promise that a compromised source cannot corrupt the archive.
  *
+ * A MIRROR has no snapshot to fall back on, so the same threshold is applied
+ * one step earlier there - to the pre-transfer estimate, refusing the run
+ * outright - because "promote and skip retention" has no mirror equivalent: by
+ * the time a mirror's transfer has run, the previous contents are already gone.
+ * That is the same failure this wire exists for (a source that presents an empty
+ * or emptied tree), reached by the shorter path: an unmounted volume, a
+ * half-restored home directory, a compromised sender.
+ *
  * ponytail: one flat halving, file count only, no per-target knob. rsync's
  * `--info=stats2` reports the transferred delta but never the tree's total size,
  * so bytes are not a usable signal here - the file count is. A halving is well
- * clear of normal churn; if a project legitimately halves its file count it
- * loses one prune cycle and `backupkit prune` clears the backlog.
+ * clear of normal churn; if a project legitimately halves its file count a
+ * snapshot target loses one prune cycle (`backupkit prune` clears the backlog)
+ * and a mirror target skips one run (`backupkit run --force <target>` performs
+ * it, which is the operator confirming the shrink is real).
  */
 const COLLAPSE_FRACTION = 0.5;
 
@@ -171,11 +200,213 @@ function isContentChangeLine(line: string): boolean {
     return /^[<>ch*]/.test(line);
 }
 
+/** Everything one MIRROR run needs beyond the target itself - every seam injectable for tests. */
+export interface MirrorRunnerDeps {
+    /** Logger (already child-scoped to the target by the caller). */
+    log: Logger;
+    /** Clock. */
+    now: () => Date;
+    /** Absolute local rsync binary (already probed against the version floor). */
+    rsyncBin: string;
+    /** Prebuilt ssh token array for this target's remote ([] for local-only transfers). */
+    sshTokens: string[];
+    /** COMPLETE child env for rsync spawns (exec semantics), or undefined for exec's minimal default. */
+    env: Record<string, string> | undefined;
+    /** The transfer function (production: rsync/'s runTransfer). */
+    transfer: typeof runTransfer;
+    /** The pre-transfer estimator (production: rsync/'s dryRunStats) - the collapse guard's only input. */
+    estimate: typeof dryRunStats;
+    /** Spawn function for the verify pass and forwarded into transfer/estimate. */
+    execFn: ExecFn;
+    /**
+     * Stats of this target's newest run that completed a transfer, or null when
+     * there is no such run on record - the baseline for the collapse guard.
+     * Called at most once per run, BEFORE the transfer.
+     */
+    previousStats: () => Promise<RunStats | null>;
+    /**
+     * When this target last completed a run, or null when it never has - the
+     * window-dedup input. A mirror writes no snapshot, so its run reports are
+     * the only record that a schedule window was fulfilled.
+     */
+    lastRunAt: () => Promise<Date | null>;
+}
+
 /**
- * Run one target through the full pipeline and return its report - on every
- * path except live lock contention (`LockHeldError` is rethrown; the engine
- * aborts the invocation / the scheduler skips the tick). The caller persists
- * the report and feeds the backoff tracker.
+ * Run one MIRROR target: window dedup, pre-transfer estimate, collapse guard,
+ * transfer straight into `<destination>`, optional verify pass. Returns a
+ * report on every path; nothing escapes (there is no lock to contend for).
+ *
+ * What this pipeline deliberately does NOT have, and why: no lock (the store's
+ * lock directory would live inside the mirrored tree, where `--delete` would
+ * remove it), no `.partial` and no promote (the destination IS the tree - there
+ * is nothing to promote it from), no retention (no history), and no disk guard
+ * (a mirror frees roughly what it writes instead of adding a snapshot).
+ *
+ * What it keeps is the guard that matters here: every transfer runs `--delete
+ * --force`, and a mirror cannot undo one, so the collapse check runs BEFORE the
+ * transfer and refuses it. `--force` is the operator's override.
+ */
+export async function runMirror(
+    target: ResolvedTarget,
+    deps: MirrorRunnerDeps,
+    options: TargetRunOptions = {},
+): Promise<TargetRunReport> {
+    const start = deps.now();
+    const attempts: TransferAttempt[] = [];
+    let stats: RunStats | null = null;
+    let skippedFiles: string[] = [];
+    let contentCollapse: TargetRunReport["contentCollapse"] = null;
+
+    /** Assemble the final report. A mirror has no snapshot and no archive listing, so those fields stay null. */
+    const report = (status: TargetRunReport["status"], reason: string | null, error: string | null): TargetRunReport => ({
+        runId: runIdFor(start, target.name),
+        target: target.name,
+        direction: target.direction,
+        snapshot: null,
+        status,
+        reason,
+        startedAt: start.toISOString(),
+        finishedAt: deps.now().toISOString(),
+        attempts,
+        stats,
+        skippedFiles,
+        error,
+        contentCollapse,
+        historyInsertion: null,
+        completeCount: null,
+    });
+
+    try {
+        // Window dedup: this target already completed a run in the current
+        // schedule bucket = idempotent skip. The snapshot pipeline asks the
+        // archive listing; a mirror has none, so it asks its own run reports.
+        if (options.force !== true) {
+            const last = await deps.lastRunAt();
+            if (last !== null && windowIndex(target.schedule, last) === windowIndex(target.schedule, start)) {
+                deps.log.info("this target already ran in the current schedule window - skipping", {
+                    lastRunAt: last.toISOString(),
+                });
+                return report("skipped", "window", null);
+            }
+        }
+
+        const spec = specFor(target, target.dst, null, deps.sshTokens);
+        const execWithSignal: ExecFn = (bin, args, execOptions) =>
+            deps.execFn(bin, args, { ...execOptions, signal: options.signal });
+
+        // The estimate is NOT optional here the way the disk guard's is: it is
+        // the collapse guard's only view of the source, and it is the last point
+        // at which this run can still be refused.
+        const estimated = await deps.estimate({
+            rsyncBin: deps.rsyncBin,
+            spec,
+            log: deps.log,
+            env: deps.env,
+            execFn: execWithSignal,
+        });
+        stats = {
+            filesTransferred: 0,
+            bytesTransferred: 0,
+            totalFiles: estimated.totalFiles,
+            deltaBytes: estimated.totalTransferredSize,
+        };
+
+        if (options.force !== true) {
+            contentCollapse = collapseAgainst(await deps.previousStats(), stats);
+        }
+        if (contentCollapse !== null) {
+            deps.log.error("content collapse: the source holds far fewer files than at the last run - refusing to mirror", {
+                previousFiles: contentCollapse.previousFiles,
+                files: contentCollapse.files ?? "unmeasured",
+                destination: sanitize(target.destination),
+                hint:
+                    "a mirror deletes whatever the source no longer has, and cannot undo it - check that the source is " +
+                    "fully mounted and intact, then run `backupkit run --force " +
+                    `${target.name}\` to mirror it anyway`,
+            });
+            // A dry run reports the refusal rather than becoming one: it wrote
+            // nothing either way, and "this is what a real run would do" is the
+            // whole point of asking.
+            return options.dryRun === true
+                ? report("success", "dry-run", null)
+                : report(
+                      "failed",
+                      "content-collapse",
+                      `source holds ${contentCollapse.files ?? "an unmeasurable number of"} files against ` +
+                          `${contentCollapse.previousFiles} at the last run - transfer refused`,
+                  );
+        }
+        if (options.dryRun === true) {
+            return report("success", "dry-run", null);
+        }
+
+        const result = await deps.transfer({
+            rsyncBin: deps.rsyncBin,
+            spec,
+            retryAttempts: target.retry.attempts,
+            log: deps.log,
+            env: deps.env,
+            signal: options.signal,
+            execFn: execWithSignal,
+            attemptLog: attempts,
+        });
+        skippedFiles = result.skippedFiles.slice(0, 100);
+        stats =
+            result.stats === null
+                ? null
+                : {
+                      filesTransferred: result.stats.filesTransferred,
+                      bytesTransferred: result.stats.totalTransferredSize,
+                      totalFiles: result.stats.totalFiles,
+                      deltaBytes: result.stats.totalTransferredSize,
+                  };
+
+        // Optional verify pass. Unlike the snapshot pipeline's, a failure here
+        // cannot withhold anything - the destination is already updated - so it
+        // is a loud failed report and nothing more.
+        if (target.rsync.verify) {
+            const verifyResult = await execWithSignal(deps.rsyncBin, buildArgs(spec, "verify"), { env: deps.env });
+            if (options.signal?.aborted === true) {
+                deps.log.warn("run aborted");
+                return report("aborted", "aborted", "aborted during verify pass");
+            }
+            const changed = verifyResult.stdout
+                .split("\n")
+                .map((line) => line.trim())
+                .filter((line) => line !== "" && isContentChangeLine(line));
+            if ((verifyResult.exitCode !== 0 && verifyResult.exitCode !== 24) || changed.length > 0) {
+                const sample = changed.slice(0, 20).map(sanitize).join(", ");
+                deps.log.error("verify pass failed - the mirror does not match its source", {
+                    exitCode: verifyResult.exitCode ?? "signal",
+                    changedLines: changed.length,
+                });
+                return report(
+                    "failed",
+                    "verify-failed",
+                    `verify pass found differences (exit ${verifyResult.exitCode ?? "signal"})${sample === "" ? "" : `: ${sample}`}`,
+                );
+            }
+        }
+
+        deps.log.info("mirror updated", { destination: sanitize(target.destination), status: result.status });
+        return report(result.status, null, null);
+    } catch (error) {
+        const message = sanitize(error instanceof Error ? error.message : String(error));
+        if (options.signal?.aborted === true) {
+            deps.log.warn("run aborted");
+            return report("aborted", "aborted", message);
+        }
+        deps.log.error("run failed", { error: message });
+        return report("failed", null, message);
+    }
+}
+
+/**
+ * Run one SNAPSHOT target through the full pipeline and return its report - on
+ * every path except live lock contention (`LockHeldError` is rethrown; the
+ * engine aborts the invocation / the scheduler skips the tick). The caller
+ * persists the report and feeds the backoff tracker.
  */
 export async function runTarget(
     target: ResolvedTarget,
@@ -260,7 +491,7 @@ export async function runTarget(
                 return report("failed", "clock-skew", `new snapshot ${snapName} would sort <= newest complete ${newest}`);
             }
 
-            const spec = specFor(target, snapName, newest, deps);
+            const spec = specFor(target, partialEndpoint(target, snapName), newest, deps.sshTokens);
 
             // Every child in the pipeline - estimate, transfer, verify - gets the
             // engine's shutdown signal, so graceful stop SIGTERMs whichever rsync

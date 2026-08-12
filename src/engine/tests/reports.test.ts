@@ -171,6 +171,30 @@ describe("deriveBackoff", () => {
         ]);
         expect(derived.lastSnapshot).toBe("2026-08-10T110000Z");
     });
+
+    // A mirror target writes no snapshot, so this is the only record it has
+    // that a schedule window was fulfilled - without it, every tick would find
+    // the target due and re-run it.
+    it("dates the newest completed run even when it recorded no snapshot", () => {
+        const derived = deriveBackoff([
+            makeReport({ status: "failed", startedAt: "2026-08-10T13:00:00.000Z", snapshot: null }),
+            makeReport({ status: "success", startedAt: "2026-08-10T12:00:00.000Z", snapshot: null }),
+            makeReport({ status: "success", startedAt: "2026-08-09T12:00:00.000Z", snapshot: null }),
+        ]);
+        expect(derived.lastSuccessAt?.toISOString()).toBe("2026-08-10T12:00:00.000Z");
+        expect(derived.lastSnapshot).toBeNull();
+        expect(derived.consecutiveFailures).toBe(1);
+    });
+
+    it("has no completion date when the target never completed a run", () => {
+        expect(deriveBackoff([seq("failed"), seq("skipped")]).lastSuccessAt).toBeNull();
+        expect(deriveBackoff([]).lastSuccessAt).toBeNull();
+    });
+
+    it("an unparseable startedAt degrades to null rather than to an Invalid Date", () => {
+        const derived = deriveBackoff([makeReport({ status: "success", startedAt: "not a date" })]);
+        expect(derived.lastSuccessAt).toBeNull();
+    });
 });
 
 describe("newestStats - the content-collapse baseline", () => {

@@ -8,7 +8,7 @@ import type { ResolvedConfig } from "../types.js";
 const REMOTE = { host: "10.0.0.11", user: "backup-reader", identityFile: "/etc/backupkit/keys/id" };
 
 /** A minimal valid pull target referencing remote "r1". */
-const TARGET = { direction: "pull", remote: "r1", source: "/var/www", destination: "/srv/backups" };
+const TARGET = { mode: "snapshot", direction: "pull", remote: "r1", source: "/var/www", destination: "/srv/backups" };
 
 /** Default non-root environment fixture. */
 const USER_ENV: ResolveEnvironment = { euid: 501, env: {}, homeDir: "/home/u", platform: "linux" };
@@ -94,6 +94,33 @@ describe("resolveConfig defaults", () => {
         });
         expect(target.enabled).toBe(true);
         expect(target.jail).toBe(false);
+    });
+
+    it("carries the mode through untouched", () => {
+        expect(resolve(minimal()).targets[0].mode).toBe("snapshot");
+        expect(resolve(minimal({ target: { mode: "mirror" } })).targets[0].mode).toBe("mirror");
+    });
+
+    // The resolver half of "a mirror has no history and no growing archive":
+    // the validator refuses both KEYS on a mirror, and this makes sure the
+    // top-level retention default and the "5%" minFree default cannot reach one
+    // through the back door either.
+    it("resolves a mirror with no retention and no free-space floor", () => {
+        const config = resolve(
+            minimal({
+                target: { mode: "mirror" },
+                top: { retention: { keepLast: 7, keepDaily: 14 } },
+            }),
+        );
+        expect(config.retention).toEqual({ keepLast: 7, keepDaily: 14 });
+        expect(config.targets[0].retention).toBeNull();
+        expect(config.targets[0].minFree).toBeNull();
+    });
+
+    it("a snapshot target still inherits both defaults", () => {
+        const config = resolve(minimal({ top: { retention: { keepLast: 7 } } }));
+        expect(config.targets[0].retention).toEqual({ keepLast: 7 });
+        expect(config.targets[0].minFree).toEqual({ kind: "percent", percent: 5 });
     });
 
     it("defaults jail to true for a push target and honors an explicit false", () => {
