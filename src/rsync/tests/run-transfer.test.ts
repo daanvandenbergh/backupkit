@@ -197,6 +197,23 @@ describe("runTransfer: retry wiring", () => {
         });
         expect(outcome.ok?.attempts[0].class).toBe("warning");
         expect(lines.some((l) => l.includes("exclude"))).toBe(true);
+        // rsync's own reason travels with the path: "fix the permissions" is the
+        // wrong advice for a source directory that is not there at all.
+        expect(lines.some((l) => l.includes("/var/www/secret.txt (Permission denied)"))).toBe(true);
+    });
+
+    it("exit 23 on a source that is not there carries rsync's reason, not a permissions guess", async () => {
+        const stderr = [
+            'rsync: [sender] change_dir "/mnt/photos" failed: No such file or directory (2)',
+            "rsync error: some files/attrs were not transferred (see previous errors) (code 23) at main.c(1338)",
+        ].join("\n");
+        const { fn } = queuedExec([res({ exitCode: 23, stderr })]);
+        const { log, lines } = captureLogger();
+        const outcome = await settle(
+            runTransfer({ rsyncBin: "/bin/rsync", spec: localSpec(), retryAttempts: 5, log, execFn: fn }),
+        );
+        expect(outcome.ok?.skippedFiles).toEqual(["/mnt/photos"]);
+        expect(lines.some((l) => l.includes("/mnt/photos (No such file or directory)"))).toBe(true);
     });
 
     it("exit 23 caps the extracted paths at 100", async () => {

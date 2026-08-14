@@ -390,7 +390,7 @@ export async function runMirror(
         }
 
         deps.log.info(
-            `backup finished${result.status === "warning" ? " with warnings (see above)" : ""} - ${sanitize(target.destination)} now mirrors the source`,
+            `backup finished${result.status === "warning" ? " (with warnings, see above) - " : " - "}${sanitize(target.destination)}${result.status === "warning" ? " updated" : " now mirrors the source"}`,
         );
         return report(result.status, null, null);
     } catch (error) {
@@ -621,7 +621,7 @@ export async function runTarget(
             // Promote: atomic rename <name>.partial -> <name>.
             await deps.store.promote(snapName);
             deps.log.info(
-                `backup finished${result.status === "warning" ? " with warnings (see above)" : ""} - saved as snapshot ${snapName}`,
+                `backup finished${result.status === "warning" ? " (with warnings)" : ""} - saved as snapshot ${snapName}`,
             );
 
             // Content-collapse tripwire (see COLLAPSE_FRACTION): a source that

@@ -19,6 +19,7 @@ import type {
     TargetStatus,
     TargetUnlockReport,
 } from "../../engine/types.js";
+import { formatBytes } from "../../shared/format.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
 /** The exec/ spawn function shape used by the service/logs passthroughs. */
@@ -200,35 +201,95 @@ const VERDICT: Record<RunStatus, string> = {
 };
 
 /**
+ * Plain English for each machine-readable skip/failure `reason`. A person
+ * reading `skipped db - window` learns nothing; the reason codes stay in the
+ * persisted reports and in `--json`, and this is the only place they are
+ * turned into a sentence for a terminal. A code with no entry here falls back
+ * to itself rather than printing "undefined".
+ */
+const REASON_TEXT: Record<string, string> = {
+    window: "already backed up in this schedule window - run again now with --force",
+    "disk-low": "not enough free disk space",
+    "clock-skew": "this host's clock is behind the newest snapshot",
+    "verify-failed": "the copy does not match the source",
+    aborted: "stopped before it finished",
+    "dry-run": "dry run - nothing was written",
+    "remote-unavailable": "the backup server could not be reached",
+    "content-collapse": "the source holds far fewer files than last time",
+    "lock-held": "another backupkit run is already working on this target",
+};
+
+/**
+ * The one detail clause after a target's verdict: what was written, and - when
+ * the verdict is anything but a clean success - WHY. Without it a run ends on
+ * a bare "WARNING <target>", which names the target but not the problem, and
+ * sends the reader back up the scrollback to find out whether their data is
+ * actually backed up.
+ */
+function runDetail(target: RunReport["targets"][number]): string {
+    const parts: string[] = [];
+    if (target.snapshot !== null) {
+        parts.push(`snapshot ${target.snapshot}`);
+    }
+    if (target.stats !== null && (target.status === "success" || target.status === "warning")) {
+        parts.push(`${count(target.stats.filesTransferred, "file")} copied, ${formatBytes(target.stats.bytesTransferred)}`);
+    }
+    if (target.reason !== null) {
+        parts.push(REASON_TEXT[target.reason] ?? target.reason);
+    }
+    if (target.skippedFiles.length > 0) {
+        const first = target.skippedFiles[0];
+        const more = target.skippedFiles.length > 1 ? ` and ${target.skippedFiles.length - 1} more` : "";
+        parts.push(
+            `${count(target.skippedFiles.length, "path")} could not be read and ${target.skippedFiles.length === 1 ? "is" : "are"} NOT in this backup: ${first}${more}`,
+        );
+    }
+    if (target.error !== null) {
+        parts.push(target.error);
+    }
+    return parts.join("; ");
+}
+
+/**
  * Print one line per target of a run report and a closing summary; returns the
  * number of failed targets. Shared by `run` (whose exit code is that count) and
  * by `start --force` (whose immediate pass reports the same way before the
  * scheduler takes over).
+ *
+ * The closing line counts WARNINGS as well as failures. "none failed" on its
+ * own is true of a run that skipped an unreadable file and of a run that
+ * copied everything, and those are not the same news: the first leaves data
+ * out of the backup, and the reader has to be told so on the last line they
+ * read, not only in a warning further up.
  */
 export function printRunReport(report: RunReport, stdout: (line: string) => void): number {
     let failed = 0;
+    let warned = 0;
+    let skipped = 0;
     for (const target of report.targets) {
-        const detail = [
-            target.snapshot === null ? null : `snapshot ${target.snapshot}`,
-            target.reason === null ? null : target.reason,
-            target.error === null ? null : target.error,
-        ]
-            .filter((part) => part !== null)
-            .join("; ");
+        const detail = runDetail(target);
         stdout(`${VERDICT[target.status]} ${target.target}${detail === "" ? "" : ` - ${detail}`}`);
         if (target.status === "failed") {
             failed += 1;
+        } else if (target.status === "warning") {
+            warned += 1;
+        } else if (target.status === "skipped" || target.status === "aborted") {
+            skipped += 1;
         }
     }
     // Always a closing line: with several targets the per-target rows scroll,
     // and "did the whole pass succeed?" is the one question the exit code
     // answers but a terminal full of rows does not.
     const total = report.targets.length;
-    stdout(
-        failed === 0
-            ? `Done - ${count(total, "target")} processed, none failed.`
-            : `Done - ${failed} of ${count(total, "target")} FAILED. See the lines above, or run: backupkit logs`,
-    );
+    if (failed > 0) {
+        stdout(`Done - ${failed} of ${count(total, "target")} FAILED. See the lines above, or run: backupkit logs`);
+    } else {
+        const notes = [
+            warned === 0 ? null : `${warned} with warnings: backed up, but not everything is in it (see above)`,
+            skipped === 0 ? null : `${skipped} not backed up (see above)`,
+        ].filter((note) => note !== null);
+        stdout(`Done - ${count(total, "target")} processed${notes.length === 0 ? ", all OK." : `, ${notes.join(", ")}.`}`);
+    }
     return failed;
 }
 

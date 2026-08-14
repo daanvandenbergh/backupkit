@@ -23,8 +23,8 @@ describe("run", () => {
         expect(h.engine.calls[0]).toEqual({ method: "run", options: { targets: ["web"], force: true, dryRun: true } });
         expect(h.out).toEqual([
             "OK      web - snapshot 2026-08-10T031500Z",
-            "skipped db - disk-low",
-            "Done - 2 targets processed, none failed.",
+            "skipped db - not enough free disk space",
+            "Done - 2 targets processed, 1 not backed up (see above).",
         ]);
     });
 
@@ -42,10 +42,27 @@ describe("run", () => {
         ]);
     });
 
+    it("a warning target names what is missing and the closing line says the backup is incomplete", async () => {
+        const h = fakeDeps();
+        h.engine.runReport = {
+            startedAt: "s",
+            finishedAt: "f",
+            targets: [makeRunReport({ status: "warning", skippedFiles: ["/home/x/.gnupg/S.gpg-agent"] })],
+        };
+        expect(await main(["run"], h.deps)).toBe(0);
+        expect(h.out).toEqual([
+            "WARNING web - snapshot 2026-08-10T031500Z; 1 path could not be read and is NOT in this backup: /home/x/.gnupg/S.gpg-agent",
+            "Done - 1 target processed, 1 with warnings: backed up, but not everything is in it (see above).",
+        ]);
+    });
+
     it("says so when nothing was due and wires signal handling to engine.stop", async () => {
         const h = fakeDeps();
         expect(await main(["run"], h.deps)).toBe(0);
-        expect(h.out).toEqual(["Nothing to do - no target is due yet. Run them all anyway with: backupkit run --force"]);
+        expect(h.out).toEqual([
+            "Nothing to do - every target has already been backed up for its current schedule window. " +
+                "See when each is next due with: backupkit status - or back them all up now with: backupkit run --force",
+        ]);
         expect(h.stops).toHaveLength(1);
         await h.stops[0]();
         expect(h.engine.calls.map((call) => call.method)).toContain("stop");
@@ -103,7 +120,7 @@ describe("start", () => {
             h.out[0],
             "Running every target once now (--force), then scheduling.",
             "OK      web - snapshot 2026-08-10T031500Z",
-            "Done - 1 target processed, none failed.",
+            "Done - 1 target processed, all OK.",
             "Scheduler stopped cleanly.",
         ]);
     });

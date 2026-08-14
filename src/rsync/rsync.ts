@@ -209,23 +209,31 @@ const SKIPPED_FILES_CAP = 100;
 
 /**
  * Extract up to 100 offending paths from an exit-23 stderr: the first
- * double-quoted string of each rsync error line, sanitized.
+ * double-quoted string of each rsync error line, sanitized, each with rsync's
+ * own reason for it when the line carries one ("Permission denied", "No such
+ * file or directory"). The reason is what keeps the warning honest: the same
+ * exit 23 covers an unreadable file and a source directory that is not there
+ * at all, and telling someone whose volume is unmounted to "fix the
+ * permissions" sends them after the wrong thing.
  */
-function extractSkippedPaths(stderr: string): string[] {
-    const paths: string[] = [];
+function extractSkippedPaths(stderr: string): { path: string; reason: string | null }[] {
+    const found: { path: string; reason: string | null }[] = [];
     for (const line of stderr.split("\n")) {
-        if (paths.length >= SKIPPED_FILES_CAP) {
+        if (found.length >= SKIPPED_FILES_CAP) {
             break;
         }
         if (!line.startsWith("rsync")) {
             continue;
         }
         const match = /"([^"]+)"/.exec(line);
-        if (match !== null) {
-            paths.push(sanitize(match[1]));
+        if (match === null) {
+            continue;
         }
+        // rsync's tail is `...: <reason> (<errno>)`; keep the words, drop the number.
+        const reason = /:\s*([A-Za-z][^:()]*?)\s*\(\d+\)\s*$/.exec(line);
+        found.push({ path: sanitize(match[1]), reason: reason === null ? null : reason[1] });
     }
-    return paths;
+    return found;
 }
 
 /**
@@ -280,16 +288,20 @@ export async function runTransfer(params: {
                     stderrTail: tail,
                 });
             }
-            const skippedFiles = result.exitCode === 23 ? extractSkippedPaths(result.stderr) : [];
+            const skipped = result.exitCode === 23 ? extractSkippedPaths(result.stderr) : [];
+            const skippedFiles = skipped.map((entry) => entry.path);
             if (result.exitCode === 23) {
                 // ponytail: names the first 5 paths inline - the full list (capped at 100) is on the result.
-                const shown = skippedFiles.slice(0, 5).join(", ");
-                const more = skippedFiles.length > 5 ? ` and ${skippedFiles.length - 5} more` : "";
-                const one = skippedFiles.length === 1;
+                const shown = skipped
+                    .slice(0, 5)
+                    .map((entry) => (entry.reason === null ? entry.path : `${entry.path} (${entry.reason})`))
+                    .join(", ");
+                const more = skipped.length > 5 ? ` and ${skipped.length - 5} more` : "";
+                const one = skipped.length === 1;
                 params.log.warn(
-                    `could not read ${one ? "1 file" : `${skippedFiles.length} files`}, so ${one ? "it was" : "they were"} not backed up` +
+                    `could not read ${one ? "1 path" : `${skipped.length} paths`}, so ${one ? "it is" : "they are"} NOT in this backup` +
                         `${shown === "" ? "" : `: ${shown}${more}`}. ` +
-                        `Everything else was copied. Fix the permissions, or add ${one ? "it" : "them"} to this target's "exclude" list to silence this.`,
+                        `Check that ${one ? "it exists and is readable" : "they exist and are readable"}, or add ${one ? "it" : "them"} to this target's "exclude" list.`,
                 );
             } else if (result.exitCode === 24) {
                 params.log.warn(
