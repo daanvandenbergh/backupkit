@@ -729,7 +729,7 @@ export class Backupkit {
         }
         const keyFailure = this.keyFailures.get(remote.name);
         if (keyFailure !== undefined) {
-            this.log.error("remote unavailable - target fails without transfer", {
+            this.log.error("the SSH key for this backup server could not be loaded, so this target cannot run", {
                 target: target.name,
                 remote: remote.name,
                 error: keyFailure,
@@ -741,7 +741,7 @@ export class Backupkit {
             return null;
         } catch (error) {
             const message = sanitize(error instanceof Error ? error.message : String(error));
-            this.log.error("remote rsync probe failed - target fails without transfer", {
+            this.log.error("could not reach this target's backup server (rsync check failed), so this target cannot run", {
                 target: target.name,
                 remote: remote.name,
                 error: message,
@@ -914,7 +914,7 @@ export class Backupkit {
                 const until = this.backoff.untilFor(target.name);
                 const now = this.deps.now();
                 if (until !== null && now.getTime() < until.getTime()) {
-                    this.log.info("target in failure backoff - skipping", {
+                    this.log.info("skipping this target for now - its last run failed, so backupkit is waiting before trying again", {
                         target: target.name,
                         nextAttemptAt: formatUtc(until),
                     });
@@ -933,7 +933,7 @@ export class Backupkit {
                 // runOne has already persisted this target's skipped report, so
                 // `status` and the backoff history see it; nothing is pushed into
                 // `reports` because the rethrow below discards them anyway.
-                this.log.warn("destination lock held - target skipped, continuing with the remaining targets", {
+                this.log.warn("another backupkit run is already working on this target - skipped it and carried on with the rest", {
                     target: target.name,
                     error: sanitize(error.message),
                 });
@@ -1125,7 +1125,7 @@ export class Backupkit {
                 }
             } catch (error) {
                 const message = sanitize(error instanceof Error ? error.message : String(error));
-                this.log.error("unlock failed", { target: target.name, error: message });
+                this.log.error("could not remove the lock", { target: target.name, error: message });
                 rows.push({ target: target.name, status: "failed", detail: message });
             }
         }

@@ -84,7 +84,7 @@ describe("withTransientRetry", () => {
         await expect(promise).resolves.toBe("ok");
         expect(calls()).toBe(2);
         expect(warns).toHaveLength(1);
-        expect(warns[0]).toContain("list: transient failure, retrying");
+        expect(warns[0]).toContain("list hit a temporary problem - trying again");
         expect(warns[0]).toContain("attempt=2");
         expect(warns[0]).toContain("delayMs=2000");
     });

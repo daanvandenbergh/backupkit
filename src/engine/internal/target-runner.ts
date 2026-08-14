@@ -284,7 +284,7 @@ export async function runMirror(
         if (options.force !== true) {
             const last = await deps.lastRunAt();
             if (last !== null && windowIndex(target.schedule, last) === windowIndex(target.schedule, start)) {
-                deps.log.info("this target already ran in the current schedule window - skipping", {
+                deps.log.info("this target was already backed up in this schedule window - nothing to do", {
                     lastRunAt: last.toISOString(),
                 });
                 return report("skipped", "window", null);
@@ -368,7 +368,7 @@ export async function runMirror(
         if (target.rsync.verify) {
             const verifyResult = await execWithSignal(deps.rsyncBin, buildArgs(spec, "verify"), { env: deps.env });
             if (options.signal?.aborted === true) {
-                deps.log.warn("run aborted");
+                deps.log.warn("backup stopped before it finished (shutdown requested)");
                 return report("aborted", "aborted", "aborted during verify pass");
             }
             const changed = verifyResult.stdout
@@ -377,7 +377,7 @@ export async function runMirror(
                 .filter((line) => line !== "" && isContentChangeLine(line));
             if ((verifyResult.exitCode !== 0 && verifyResult.exitCode !== 24) || changed.length > 0) {
                 const sample = changed.slice(0, 20).map(sanitize).join(", ");
-                deps.log.error("verify pass failed - the mirror does not match its source", {
+                deps.log.error("verification failed - the copy does not match the source", {
                     exitCode: verifyResult.exitCode ?? "signal",
                     changedLines: changed.length,
                 });
@@ -389,15 +389,17 @@ export async function runMirror(
             }
         }
 
-        deps.log.info("mirror updated", { destination: sanitize(target.destination), status: result.status });
+        deps.log.info(
+            `backup finished${result.status === "warning" ? " with warnings (see above)" : ""} - ${sanitize(target.destination)} now mirrors the source`,
+        );
         return report(result.status, null, null);
     } catch (error) {
         const message = sanitize(error instanceof Error ? error.message : String(error));
         if (options.signal?.aborted === true) {
-            deps.log.warn("run aborted");
+            deps.log.warn("backup stopped before it finished (shutdown requested)");
             return report("aborted", "aborted", message);
         }
-        deps.log.error("run failed", { error: message });
+        deps.log.error("backup failed", { error: message });
         return report("failed", null, message);
     }
 }
@@ -451,7 +453,7 @@ export async function runTarget(
             if (options.dryRun !== true) {
                 resumed = (await deps.store.claimPartial(snapName)).resumed;
                 if (resumed) {
-                    deps.log.info("resuming partial snapshot", { snapshot: snapName });
+                    deps.log.info("picking up where the last, unfinished run left off", { snapshot: snapName });
                 }
             }
 
@@ -462,7 +464,7 @@ export async function runTarget(
             if (options.force !== true && newest !== null) {
                 const newestDate = parseSnapshotName(newest);
                 if (newestDate !== null && windowIndex(target.schedule, newestDate) === windowIndex(target.schedule, start)) {
-                    deps.log.info("snapshot already exists in the current schedule window - skipping", { newest });
+                    deps.log.info("this target was already backed up in this schedule window - nothing to do", { newest });
                     return report("skipped", "window", null);
                 }
             }
@@ -522,7 +524,7 @@ export async function runTarget(
                 estimatedDelta = estimated.totalTransferredSize;
                 const totalBytes = await deps.totalBytes();
                 if (target.minFree.kind === "percent" && totalBytes === null) {
-                    deps.log.warn("minFree percent floor cannot be computed for this store (unknown total size) - floor degraded to 0");
+                    deps.log.warn("cannot work out the free-space percentage here (the filesystem total size is unknown), so the minFree percentage is ignored for this run");
                 }
                 const decision = evaluateDiskGuard({
                     deltaBytes: estimatedDelta,
@@ -538,7 +540,7 @@ export async function runTarget(
                 if (!decision.ok) {
                     if (!deps.diskLowTargets.has(target.name)) {
                         deps.diskLowTargets.add(target.name);
-                        deps.log.error("disk low on archive filesystem - skipping run", {
+                        deps.log.error("not enough free disk space for this backup - skipping this run", {
                             requiredBytes: decision.requiredBytes,
                             freeBytes: decision.freeBytes,
                             floorBytes: decision.floorBytes,
@@ -594,7 +596,7 @@ export async function runTarget(
                 // verify failure: "aborted" does not enter failure backoff and the
                 // partial stays for resume (spec section 6).
                 if (options.signal?.aborted === true) {
-                    deps.log.warn("run aborted", { snapshot: snapName });
+                    deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
                     return report("aborted", "aborted", "aborted during verify pass");
                 }
                 const changed = verifyResult.stdout
@@ -604,7 +606,7 @@ export async function runTarget(
                 const verifyOk = (verifyResult.exitCode === 0 || verifyResult.exitCode === 24) && changed.length === 0;
                 if (!verifyOk) {
                     const sample = changed.slice(0, 20).map(sanitize).join(", ");
-                    deps.log.error("verify pass failed - partial kept, not promoted", {
+                    deps.log.error("verification failed - the unfinished snapshot was kept, not saved as a backup", {
                         exitCode: verifyResult.exitCode ?? "signal",
                         changedLines: changed.length,
                     });
@@ -618,7 +620,9 @@ export async function runTarget(
 
             // Promote: atomic rename <name>.partial -> <name>.
             await deps.store.promote(snapName);
-            deps.log.info("snapshot promoted", { snapshot: snapName, status: result.status });
+            deps.log.info(
+                `backup finished${result.status === "warning" ? " with warnings (see above)" : ""} - saved as snapshot ${snapName}`,
+            );
 
             // Content-collapse tripwire (see COLLAPSE_FRACTION): a source that
             // presents an empty or selectively-emptied tree gets its snapshot
@@ -746,10 +750,10 @@ export async function runTarget(
         }
         const message = sanitize(error instanceof Error ? error.message : String(error));
         if (options.signal?.aborted === true) {
-            deps.log.warn("run aborted", { snapshot: snapName });
+            deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
             return report("aborted", "aborted", message);
         }
-        deps.log.error("run failed", { error: message });
+        deps.log.error("backup failed", { error: message });
         return report("failed", null, message);
     }
 }

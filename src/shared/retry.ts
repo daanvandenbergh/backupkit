@@ -117,7 +117,7 @@ export async function withTransientRetry<T>(
             }
             const next = attempt + 1;
             const delayMs = computeRetryDelayMs(next, policy, Math.random());
-            log.warn(`${label}: transient failure, retrying`, { attempt: next, of: policy.attempts, delayMs });
+            log.warn(`${label} hit a temporary problem - trying again`, { attempt: next, of: policy.attempts, delayMs });
             await sleep(delayMs, signal);
             // Aborted while waiting: the backoff woke early precisely so this
             // check happens now rather than after the full delay. Rethrow the

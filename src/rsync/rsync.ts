@@ -282,12 +282,19 @@ export async function runTransfer(params: {
             }
             const skippedFiles = result.exitCode === 23 ? extractSkippedPaths(result.stderr) : [];
             if (result.exitCode === 23) {
+                // ponytail: names the first 5 paths inline - the full list (capped at 100) is on the result.
+                const shown = skippedFiles.slice(0, 5).join(", ");
+                const more = skippedFiles.length > 5 ? ` and ${skippedFiles.length - 5} more` : "";
+                const one = skippedFiles.length === 1;
                 params.log.warn(
-                    "transfer skipped unreadable files (exit 23) - consider adding exclude patterns for them",
-                    { skippedCount: skippedFiles.length },
+                    `could not read ${one ? "1 file" : `${skippedFiles.length} files`}, so ${one ? "it was" : "they were"} not backed up` +
+                        `${shown === "" ? "" : `: ${shown}${more}`}. ` +
+                        `Everything else was copied. Fix the permissions, or add ${one ? "it" : "them"} to this target's "exclude" list to silence this.`,
                 );
             } else if (result.exitCode === 24) {
-                params.log.warn("source files vanished during transfer (exit 24)");
+                params.log.warn(
+                    "some files were deleted while the backup was running, so they are not in it. The rest was copied - this is normal on a live system.",
+                );
             }
             return {
                 status: result.exitCode === 0 ? ("success" as const) : ("warning" as const),

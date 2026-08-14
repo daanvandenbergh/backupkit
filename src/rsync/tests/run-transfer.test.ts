@@ -109,7 +109,7 @@ describe("runTransfer: retry wiring", () => {
             skippedFiles: [],
         });
         expect(outcome.ok?.attempts.map((a: TransferAttempt) => a.class)).toEqual(["transient", "ok"]);
-        expect(lines.filter((l) => l.includes("transient failure, retrying"))).toHaveLength(1);
+        expect(lines.filter((l) => l.includes("hit a temporary problem - trying again"))).toHaveLength(1);
     });
 
     it("every attempt reuses the exact same argv - the same .partial destination", async () => {
@@ -219,7 +219,7 @@ describe("runTransfer: retry wiring", () => {
             runTransfer({ rsyncBin: "/bin/rsync", spec: localSpec(), retryAttempts: 5, log, execFn: fn }),
         );
         expect(outcome.ok).toMatchObject({ status: "warning", skippedFiles: [] });
-        expect(lines.some((l) => l.includes("vanished"))).toBe(true);
+        expect(lines.some((l) => l.includes("deleted while the backup was running"))).toBe(true);
     });
 
     it("exit 11 (disk) -> single attempt, surfaced as a disk error, never retried", async () => {

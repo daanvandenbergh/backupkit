@@ -140,12 +140,12 @@ describe("runTarget pipeline", () => {
         expect(first.status).toBe("skipped");
         expect(first.reason).toBe("disk-low");
         expect(store.calls.some((call) => call.startsWith("promote"))).toBe(false);
-        const errorLines = lines.filter((line) => line.includes("ERROR") && line.includes("disk low"));
+        const errorLines = lines.filter((line) => line.includes("ERROR") && line.includes("not enough free disk space"));
         expect(errorLines).toHaveLength(1);
 
         // Second shortfall run: same state, no second error line.
         await runTarget(target, deps);
-        expect(lines.filter((line) => line.includes("ERROR") && line.includes("disk low"))).toHaveLength(1);
+        expect(lines.filter((line) => line.includes("ERROR") && line.includes("not enough free disk space"))).toHaveLength(1);
 
         // Recovery clears the sticky state.
         store.free = Number.MAX_SAFE_INTEGER;
@@ -629,6 +629,6 @@ describe("runTarget pipeline", () => {
         const { log, lines } = captureLogger();
         const report = await runTarget(makeTarget(), makeDeps(store, { log }));
         expect(report.status).toBe("success");
-        expect(lines.some((line) => line.includes("resuming partial snapshot"))).toBe(true);
+        expect(lines.some((line) => line.includes("picking up where the last, unfinished run left off"))).toBe(true);
     });
 });
