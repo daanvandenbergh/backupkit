@@ -11,6 +11,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { ConfigError } from "../shared/errors.js";
 import { parseJsonc } from "./internal/jsonc.js";
+import { expandHome } from "./internal/home.js";
 import { validateConfig } from "./internal/validate.js";
 import { resolveConfig } from "./internal/defaults.js";
 import type { ResolvedConfig } from "./types.js";
@@ -76,7 +77,12 @@ function defaultProbeDirs(env: Record<string, string | undefined>): string[] {
  * `/bin/sh -c`: root code execution from a path that never reached the gate
  * every explicitly-written path already passes through.
  */
-function normalizeConfigPath(value: string): string {
+function normalizeConfigPath(value: string, home: string): string {
+    const expanded = expandHome(value, home);
+    if ("error" in expanded) {
+        throw new ConfigError(`config file path: ${expanded.error}`);
+    }
+    value = expanded.path;
     if (/[\0\n\r]/.test(value)) {
         throw new ConfigError("config file path may not contain NUL or newline characters");
     }
@@ -102,9 +108,13 @@ function normalizeConfigPath(value: string): string {
  */
 export function resolveConfigPath(cliArg?: string, options?: ResolvePathOptions): string {
     const env = options?.env ?? process.env;
+    // `--config ~/x` normally arrives already expanded by the shell, but
+    // `BACKUPKIT_CONFIG=~/x` in a unit file or a launchd plist does not: there
+    // is no shell there to do it.
+    const home = env.HOME ?? homedir();
     const verbatim = cliArg ?? env.BACKUPKIT_CONFIG;
     if (verbatim !== undefined && verbatim !== "") {
-        const path = normalizeConfigPath(verbatim);
+        const path = normalizeConfigPath(verbatim, home);
         if (!existsSync(path)) {
             throw new ConfigError(`config file not found: ${path}`);
         }
@@ -121,10 +131,10 @@ export function resolveConfigPath(cliArg?: string, options?: ResolvePathOptions)
             throw new ConfigError(`both ${jsonc} and ${json} exist - keep one`);
         }
         if (hasJsonc) {
-            return normalizeConfigPath(jsonc);
+            return normalizeConfigPath(jsonc, home);
         }
         if (hasJson) {
-            return normalizeConfigPath(json);
+            return normalizeConfigPath(json, home);
         }
         probed.push(jsonc, json);
     }
@@ -145,7 +155,8 @@ export function loadConfig(cliArg?: string, options?: LoadConfigOptions): Resolv
         throw new ConfigError(`cannot read config file ${path}: ${(error as Error).message}`, { file: path });
     }
     const root = parseJsonc(text, path);
-    const validated = validateConfig(root, path);
+    const home = options?.homeDir ?? options?.env?.HOME ?? homedir();
+    const validated = validateConfig(root, path, home);
     return resolveConfig(validated, path, {
         euid: options?.euid !== undefined ? options.euid : (process.getuid?.() ?? null),
         env: options?.env ?? process.env,

@@ -6,7 +6,7 @@ import { STARTER_CONFIG } from "../internal/starter.js";
 
 /** Validate the given starter text and resolve it like loadConfig would. */
 function resolveStarter(text: string) {
-    const validated = validateConfig(parseJsonc(text, "config.jsonc"), "config.jsonc");
+    const validated = validateConfig(parseJsonc(text, "config.jsonc"), "config.jsonc", "/home/dan");
     return resolveConfig(validated, "/etc/backupkit/config.jsonc", { euid: 0, env: {}, homeDir: "/root", platform: "linux" });
 }
 

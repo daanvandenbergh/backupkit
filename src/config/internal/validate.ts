@@ -10,6 +10,7 @@
 
 import { ConfigError } from "../../shared/errors.js";
 import { isValidBwlimit, parseMinFree } from "../../shared/format.js";
+import { expandHome } from "./home.js";
 import type {
     AliasRemoteConfig,
     ExplicitRemoteConfig,
@@ -134,13 +135,26 @@ function normalizePath(value: string): string {
     return collapsed.length > 1 ? collapsed.replace(/\/$/, "") : collapsed;
 }
 
+/**
+ * Which host a path field names. `~` expands against the running user's home
+ * for a "local" path and is refused for a "remote" one - see `checkPath`.
+ */
+type PathSide = "local" | "remote";
+
 /** Stateful single-pass validator bound to one file. */
 class Validator {
     /** Non-fatal findings accumulated during validation. */
     readonly warnings: string[] = [];
 
-    /** Bind the validator to the reporting filename. */
-    constructor(private readonly file: string) {}
+    /**
+     * Bind the validator to the reporting filename and the home directory that
+     * `~` expands against (see `expandHome`; the caller passes the running
+     * user's home, so a root service expands against root's).
+     */
+    constructor(
+        private readonly file: string,
+        private readonly home: string,
+    ) {}
 
     /** Throw the fail-first ConfigError: `<file>:<line>: <dotted.path>: <problem>`. */
     private fail(node: JsoncNode, path: string, problem: string): never {
@@ -202,8 +216,9 @@ class Validator {
     }
 
     /**
-     * Require an absolute path with the universal path rules: no `~`, no NUL
-     * or newline, absolute, and no `.` or `..` component. With
+     * Require an absolute path with the universal path rules: a leading `~`
+     * expanded against the running user's home (LOCAL paths only), no NUL or
+     * newline, absolute, and no `.` or `..` component. With
      * `noWhitespaceQuotes` (paths that enter rsync's -e string or a remote
      * command) whitespace and quote characters are also rejected. The RETURNED
      * value is normalized (duplicate slashes collapsed, trailing slash
@@ -221,8 +236,8 @@ class Validator {
      * cases are unrepresentable once every path leaves this function in the
      * same normal form the operands are built in.
      */
-    private expectPath(node: JsoncNode, path: string, noWhitespaceQuotes: boolean): string {
-        return this.checkPath(node, path, this.expectString(node, path), noWhitespaceQuotes);
+    private expectPath(node: JsoncNode, path: string, noWhitespaceQuotes: boolean, side: PathSide): string {
+        return this.checkPath(node, path, this.expectString(node, path), noWhitespaceQuotes, side);
     }
 
     /**
@@ -232,9 +247,28 @@ class Validator {
      * be in the same normal form as every other path there. Errors are reported
      * against the node, at the field's dotted path.
      */
-    private checkPath(node: JsoncNode, path: string, value: string, noWhitespaceQuotes: boolean): string {
+    private checkPath(
+        node: JsoncNode,
+        path: string,
+        value: string,
+        noWhitespaceQuotes: boolean,
+        side: PathSide,
+    ): string {
         if (value.startsWith("~")) {
-            this.fail(node, path, '"~" is not expanded - use an absolute path');
+            // A REMOTE path is not ours to expand: this machine's home says
+            // nothing about the archive host's, and the expansion would be
+            // baked into the jail's $ROOT and every path operand compared
+            // against it. rsync/ssh would expand it on the far side, but only
+            // for some spellings and never for the jail's prefix test - so a
+            // config that looked fine here would fail every transfer there.
+            if (side === "remote") {
+                this.fail(node, path, '"~" is not expanded for a path on the remote - write the absolute path as it is on that host');
+            }
+            const expanded = expandHome(value, this.home);
+            if ("error" in expanded) {
+                this.fail(node, path, expanded.error);
+            }
+            value = expanded.path;
         }
         if (/[\0\n\r]/.test(value)) {
             this.fail(node, path, "path may not contain NUL or newline characters");
@@ -328,7 +362,7 @@ class Validator {
         const remote: ExplicitRemoteConfig = {
             host,
             user,
-            identityFile: this.expectPath(obj.entries.get("identityFile")!, `${path}.identityFile`, true),
+            identityFile: this.expectPath(obj.entries.get("identityFile")!, `${path}.identityFile`, true, "local"),
         };
         const portNode = obj.entries.get("port");
         if (portNode !== undefined) {
@@ -351,11 +385,11 @@ class Validator {
             remote.passphrase =
                 passphrase === "prompt"
                     ? passphrase
-                    : `file:${this.checkPath(passphraseNode, `${path}.passphrase`, passphrase.slice("file:".length), true)}`;
+                    : `file:${this.checkPath(passphraseNode, `${path}.passphrase`, passphrase.slice("file:".length), true, "local")}`;
         }
         const knownHostsNode = obj.entries.get("knownHostsFile");
         if (knownHostsNode !== undefined) {
-            remote.knownHostsFile = this.expectPath(knownHostsNode, `${path}.knownHostsFile`, true);
+            remote.knownHostsFile = this.expectPath(knownHostsNode, `${path}.knownHostsFile`, true, "local");
         }
         const shellNode = obj.entries.get("restrictedShell");
         if (shellNode !== undefined) {
@@ -488,7 +522,7 @@ class Validator {
         }
         const remoteRsyncNode = obj.entries.get("remoteRsyncBin");
         if (remoteRsyncNode !== undefined) {
-            options.remoteRsyncBin = this.expectPath(remoteRsyncNode, `${path}.remoteRsyncBin`, true);
+            options.remoteRsyncBin = this.expectPath(remoteRsyncNode, `${path}.remoteRsyncBin`, true, "remote");
         }
         return options;
     }
@@ -535,12 +569,22 @@ class Validator {
                 this.fail(obj, `${path}.${required}`, "required field missing");
             }
         }
+        // Which of the two paths is on this machine follows from `direction`,
+        // so it is read first: a push reads a local source and writes a remote
+        // destination, a pull the other way round. That is also what decides
+        // whether `~` in each is ours to expand.
+        const direction = this.expectEnum(obj.entries.get("direction")!, `${path}.direction`, ["pull", "push"] as const);
         const target: TargetConfig = {
             mode: this.expectEnum(obj.entries.get("mode")!, `${path}.mode`, ["snapshot", "mirror"] as const),
-            direction: this.expectEnum(obj.entries.get("direction")!, `${path}.direction`, ["pull", "push"] as const),
+            direction,
             remote: this.expectString(obj.entries.get("remote")!, `${path}.remote`),
-            source: this.expectPath(obj.entries.get("source")!, `${path}.source`, false),
-            destination: this.expectPath(obj.entries.get("destination")!, `${path}.destination`, false),
+            source: this.expectPath(obj.entries.get("source")!, `${path}.source`, false, direction === "push" ? "local" : "remote"),
+            destination: this.expectPath(
+                obj.entries.get("destination")!,
+                `${path}.destination`,
+                false,
+                direction === "push" ? "remote" : "local",
+            ),
         };
         // Cross-field rule: a PUSH destination becomes $ROOT inside the archive
         // host's forced command, whose `set -- $CMD` word-splits the remote
@@ -847,7 +891,7 @@ class Validator {
         }
         const stateDirNode = obj.entries.get("stateDir");
         if (stateDirNode !== undefined) {
-            result.stateDir = this.expectPath(stateDirNode, "stateDir", false);
+            result.stateDir = this.expectPath(stateDirNode, "stateDir", false, "local");
         }
         const loggingNode = obj.entries.get("logging");
         if (loggingNode !== undefined) {
@@ -860,16 +904,16 @@ class Validator {
             }
             const fileNode = loggingObj.entries.get("file");
             if (fileNode !== undefined) {
-                result.logging.file = this.expectPath(fileNode, "logging.file", false);
+                result.logging.file = this.expectPath(fileNode, "logging.file", false, "local");
             }
         }
         const rsyncBinNode = obj.entries.get("rsyncBin");
         if (rsyncBinNode !== undefined) {
-            result.rsyncBin = this.expectPath(rsyncBinNode, "rsyncBin", true);
+            result.rsyncBin = this.expectPath(rsyncBinNode, "rsyncBin", true, "local");
         }
         const sshBinNode = obj.entries.get("sshBin");
         if (sshBinNode !== undefined) {
-            result.sshBin = this.expectPath(sshBinNode, "sshBin", true);
+            result.sshBin = this.expectPath(sshBinNode, "sshBin", true, "local");
         }
 
         const referenced = new Set(result.targets.map((entry) => entry.target.remote));
@@ -887,6 +931,6 @@ class Validator {
  * violation with a `<file>:<line>: <dotted.path>: <problem>` ConfigError;
  * collects non-fatal findings as warnings on the returned object.
  */
-export function validateConfig(root: JsoncNode, file: string): ValidatedConfig {
-    return new Validator(file).validate(root);
+export function validateConfig(root: JsoncNode, file: string, home: string): ValidatedConfig {
+    return new Validator(file, home).validate(root);
 }

@@ -45,7 +45,7 @@ describe("published config examples", () => {
         const configs = wholeConfigs(path);
         expect(configs.length).toBeGreaterThan(0);
         for (const body of configs) {
-            expect(() => validateConfig(parseJsonc(body, path), `/etc/backupkit/${path}`)).not.toThrow();
+            expect(() => validateConfig(parseJsonc(body, path), `/etc/backupkit/${path}`, "/home/dan")).not.toThrow();
         }
     });
 });

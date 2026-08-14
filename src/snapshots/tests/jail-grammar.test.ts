@@ -65,7 +65,7 @@ function validatorAccepts(name: string): boolean {
         targets: { [name]: { mode: "snapshot", direction: "pull", remote: "r1", source: "/s", destination: "/d" } },
     };
     try {
-        validateConfig(parseJsonc(JSON.stringify(config), "test.jsonc"), "test.jsonc");
+        validateConfig(parseJsonc(JSON.stringify(config), "test.jsonc"), "test.jsonc", "/home/dan");
         return true;
     } catch {
         return false;

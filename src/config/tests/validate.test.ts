@@ -12,7 +12,7 @@ const TARGET = { mode: "snapshot", direction: "pull", remote: "r1", source: "/va
 
 /** Serialize a plain object as JSON (a strict subset of JSONC) and validate it. */
 function validate(config: unknown): ValidatedConfig {
-    return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "test.jsonc");
+    return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "test.jsonc", "/home/dan");
 }
 
 /** Build a config from the minimal base with deep-ish overrides applied per section. */
@@ -58,14 +58,14 @@ describe("minimal valid config", () => {
             "remotes": { "r1": ${JSON.stringify(REMOTE)} },
             "targets": { "2024": ${target("/srv/a")}, "zeta": ${target("/srv/b")}, "10": ${target("/srv/c")} }
         }`;
-        const result = validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc");
+        const result = validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc", "/home/dan");
         expect(result.targets.map((entry) => entry.name)).toEqual(["2024", "zeta", "10"]);
     });
 });
 
 describe("root level", () => {
     it("rejects a non-object root", () => {
-        expect(() => validateConfig(parseJsonc("[1]", "test.jsonc"), "test.jsonc")).toThrow("expected an object");
+        expect(() => validateConfig(parseJsonc("[1]", "test.jsonc"), "test.jsonc", "/home/dan")).toThrow("expected an object");
     });
 
     it("rejects an unknown root key", () => {
@@ -188,7 +188,6 @@ describe("explicit remotes", () => {
 
     it.each([
         ["a relative path", "keys/id", "must be an absolute path"],
-        ["a tilde path", "~/keys/id", "use an absolute path"],
         ["whitespace in the path", "/etc/backup kit/id", "whitespace or quote"],
         ["a quote in the path", "/etc/backupkit/'id'", "whitespace or quote"],
     ] as const)("rejects identityFile with %s", (_label, identityFile, fragment) => {
@@ -459,7 +458,6 @@ describe("targets", () => {
 
     it.each([
         ["a relative source", { source: "var/www" }, "must be an absolute path"],
-        ["a tilde destination", { destination: "~/backups" }, "use an absolute path"],
         ["a newline in destination", { destination: "/srv/back\nups" }, "NUL or newline"],
     ] as const)("rejects %s", (_label, patch, fragment) => {
         expectFail(base({ targets: { t1: { ...TARGET, ...patch } } }), fragment);
@@ -1084,7 +1082,7 @@ describe("error message shape", () => {
             "}",
         ].join("\n");
         try {
-            validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc");
+            validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc", "/home/dan");
             expect.unreachable("must throw");
         } catch (error) {
             const configError = error as ConfigError;
@@ -1095,5 +1093,81 @@ describe("error message shape", () => {
             expect(configError.line).toBe(10);
             expect(configError.path).toBe("targets.web.schedule.on");
         }
+    });
+});
+
+describe("~ expansion", () => {
+    /** Validate with an explicit home, so the expansion is not the test host's. */
+    function withHome(config: unknown, home: string): ValidatedConfig {
+        return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "test.jsonc", home);
+    }
+
+    it("expands a leading ~ in every local path field", () => {
+        const result = validate(
+            base({
+                remotes: { r1: { ...REMOTE, identityFile: "~/keys/id", knownHostsFile: "~/.ssh/known_hosts" } },
+                targets: { t1: { ...TARGET, destination: "~/backups" } },
+                top: { stateDir: "~/state", logging: { file: "~/logs/backupkit.log" }, rsyncBin: "~/bin/rsync" },
+            }),
+        );
+        const remote = result.remotes[0].remote as { identityFile: string; knownHostsFile?: string };
+        expect(remote.identityFile).toBe("/home/dan/keys/id");
+        expect(remote.knownHostsFile).toBe("/home/dan/.ssh/known_hosts");
+        expect(result.targets[0].target.destination).toBe("/home/dan/backups");
+        expect(result.stateDir).toBe("/home/dan/state");
+        expect(result.logging?.file).toBe("/home/dan/logs/backupkit.log");
+        expect(result.rsyncBin).toBe("/home/dan/bin/rsync");
+    });
+
+    it("expands a bare ~ to the home itself and normalizes what follows", () => {
+        const result = validate(base({ top: { stateDir: "~" } }));
+        expect(result.stateDir).toBe("/home/dan");
+        expect(validate(base({ top: { stateDir: "~//state//" } })).stateDir).toBe("/home/dan/state");
+    });
+
+    it("expands the local side of each direction and refuses the remote side", () => {
+        // pull: source is on the remote, destination is here.
+        expectFail(
+            base({ targets: { t1: { ...TARGET, source: "~/www" } } }),
+            "targets.t1.source",
+            "not expanded for a path on the remote",
+        );
+        // push: the sides swap.
+        const push = { ...TARGET, mode: "mirror", direction: "push", jail: false };
+        expect(validate(base({ targets: { t1: { ...push, source: "~/www" } } })).targets[0].target.source).toBe(
+            "/home/dan/www",
+        );
+        expectFail(
+            base({ targets: { t1: { ...push, destination: "~/backups" } } }),
+            "targets.t1.destination",
+            "not expanded for a path on the remote",
+        );
+    });
+
+    it("refuses remoteRsyncBin, which names a binary on the far side", () => {
+        expectFail(
+            base({ targets: { t1: { ...TARGET, rsync: { remoteRsyncBin: "~/bin/rsync" } } } }),
+            "targets.t1.rsync.remoteRsyncBin",
+            "not expanded for a path on the remote",
+        );
+    });
+
+    it("refuses ~user, which would depend on the machine that parsed the config", () => {
+        expectFail(base({ top: { stateDir: "~backup/state" } }), "stateDir", '"~user" is not supported');
+    });
+
+    it("refuses ~ when no usable home is known", () => {
+        expect(() => withHome(base({ top: { stateDir: "~/state" } }), "")).toThrow("no home directory is known");
+        expect(() => withHome(base({ top: { stateDir: "~/state" } }), "relative/home")).toThrow("is not absolute");
+    });
+
+    it("leaves a path without a leading ~ alone, including one containing a tilde", () => {
+        expect(validate(base({ top: { stateDir: "/srv/~backups" } })).stateDir).toBe("/srv/~backups");
+    });
+
+    it("applies the remaining path rules to what the expansion produced", () => {
+        expect(() => withHome(base({ remotes: { r1: { ...REMOTE, identityFile: "~/id" } } }), "/home/my dan")).toThrow(
+            "whitespace or quote",
+        );
     });
 });

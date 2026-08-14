@@ -122,6 +122,8 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
     // "stateDir": "/var/lib/backupkit",
 
     // "error" | "warn" | "info" | "debug"; optional "file" for a log path.
+    // Paths on THIS machine may start with "~" (expanded against the home of
+    // whoever runs backupkit); paths on the remote must be written out.
     "logging": { "level": "info" },
 }
 `;

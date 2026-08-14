@@ -51,6 +51,13 @@ describe("resolveConfigPath", () => {
         expect(resolvePath(undefined, { BACKUPKIT_CONFIG: file })).toBe(file);
     });
 
+    it("expands a leading ~ in $BACKUPKIT_CONFIG, which no shell expanded", () => {
+        const home = join(root, "home");
+        mkdirSync(home);
+        writeFileSync(join(home, "env.jsonc"), VALID_CONFIG);
+        expect(resolvePath(undefined, { BACKUPKIT_CONFIG: "~/env.jsonc", HOME: home })).toBe(join(home, "env.jsonc"));
+    });
+
     it("fails on a missing $BACKUPKIT_CONFIG path", () => {
         expect(() => resolvePath(undefined, { BACKUPKIT_CONFIG: join(root, "gone.jsonc") })).toThrow(
             "config file not found",

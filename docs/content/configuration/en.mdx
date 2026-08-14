@@ -201,7 +201,11 @@ Two things catch a config that was not migrated. `backupkit check` reads each **
 
 ### Path rules
 
-Every path field has to be absolute (`~` is rejected), free of NUL and newline, and free of any `.` or `..` component - write the resolved path.
+Every path field has to be absolute, free of NUL and newline, and free of any `.` or `..` component - write the resolved path.
+
+**`~` is expanded for paths on *this* machine**, against the home of whoever runs the command - so `"stateDir": "~/state"` means `/root/state` under a root service and `/home/dan/state` when you run it yourself. It works in `identityFile`, `knownHostsFile`, the path after `passphrase: "file:"`, `stateDir`, `logging.file`, `rsyncBin`, `sshBin`, a push `source`, a pull `destination`, and in `$BACKUPKIT_CONFIG` (where no shell expanded it for you).
+
+**It is refused for paths on the remote** - a push `destination`, a pull `source`, and `rsync.remoteRsyncBin` - because this machine's home says nothing about the archive host's, and a push destination is baked into the jail's forced command as the literal root every incoming path is prefix-tested against. Write those out as they are on that host. `~user` is refused everywhere for the same reason: resolving another account's home would make the config mean different things on different machines.
 
 The paths that end up inside rsync's `-e` string or a remote command are stricter still: `identityFile`, `knownHostsFile`, `rsyncBin`, `sshBin`, `rsync.remoteRsyncBin`, the path after `passphrase: "file:"`, and a push `destination` additionally reject whitespace and quote characters. `source`, `stateDir`, `logging.file`, and a pull `destination` accept both, so `/Volumes/My Backups` is a perfectly good pull destination.
 

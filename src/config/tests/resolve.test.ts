@@ -15,7 +15,7 @@ const USER_ENV: ResolveEnvironment = { euid: 501, env: {}, homeDir: "/home/u", p
 
 /** Validate + resolve a plain object config with a fixed config path. */
 function resolve(config: unknown, environment: ResolveEnvironment = USER_ENV): ResolvedConfig {
-    const validated = validateConfig(parseJsonc(JSON.stringify(config), "test.jsonc"), "test.jsonc");
+    const validated = validateConfig(parseJsonc(JSON.stringify(config), "test.jsonc"), "test.jsonc", "/home/dan");
     return resolveConfig(validated, "/etc/backupkit/config.jsonc", environment);
 }
 
