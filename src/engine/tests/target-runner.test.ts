@@ -85,6 +85,24 @@ describe("runTarget pipeline", () => {
         expect(store.locked).toBe(false);
     });
 
+    it("announces the run once the guards have passed, naming the snapshot it is filling", async () => {
+        const { log, lines } = captureLogger();
+        const report = await runTarget(makeTarget(), makeDeps(new FakeStore(), { log }));
+        expect(report.status).toBe("success");
+        expect(lines.some((line) => line.includes(`backing up /data/src -> snapshot ${SNAP}`))).toBe(true);
+        expect(lines.some((line) => line.includes(`backup finished`) && line.includes(`saved as snapshot ${SNAP}`))).toBe(
+            true,
+        );
+    });
+
+    it("does not announce a backup it is not making (window skip)", async () => {
+        const store = new FakeStore();
+        store.names = [SNAP];
+        const { log, lines } = captureLogger();
+        await runTarget(makeTarget(), makeDeps(store, { log }));
+        expect(lines.some((line) => line.includes("backing up"))).toBe(false);
+    });
+
     it("passes the newest complete snapshot as the link-dest base", async () => {
         const store = new FakeStore();
         store.names = ["2026-08-08T000000Z", "2026-08-09T000000Z"];

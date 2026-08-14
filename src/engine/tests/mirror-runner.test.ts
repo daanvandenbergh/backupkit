@@ -246,6 +246,27 @@ describe("runMirror pipeline", () => {
         expect(report.error).toContain("connection unexpectedly closed");
     });
 
+    it("announces the run once it is really starting, naming both ends", async () => {
+        const { log, lines } = captureLogger();
+        await runMirror(mirrorTarget({ src: { kind: "local", path: "/Users/dan/persistance" } }), makeDeps({ log }));
+        expect(lines.some((line) => line.includes("backing up /Users/dan/persistance -> /Volumes/persistance"))).toBe(
+            true,
+        );
+        expect(lines.some((line) => line.includes("backup finished"))).toBe(true);
+    });
+
+    it("does not announce a backup it is not making (window skip)", async () => {
+        const { log, lines } = captureLogger();
+        await runMirror(mirrorTarget(), makeDeps({ log, lastRunAt: async () => NOW }));
+        expect(lines.some((line) => line.includes("backing up"))).toBe(false);
+    });
+
+    it("says it is only checking on a dry run", async () => {
+        const { log, lines } = captureLogger();
+        await runMirror(mirrorTarget(), makeDeps({ log }), { dryRun: true, force: true });
+        expect(lines.some((line) => line.includes("dry run: checking /"))).toBe(true);
+    });
+
     it("promotes exit 23 to a warning report and keeps the skipped paths", async () => {
         const report = await runMirror(
             mirrorTarget(),

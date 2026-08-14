@@ -23,6 +23,7 @@ import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import { isBackupkitError } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
+import { formatDuration, formatEndpoint } from "../../shared/format.js";
 import { formatSnapshotName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import { windowIndex } from "../../shared/time.js";
 import type { Endpoint } from "../../shared/types.js";
@@ -200,6 +201,18 @@ function isContentChangeLine(line: string): boolean {
     return /^[<>ch*]/.test(line);
 }
 
+/**
+ * The line each pipeline logs when it actually starts moving data - after the
+ * window dedup and the guards, so a target that had nothing to do never
+ * announces a backup it is not making. It names both ends because that is the
+ * question a log reader has at 3am ("which machine was this pulling from?"),
+ * and neither the target name nor the destination alone answers it.
+ */
+function startLine(target: ResolvedTarget, destination: string, options: TargetRunOptions): string {
+    const verb = options.dryRun === true ? "dry run: checking" : "backing up";
+    return `${verb} ${sanitize(formatEndpoint(target.src))} -> ${destination}`;
+}
+
 /** Everything one MIRROR run needs beyond the target itself - every seam injectable for tests. */
 export interface MirrorRunnerDeps {
     /** Logger (already child-scoped to the target by the caller). */
@@ -290,6 +303,8 @@ export async function runMirror(
                 return report("skipped", "window", null);
             }
         }
+
+        deps.log.info(startLine(target, sanitize(formatEndpoint(target.dst)), options));
 
         const spec = specFor(target, target.dst, null, deps.sshTokens);
         const execWithSignal: ExecFn = (bin, args, execOptions) =>
@@ -390,7 +405,8 @@ export async function runMirror(
         }
 
         deps.log.info(
-            `backup finished${result.status === "warning" ? " with warnings" : ""} - ${sanitize(target.destination)}${result.status === "warning" ? " updated" : " now mirrors the source"}`,
+            `backup finished${result.status === "warning" ? " with warnings" : ""} in ${formatDuration(deps.now().getTime() - start.getTime())}` +
+                ` - ${sanitize(target.destination)}${result.status === "warning" ? " updated" : " now mirrors the source"}`,
         );
         return report(result.status, null, null);
     } catch (error) {
@@ -492,6 +508,8 @@ export async function runTarget(
                 });
                 return report("failed", "clock-skew", `new snapshot ${snapName} would sort <= newest complete ${newest}`);
             }
+
+            deps.log.info(startLine(target, `snapshot ${snapName}`, options));
 
             const spec = specFor(target, partialEndpoint(target, snapName), newest, deps.sshTokens);
 
@@ -621,7 +639,8 @@ export async function runTarget(
             // Promote: atomic rename <name>.partial -> <name>.
             await deps.store.promote(snapName);
             deps.log.info(
-                `backup finished${result.status === "warning" ? " with warnings" : ""} - saved as snapshot ${snapName}`,
+                `backup finished${result.status === "warning" ? " with warnings" : ""} in ${formatDuration(deps.now().getTime() - start.getTime())}` +
+                    ` - saved as snapshot ${snapName}`,
             );
 
             // Content-collapse tripwire (see COLLAPSE_FRACTION): a source that
