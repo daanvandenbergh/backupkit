@@ -8,26 +8,31 @@ Reprinted in every `/audit-security` report. Reviewed whenever the code they nam
 
 ---
 
-## A1. One jail root per `destination`, so push targets sharing an archive host are not isolated
+## A1. ~~One jail root per `destination`, so push targets sharing an archive host are not isolated~~ - FIXED in 2.0.0
 
-- **Rule in play:** invariant 29/30 (the jail bounds *what* a push key may do, not *whose* tree).
-- **What is accepted.** `backupkit check` generates `command="/usr/local/bin/backupkit-remote
-  <destination>"`. Two source hosts configured with the same `destination` therefore share one jail
-  root, and a compromised `web1` can `find` (enumerate `db1`'s snapshot history), and write a
-  `<snap>.partial` under `db1-data/`, because `db1-data` is a legal target-name component.
-- **Why it is not fixed in this pass.** The fix is known and small in code -
-  `jailCommandPrefix(posix.join(target.destination, target.name))`, since the store already operates
-  at `<destination>/<targetName>` - but it changes the `authorized_keys` line already installed on
-  every archive server. That is an out-of-band migration on live hosts, so it is the operator's
-  decision and their maintenance window, not a silent package change. An old jail line plus a new
-  client (or the reverse) rejects every operation with a bare `rejected`.
-- **Compensating controls.** Invariant 30's `check_mv_pair` and 29's destination pinning mean the
-  cross-tenant reach is *enumerate and inject*, not *delete*: a foreign key can no longer remove a
-  completed snapshot, a target directory, or a whole history. Deployments with one destination per
-  pushing host - what the docs recommend - are unaffected entirely.
-- **wrong_if:** a deployment is found sharing one `destination` across two push sources whose hosts
-  are in different trust domains; or the docs stop recommending one destination root per pushing
-  host. Either makes this a finding again, not an accepted risk.
+- **Status: no longer accepted - the risk is gone.** Kept as a record of what closed it, not as a
+  risk to reprint. Delete this entry once 2.0.0 is the oldest version anyone runs.
+- **What it was.** `backupkit check` generated `command="/usr/local/bin/backupkit-remote
+  <destination>"` while the store operated at `<destination>/<targetName>`, so two push targets
+  sharing a `destination` shared one jail root: a compromised `web1` could `find` (enumerate
+  `db1`'s snapshot history) and write a `<snap>.partial` under `db1-data/`, because `db1-data` was
+  a legal target-name component.
+- **What closed it.** 2.0.0 made `destination` the archive root itself in both modes, so the jail
+  root `check` emits IS one target's archive - the fix this entry named
+  (`posix.join(destination, name)`), reached by moving the level rather than adding one. Two
+  targets may no longer share a destination at all (`checkSnapshotRoots` refuses it), and the
+  target-name-charset arm of `check_component` is deleted with the level it served, so no path a
+  jailed key may name can carry a foreign target's name. Cross-tenant *enumerate and inject* is
+  therefore gone along with the shared root.
+- **The migration cost this entry was deferring** - a changed `authorized_keys` line on every
+  archive server - was paid deliberately: it is the breaking half of a major version, documented in
+  the README and `configuration#upgrading-a-1x-config`, and it fails loudly (an old jail plus a 2.x
+  client rejects every push with a bare `rejected`, which `backupkit jail status` and the per-command
+  drift warning both name).
+- **wrong_if:** a future change re-introduces a shared jail root - a `<target>` level under
+  `destination`, or a `jailCommandPrefix` built from anything but the target's own destination.
+  `src/snapshots/tests/jail-grammar.test.ts` ("rejects the target name %j as a path component") is
+  the guard that turns red first.
 
 ## A1b. `"jail": false` opts a push target out of every jail-side control at once
 

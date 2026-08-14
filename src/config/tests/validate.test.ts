@@ -396,10 +396,10 @@ describe("targets", () => {
         );
     });
 
-    // The jail pins every rsync destination to <root>/<target>/<snap>.partial,
-    // which is what confines the --delete it also permits. A mirror writes the
-    // root itself, so a jailed push mirror would be rejected by the archive
-    // host on every single transfer - a mystery failure unless it is refused here.
+    // The jail pins every rsync destination to <root>/<snap>.partial, which is
+    // what confines the --delete it also permits. A mirror writes the root
+    // itself, so a jailed push mirror would be rejected by the archive host on
+    // every single transfer - a mystery failure unless it is refused here.
     it("rejects a jailed push mirror (the jail's default) with a fix for each way out", () => {
         expectFail(
             base({ targets: { t1: { ...TARGET, mode: "mirror", direction: "push" } } }),
