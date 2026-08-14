@@ -299,13 +299,14 @@ export async function runTransfer(params: {
                 const more = skipped.length > 5 ? ` and ${skipped.length - 5} more` : "";
                 const one = skipped.length === 1;
                 params.log.warn(
-                    `could not read ${one ? "1 path" : `${skipped.length} paths`}, so ${one ? "it is" : "they are"} NOT in this backup` +
-                        `${shown === "" ? "" : `: ${shown}${more}`}. ` +
-                        `Check that ${one ? "it exists and is readable" : "they exist and are readable"}, or add ${one ? "it" : "them"} to this target's "exclude" list.`,
+                    (one
+                        ? `could not read ${shown === "" ? "1 path" : shown}, so it is not in this backup. `
+                        : `could not read ${skipped.length} paths, so they are not in this backup${shown === "" ? "" : `: ${shown}${more}`}. `) +
+                        `Check that ${one ? "it exists and is readable" : "they exist and are readable"}, or add ${one ? "it" : "them"} to this target's exclude list.`,
                 );
             } else if (result.exitCode === 24) {
                 params.log.warn(
-                    "some files were deleted while the backup was running, so they are not in it. The rest was copied - this is normal on a live system.",
+                    "some files were deleted while the backup was running, so they are not in this backup - normal on a live system.",
                 );
             }
             return {

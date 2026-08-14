@@ -390,7 +390,7 @@ export async function runMirror(
         }
 
         deps.log.info(
-            `backup finished${result.status === "warning" ? " (with warnings, see above) - " : " - "}${sanitize(target.destination)}${result.status === "warning" ? " updated" : " now mirrors the source"}`,
+            `backup finished${result.status === "warning" ? " with warnings" : ""} - ${sanitize(target.destination)}${result.status === "warning" ? " updated" : " now mirrors the source"}`,
         );
         return report(result.status, null, null);
     } catch (error) {
@@ -524,7 +524,7 @@ export async function runTarget(
                 estimatedDelta = estimated.totalTransferredSize;
                 const totalBytes = await deps.totalBytes();
                 if (target.minFree.kind === "percent" && totalBytes === null) {
-                    deps.log.warn("cannot work out the free-space percentage here (the filesystem total size is unknown), so the minFree percentage is ignored for this run");
+                    deps.log.warn("cannot read this filesystem's total size, so the minFree percentage is ignored for this run");
                 }
                 const decision = evaluateDiskGuard({
                     deltaBytes: estimatedDelta,
@@ -621,7 +621,7 @@ export async function runTarget(
             // Promote: atomic rename <name>.partial -> <name>.
             await deps.store.promote(snapName);
             deps.log.info(
-                `backup finished${result.status === "warning" ? " (with warnings)" : ""} - saved as snapshot ${snapName}`,
+                `backup finished${result.status === "warning" ? " with warnings" : ""} - saved as snapshot ${snapName}`,
             );
 
             // Content-collapse tripwire (see COLLAPSE_FRACTION): a source that

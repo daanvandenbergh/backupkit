@@ -15,7 +15,6 @@ import type {
     PruneReport,
     RestoreReport,
     RunReport,
-    RunStatus,
     TargetStatus,
     TargetUnlockReport,
 } from "../../engine/types.js";
@@ -187,20 +186,6 @@ export function count(n: number, singular: string, plural: string = `${singular}
 }
 
 /**
- * The word each run outcome gets on stdout. A `Record<RunStatus, string>`, not
- * a lookup with a fallback: adding a RunStatus to the engine's union then
- * breaks `npm run typecheck` here, rather than silently printing `undefined`
- * next to a target name.
- */
-const VERDICT: Record<RunStatus, string> = {
-    success: "OK     ",
-    warning: "WARNING",
-    failed: "FAILED ",
-    skipped: "skipped",
-    aborted: "ABORTED",
-};
-
-/**
  * Plain English for each machine-readable skip/failure `reason`. A person
  * reading `skipped db - window` learns nothing; the reason codes stay in the
  * persisted reports and in `--json`, and this is the only place they are
@@ -208,46 +193,60 @@ const VERDICT: Record<RunStatus, string> = {
  * to itself rather than printing "undefined".
  */
 const REASON_TEXT: Record<string, string> = {
-    window: "already backed up in this schedule window - run again now with --force",
+    window: "already backed up in this schedule window, run again now with --force",
     "disk-low": "not enough free disk space",
     "clock-skew": "this host's clock is behind the newest snapshot",
     "verify-failed": "the copy does not match the source",
     aborted: "stopped before it finished",
-    "dry-run": "dry run - nothing was written",
-    "remote-unavailable": "the backup server could not be reached",
+    "dry-run": "dry run, nothing was written",
+    "remote-unavailable": "could not reach the backup server",
     "content-collapse": "the source holds far fewer files than last time",
     "lock-held": "another backupkit run is already working on this target",
 };
 
+/** The unreadable-paths clause, or "" when nothing was skipped. */
+function skippedClause(paths: string[]): string {
+    if (paths.length === 0) {
+        return "";
+    }
+    const more = paths.length > 1 ? ` and ${paths.length - 1} more` : "";
+    return ` - but ${count(paths.length, "path")} could not be read, so ${paths.length === 1 ? "it is" : "they are"} not in the backup: ${paths[0]}${more}`;
+}
+
 /**
- * The one detail clause after a target's verdict: what was written, and - when
- * the verdict is anything but a clean success - WHY. Without it a run ends on
- * a bare "WARNING <target>", which names the target but not the problem, and
- * sends the reader back up the scrollback to find out whether their data is
- * actually backed up.
+ * One target's line: `<target>: <what happened>`, written as a sentence.
+ *
+ * Deliberately NOT a padded status column. `OK     web - 0 files copied, 0 B;
+ * dry-run` made the reader decode a table to learn that nothing had happened,
+ * and padding a word to seven characters is the kind of alignment that only
+ * pays off in a table with more than one column. A sentence per target says
+ * the same thing in the order a person asks it: which target, what happened
+ * to it, and what is wrong if anything.
  */
-function runDetail(target: RunReport["targets"][number]): string {
-    const parts: string[] = [];
-    if (target.snapshot !== null) {
-        parts.push(`snapshot ${target.snapshot}`);
+function runLine(target: RunReport["targets"][number]): string {
+    const name = target.target;
+    const reason = target.reason === null ? null : (REASON_TEXT[target.reason] ?? target.reason);
+    if (target.reason === "dry-run") {
+        const delta = target.stats === null || target.stats.deltaBytes <= 0 ? "" : ` (a real run would copy about ${formatBytes(target.stats.deltaBytes)})`;
+        return `${name}: dry run, nothing was written${delta}`;
     }
-    if (target.stats !== null && (target.status === "success" || target.status === "warning")) {
-        parts.push(`${count(target.stats.filesTransferred, "file")} copied, ${formatBytes(target.stats.bytesTransferred)}`);
+    if (target.status === "failed") {
+        return `${name}: FAILED - ${target.error ?? reason ?? "no reason recorded"}`;
     }
-    if (target.reason !== null) {
-        parts.push(REASON_TEXT[target.reason] ?? target.reason);
+    if (target.status === "aborted") {
+        return `${name}: stopped before it finished, nothing was lost`;
     }
-    if (target.skippedFiles.length > 0) {
-        const first = target.skippedFiles[0];
-        const more = target.skippedFiles.length > 1 ? ` and ${target.skippedFiles.length - 1} more` : "";
-        parts.push(
-            `${count(target.skippedFiles.length, "path")} could not be read and ${target.skippedFiles.length === 1 ? "is" : "are"} NOT in this backup: ${first}${more}`,
-        );
+    if (target.status === "skipped") {
+        return `${name}: skipped, ${reason ?? "no reason recorded"}`;
     }
-    if (target.error !== null) {
-        parts.push(target.error);
-    }
-    return parts.join("; ");
+    const copied =
+        target.stats === null
+            ? "backed up"
+            : target.stats.filesTransferred === 0
+              ? "already up to date, nothing to copy"
+              : `backed up ${count(target.stats.filesTransferred, "file")} (${formatBytes(target.stats.bytesTransferred)})`;
+    const into = target.snapshot === null ? "" : ` into snapshot ${target.snapshot}`;
+    return `${name}: ${copied}${into}${skippedClause(target.skippedFiles)}`;
 }
 
 /**
@@ -266,15 +265,20 @@ export function printRunReport(report: RunReport, stdout: (line: string) => void
     let failed = 0;
     let warned = 0;
     let skipped = 0;
+    let dryRun = 0;
+    let ok = 0;
     for (const target of report.targets) {
-        const detail = runDetail(target);
-        stdout(`${VERDICT[target.status]} ${target.target}${detail === "" ? "" : ` - ${detail}`}`);
+        stdout(runLine(target));
         if (target.status === "failed") {
             failed += 1;
         } else if (target.status === "warning") {
             warned += 1;
         } else if (target.status === "skipped" || target.status === "aborted") {
             skipped += 1;
+        } else if (target.reason === "dry-run") {
+            dryRun += 1;
+        } else {
+            ok += 1;
         }
     }
     // Always a closing line: with several targets the per-target rows scroll,
@@ -282,14 +286,16 @@ export function printRunReport(report: RunReport, stdout: (line: string) => void
     // answers but a terminal full of rows does not.
     const total = report.targets.length;
     if (failed > 0) {
-        stdout(`Done - ${failed} of ${count(total, "target")} FAILED. See the lines above, or run: backupkit logs`);
-    } else {
-        const notes = [
-            warned === 0 ? null : `${warned} with warnings: backed up, but not everything is in it (see above)`,
-            skipped === 0 ? null : `${skipped} not backed up (see above)`,
-        ].filter((note) => note !== null);
-        stdout(`Done - ${count(total, "target")} processed${notes.length === 0 ? ", all OK." : `, ${notes.join(", ")}.`}`);
+        stdout(`Done. ${failed} of ${count(total, "target")} failed - see above, or run: backupkit logs`);
+        return failed;
     }
+    const clauses = [
+        ok === 0 ? null : `${count(ok, "target")} backed up`,
+        warned === 0 ? null : `${count(warned, "target")} backed up but missing files (see above)`,
+        dryRun === 0 ? null : `${count(dryRun, "target")} checked, nothing written`,
+        skipped === 0 ? null : `${skipped} skipped`,
+    ].filter((clause) => clause !== null);
+    stdout(`Done. ${clauses.join(", ")}.`);
     return failed;
 }
 

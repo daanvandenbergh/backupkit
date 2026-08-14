@@ -30,8 +30,8 @@ export async function runCommand(argv: string[], deps: CliDeps): Promise<number>
     });
     if (report.targets.length === 0) {
         deps.stdout(
-            "Nothing to do - every target has already been backed up for its current schedule window. " +
-                "See when each is next due with: backupkit status - or back them all up now with: backupkit run --force",
+            "Nothing to do - every target is already backed up for this schedule window. " +
+                "Run `backupkit status` to see when they are next due, or `backupkit run --force` to back them up again now.",
         );
         return 0;
     }

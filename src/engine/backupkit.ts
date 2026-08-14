@@ -914,7 +914,7 @@ export class Backupkit {
                 const until = this.backoff.untilFor(target.name);
                 const now = this.deps.now();
                 if (until !== null && now.getTime() < until.getTime()) {
-                    this.log.info("skipping this target for now - its last run failed, so backupkit is waiting before trying again", {
+                    this.log.info("skipping for now - the last run failed, so backupkit is waiting before it tries again", {
                         target: target.name,
                         nextAttemptAt: formatUtc(until),
                     });
@@ -933,7 +933,7 @@ export class Backupkit {
                 // runOne has already persisted this target's skipped report, so
                 // `status` and the backoff history see it; nothing is pushed into
                 // `reports` because the rethrow below discards them anyway.
-                this.log.warn("another backupkit run is already working on this target - skipped it and carried on with the rest", {
+                this.log.warn("another backupkit run is already working on this target - skipped it, carrying on with the rest", {
                     target: target.name,
                     error: sanitize(error.message),
                 });

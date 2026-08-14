@@ -22,9 +22,9 @@ describe("run", () => {
         expect(await main(["run", "web", "--force", "--dry-run"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({ method: "run", options: { targets: ["web"], force: true, dryRun: true } });
         expect(h.out).toEqual([
-            "OK      web - snapshot 2026-08-10T031500Z",
-            "skipped db - not enough free disk space",
-            "Done - 2 targets processed, 1 not backed up (see above).",
+            "web: backed up into snapshot 2026-08-10T031500Z",
+            "db: skipped, not enough free disk space",
+            "Done. 1 target backed up, 1 skipped.",
         ]);
     });
 
@@ -37,8 +37,8 @@ describe("run", () => {
         };
         expect(await main(["run"], h.deps)).toBe(1);
         expect(h.out).toEqual([
-            "FAILED  web - transfer exhausted",
-            "Done - 1 of 1 target FAILED. See the lines above, or run: backupkit logs",
+            "web: FAILED - transfer exhausted",
+            "Done. 1 of 1 target failed - see above, or run: backupkit logs",
         ]);
     });
 
@@ -51,8 +51,8 @@ describe("run", () => {
         };
         expect(await main(["run"], h.deps)).toBe(0);
         expect(h.out).toEqual([
-            "WARNING web - snapshot 2026-08-10T031500Z; 1 path could not be read and is NOT in this backup: /home/x/.gnupg/S.gpg-agent",
-            "Done - 1 target processed, 1 with warnings: backed up, but not everything is in it (see above).",
+            "web: backed up into snapshot 2026-08-10T031500Z - but 1 path could not be read, so it is not in the backup: /home/x/.gnupg/S.gpg-agent",
+            "Done. 1 target backed up but missing files (see above).",
         ]);
     });
 
@@ -60,8 +60,8 @@ describe("run", () => {
         const h = fakeDeps();
         expect(await main(["run"], h.deps)).toBe(0);
         expect(h.out).toEqual([
-            "Nothing to do - every target has already been backed up for its current schedule window. " +
-                "See when each is next due with: backupkit status - or back them all up now with: backupkit run --force",
+            "Nothing to do - every target is already backed up for this schedule window. " +
+                "Run `backupkit status` to see when they are next due, or `backupkit run --force` to back them up again now.",
         ]);
         expect(h.stops).toHaveLength(1);
         await h.stops[0]();
@@ -119,8 +119,8 @@ describe("start", () => {
         expect(h.out).toEqual([
             h.out[0],
             "Running every target once now (--force), then scheduling.",
-            "OK      web - snapshot 2026-08-10T031500Z",
-            "Done - 1 target processed, all OK.",
+            "web: backed up into snapshot 2026-08-10T031500Z",
+            "Done. 1 target backed up.",
             "Scheduler stopped cleanly.",
         ]);
     });
