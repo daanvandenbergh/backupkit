@@ -68,8 +68,15 @@ export interface ValidatedConfig {
     warnings: string[];
 }
 
-/** Record-key charset for remote and target names. */
-const NAME_REGEX = /^[a-z0-9][a-z0-9._-]*$/;
+/**
+ * Record-key charset for remote and target names. '@' is allowed after the
+ * first character (`mail@srv1`): a name becomes a path component under the
+ * destination and never a host token, so it cannot create an `rsync user@host:`
+ * split - that split needs a ':' before the first '/', and every destination
+ * path is absolute. It is also inside ssh/'s bare-argument allowlist
+ * ([A-Za-z0-9._/@:=+,-]), so it survives a restrictedShell remote unquoted.
+ */
+const NAME_REGEX = /^[a-z0-9][a-z0-9._@-]*$/;
 
 /** ssh_config alias charset - excludes whitespace, quotes, ':', '@', '/', and a leading '-' by construction. */
 const ALIAS_REGEX = /^[a-z0-9_][a-z0-9._-]*$/i;
@@ -251,7 +258,7 @@ class Validator {
             this.fail(
                 node,
                 path,
-                `invalid name "${key}" - names must match /^[a-z0-9][a-z0-9._-]*$/ and be at most 64 characters`,
+                `invalid name "${key}" - names must match /^[a-z0-9][a-z0-9._@-]*$/ and be at most 64 characters`,
             );
         }
     }

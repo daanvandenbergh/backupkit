@@ -110,7 +110,11 @@ describe("record-key charset", () => {
         expectFail(base({ targets: { [key]: TARGET } }), "invalid name");
     });
 
-    it.each([["web1"], ["2024"], ["a.b-c_d"], ["a".repeat(64)]])("accepts key %s", (key) => {
+    it.each([["@x"]])("rejects a key starting with @: %s", (key) => {
+        expectFail(base({ targets: { [key]: TARGET } }), "invalid name");
+    });
+
+    it.each([["web1"], ["2024"], ["a.b-c_d"], ["mail@srv1"], ["a".repeat(64)]])("accepts key %s", (key) => {
         expect(() => validate(base({ targets: { [key]: TARGET } }))).not.toThrow();
     });
 });

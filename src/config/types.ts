@@ -235,7 +235,7 @@ export interface BackupkitConfig {
     name?: string;
     /** At least one entry. Key charset same as target names. */
     remotes: Record<string, RemoteConfig>;
-    /** At least one entry. Keys are target names, /^[a-z0-9][a-z0-9._-]*$/, max 64: snapshot subdir + CLI/log identifier. Run order = document order. */
+    /** At least one entry. Keys are target names, /^[a-z0-9][a-z0-9._@-]*$/, max 64: snapshot subdir + CLI/log identifier. Run order = document order. */
     targets: Record<string, TargetConfig>;
     /** Default retention for targets defining none. Omit to keep everything forever. */
     retention?: RetentionConfig;

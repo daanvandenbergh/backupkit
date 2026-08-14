@@ -59,7 +59,7 @@ That order is the same for *every* identity, though, so a `/etc/backupkit/config
 | `rsyncBin` | string | tries `/opt/homebrew/bin/rsync`, `/usr/local/bin/rsync`, then PATH | Override the local rsync |
 | `sshBin` | string | from PATH | Override the local ssh |
 
-Remote and target keys have to match `/^[a-z0-9][a-z0-9._-]*$/` and be at most 64 characters.
+Remote and target keys have to match `/^[a-z0-9][a-z0-9._@-]*$/` and be at most 64 characters - so `mail@srv1` is a valid target name, but it can never start with `@`.
 
 The `stateDir` default is picked from the **identity running the command**, not from the config file. A config shared between the root daemon and your own unprivileged `backupkit status` therefore resolves to two different report directories unless you set `stateDir` explicitly - see [Root service, per-user config](/daemon-setup/#root-service-per-user-config).
 

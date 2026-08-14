@@ -63,7 +63,7 @@ is_snap() {
 
 # True when leaf component $1 is permitted: the snapshot regex family
 # (including .partial/.deleting forms), .backupkit.lock, or a
-# target-name-charset component ([a-z0-9][a-z0-9._-]*, max 64).
+# target-name-charset component ([a-z0-9][a-z0-9._@-]*, max 64).
 check_component() {
     comp=$1
     [ -n "$comp" ] || return 1
@@ -79,7 +79,7 @@ check_component() {
         return 0
     fi
     case $comp in
-        *[!a-z0-9._-]*) return 1 ;;
+        *[!a-z0-9._@-]*) return 1 ;;
         [!a-z0-9]*) return 1 ;;
     esac
     [ ${#comp} -le 64 ]

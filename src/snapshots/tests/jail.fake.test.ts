@@ -595,7 +595,14 @@ describe("backupkit-remote jail script", () => {
             await expectRejected(quoted(["rm", "-rf", "--", jailRoot]));
         });
 
+        it("accepts a target name containing '@' (the config charset allows it)", async () => {
+            const mk = await jail(quoted(["mkdir", "-p", "--", `${jailRoot}/mail@srv1/${SNAP}.partial`]));
+            expect(mk.exitCode).toBe(0);
+            expect(existsSync(`${jailRoot}/mail@srv1/${SNAP}.partial`)).toBe(true);
+        });
+
         it("rejects leaf components outside the allowed families", async () => {
+            await expectRejected(quoted(["mkdir", "-p", "--", `${jailRoot}/@leading`]));
             await expectRejected(quoted(["mkdir", "-p", "--", `${jailRoot}/web/EVIL NAME`]));
             await expectRejected(quoted(["mkdir", "-p", "--", `${jailRoot}/web/Uppercase`]));
             await expectRejected(quoted(["rm", "-rf", "--", `${jailRoot}/.ssh`]));
