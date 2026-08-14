@@ -73,8 +73,8 @@ describe("Backupkit", () => {
         expect(report.targets).toHaveLength(1);
         expect(report.targets[0].status).toBe("success");
         expect(report.targets[0].snapshot).toBe("2026-08-10T120000Z");
-        expect(existsSync(join(destination, "web", "2026-08-10T120000Z"))).toBe(true);
-        expect(existsSync(join(destination, "web", "2026-08-10T120000Z.partial"))).toBe(false);
+        expect(existsSync(join(destination, "2026-08-10T120000Z"))).toBe(true);
+        expect(existsSync(join(destination, "2026-08-10T120000Z.partial"))).toBe(false);
         const files = await readdir(join(stateDir, "runs", "web"));
         expect(files).toEqual(["2026-08-10T120000Z_web.json"]);
     });
@@ -109,7 +109,7 @@ describe("Backupkit", () => {
         const report = await kit.run({ force: true, dryRun: true });
         expect(report.targets).toHaveLength(1);
         expect(report.targets[0].reason).toBe("dry-run");
-        expect(existsSync(join(destination, "web", "2026-08-10T120000Z"))).toBe(false);
+        expect(existsSync(join(destination, "2026-08-10T120000Z"))).toBe(false);
         expect(existsSync(join(stateDir, "runs", "web"))).toBe(false);
     });
 
@@ -172,7 +172,7 @@ describe("Backupkit", () => {
         expect(row.nextDueAt).toBe("2026-08-10T12:15:00.000Z");
         expect(row.lockHeld).toBe(false);
 
-        await mkdir(join(fixture.destination, "web", ".backupkit.lock"), { recursive: true });
+        await mkdir(join(fixture.destination, ".backupkit.lock"), { recursive: true });
         const [locked] = await fixture.kit.status();
         expect(locked.lockHeld).toBe(true);
     });
@@ -196,7 +196,7 @@ describe("Backupkit", () => {
     it("listSnapshots: complete snapshots oldest first, junk names ignored", async () => {
         const fixture = track(await makeKit());
         for (const name of ["2026-08-02T000000Z", "2026-08-01T000000Z", "junk", "999999.partial"]) {
-            await mkdir(join(fixture.destination, "web", name), { recursive: true });
+            await mkdir(join(fixture.destination, name), { recursive: true });
         }
         const infos = await fixture.kit.listSnapshots();
         expect(infos.map((info) => info.name)).toEqual(["2026-08-01T000000Z", "2026-08-02T000000Z"]);
@@ -208,19 +208,19 @@ describe("Backupkit", () => {
     it("prune: dry-run plans without deleting; execution prunes all but the kept set", async () => {
         const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
         for (const name of ["2026-08-01T000000Z", "2026-08-02T000000Z", "2026-08-03T000000Z"]) {
-            await mkdir(join(fixture.destination, "web", name), { recursive: true });
+            await mkdir(join(fixture.destination, name), { recursive: true });
         }
         const dry = await fixture.kit.prune({ dryRun: true });
         expect(dry.targets[0].executed).toBe(false);
         expect(dry.targets[0].plan.prune).toEqual(["2026-08-02T000000Z", "2026-08-01T000000Z"]);
-        expect(existsSync(join(fixture.destination, "web", "2026-08-01T000000Z"))).toBe(true);
+        expect(existsSync(join(fixture.destination, "2026-08-01T000000Z"))).toBe(true);
 
         const real = await fixture.kit.prune();
         expect(real.targets[0].executed).toBe(true);
         expect(real.targets[0].errors).toEqual([]);
-        expect(existsSync(join(fixture.destination, "web", "2026-08-01T000000Z"))).toBe(false);
-        expect(existsSync(join(fixture.destination, "web", "2026-08-02T000000Z"))).toBe(false);
-        expect(existsSync(join(fixture.destination, "web", "2026-08-03T000000Z"))).toBe(true);
+        expect(existsSync(join(fixture.destination, "2026-08-01T000000Z"))).toBe(false);
+        expect(existsSync(join(fixture.destination, "2026-08-02T000000Z"))).toBe(false);
+        expect(existsSync(join(fixture.destination, "2026-08-03T000000Z"))).toBe(true);
     });
 
     // Retention selects on names, so anything that can create a snapshot-shaped
@@ -233,7 +233,7 @@ describe("Backupkit", () => {
         async function plantedFixture(names: string[], mark: { newest: string; count: number }) {
             const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
             for (const name of names) {
-                await mkdir(join(fixture.destination, "web", name), { recursive: true });
+                await mkdir(join(fixture.destination, name), { recursive: true });
             }
             await writeTargetReport(fixture.stateDir, {
                 runId: `${mark.newest}_web`,
@@ -271,7 +271,7 @@ describe("Backupkit", () => {
             // Every name still on disk - including the real history prune would
             // otherwise have deleted to make room for the plants.
             for (const name of REAL_PLUS_PLANTS) {
-                expect(existsSync(join(fixture.destination, "web", name))).toBe(true);
+                expect(existsSync(join(fixture.destination, name))).toBe(true);
             }
         });
 
@@ -317,13 +317,13 @@ describe("Backupkit", () => {
 
             expect(report.targets[0].executed).toBe(true);
             expect(report.targets[0].errors).toEqual([]);
-            expect(existsSync(join(fixture.destination, "web", "2026-08-02T000000Z"))).toBe(false);
+            expect(existsSync(join(fixture.destination, "2026-08-02T000000Z"))).toBe(false);
         });
 
         it("prunes normally when there is no recorded run to count against", async () => {
             const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
             for (const name of ["2026-08-01T000000Z", "2026-08-02T000000Z"]) {
-                await mkdir(join(fixture.destination, "web", name), { recursive: true });
+                await mkdir(join(fixture.destination, name), { recursive: true });
             }
 
             const report = await fixture.kit.prune();
@@ -343,7 +343,7 @@ describe("Backupkit", () => {
         await fixture.kit.run({ force: true });
         // A compromised push source plants a future-dated directory in its own
         // archive root (the jail accepts the mkdir by design).
-        const planted = join(fixture.destination, "web", "2099-01-01T000000Z");
+        const planted = join(fixture.destination, "2099-01-01T000000Z");
         await mkdir(planted, { recursive: true });
         // The clock-skew guard still fires - a name from the future is
         // indistinguishable from a backwards clock, and refusing is right.
@@ -363,7 +363,7 @@ describe("Backupkit", () => {
 
     it("a future-dated snapshot that is the ONLY snapshot is never pruned away", async () => {
         const fixture = track(await makeKit({ target: { retention: { keepLast: 1 } } }));
-        const planted = join(fixture.destination, "web", "2099-01-01T000000Z");
+        const planted = join(fixture.destination, "2099-01-01T000000Z");
         await mkdir(planted, { recursive: true });
         const report = await fixture.kit.prune();
         expect(report.targets[0].plan.prune).toEqual([]);
@@ -480,7 +480,7 @@ describe("Backupkit", () => {
     it("a held destination lock still writes a report, so status stops reading green", async () => {
         const fixture = track(await makeKit());
         // Plant a live-looking lock: this process's pid and start time.
-        const lockDir = join(fixture.destination, "web", ".backupkit.lock");
+        const lockDir = join(fixture.destination, ".backupkit.lock");
         await mkdir(lockDir, { recursive: true });
         const { pidStartTime } = await import("../../snapshots/internal/lock.js");
         await writeFile(
@@ -512,13 +512,14 @@ describe("Backupkit", () => {
     it("a lock held on one target does not stop the later targets of a one-shot run", async () => {
         const fixture = track(
             await makeKit({
-                extraTargets: (destination) => [
-                    makeTarget({ name: "api", destination, dst: { kind: "local", path: destination } }),
-                ],
+                extraTargets: (archiveParent) => {
+                    const apiArchive = join(archiveParent, "api-archive");
+                    return [makeTarget({ name: "api", destination: apiArchive, dst: { kind: "local", path: apiArchive } })];
+                },
             }),
         );
         // A live-looking lock on the FIRST target only: this process's pid and start time.
-        const lockDir = join(fixture.destination, "web", ".backupkit.lock");
+        const lockDir = join(fixture.destination, ".backupkit.lock");
         await mkdir(lockDir, { recursive: true });
         const { pidStartTime } = await import("../../snapshots/internal/lock.js");
         await writeFile(
@@ -534,7 +535,7 @@ describe("Backupkit", () => {
         await expect(fixture.kit.run({ force: true })).rejects.toThrow(/lock/i);
 
         // The second target ran, promoted its snapshot, and left a report.
-        expect(existsSync(join(fixture.destination, "api", "2026-08-10T120000Z"))).toBe(true);
+        expect(existsSync(join(fixture.root, "api-archive", "2026-08-10T120000Z"))).toBe(true);
         expect(await readdir(join(fixture.stateDir, "runs", "api"))).toHaveLength(1);
         const [web, api] = await fixture.kit.status();
         expect([web.target, web.lastResult]).toEqual(["web", "skipped"]);
@@ -543,7 +544,7 @@ describe("Backupkit", () => {
 
     it("prune: retention off (null) prunes nothing", async () => {
         const fixture = track(await makeKit({ target: { retention: null } }));
-        await mkdir(join(fixture.destination, "web", "2026-08-01T000000Z"), { recursive: true });
+        await mkdir(join(fixture.destination, "2026-08-01T000000Z"), { recursive: true });
         const report = await fixture.kit.prune();
         expect(report.targets[0].plan.prune).toEqual([]);
         expect(report.targets[0].executed).toBe(false);
@@ -675,6 +676,48 @@ describe("Backupkit", () => {
         );
     });
 
+    // The 2.0 upgrade hazard, and the only one that fails SILENTLY. A config
+    // written for 1.x still validates and still runs; it just points at the
+    // shared PARENT of what is now the archive root, so the target starts a
+    // second, empty archive there while the real history sits one level down -
+    // invisible to `list`, never pruned, never a --link-dest base, and the next
+    // run copies everything again un-hardlinked. `check` is where that has to be
+    // named, because nothing else about the run looks wrong.
+    describe("check: the pre-2.0 archive layout is named, not silently abandoned", () => {
+        it("reports snapshots found one level below the destination, and names the config edit", async () => {
+            const fixture = track(await makeKit());
+            await mkdir(join(fixture.destination, "web", "2026-08-01T000000Z"), { recursive: true });
+
+            const report = await fixture.kit.check();
+
+            expect(report.ok).toBe(false);
+            const found = report.errors.find((error) => error.includes("snapshots found at"));
+            expect(found).toContain(join(fixture.destination, "web"));
+            expect(found).toContain(`"destination": "${join(fixture.destination, "web")}"`);
+        });
+
+        it("stays quiet when the subdirectory holds nothing snapshot-shaped", async () => {
+            // A target's destination may legitimately contain a directory whose
+            // name happens to match the target's. Only actual snapshot names
+            // there mean the pre-2.0 layout.
+            const fixture = track(await makeKit());
+            await mkdir(join(fixture.destination, "web", "notes"), { recursive: true });
+
+            const report = await fixture.kit.check();
+
+            expect(report.errors.filter((error) => error.includes("snapshots found at"))).toEqual([]);
+        });
+
+        it("stays quiet on a mirror target, which never had a target-name level", async () => {
+            const fixture = track(await makeKit({ target: { mode: "mirror", retention: null, minFree: null } }));
+            await mkdir(join(fixture.destination, "web", "2026-08-01T000000Z"), { recursive: true });
+
+            const report = await fixture.kit.check();
+
+            expect(report.errors.filter((error) => error.includes("snapshots found at"))).toEqual([]);
+        });
+    });
+
     it("check: a jail-disabled push target produces no jail line (and no .pub read error)", async () => {
         const fixture = track(
             await makeKit({
@@ -767,7 +810,7 @@ describe("Backupkit", () => {
         const fixture = track(await makeKit({ deps: { tickMs: 20 } }));
         const loop = fixture.kit.start();
         // Poll until the first run's snapshot appears.
-        const snapshot = join(fixture.destination, "web", "2026-08-10T120000Z");
+        const snapshot = join(fixture.destination, "2026-08-10T120000Z");
         for (let i = 0; i < 200 && !existsSync(snapshot); i += 1) {
             await new Promise((resolve) => setTimeout(resolve, 10));
         }
@@ -801,7 +844,7 @@ describe("Backupkit", () => {
         const persisted = JSON.parse(await readFile(join(fixture.stateDir, "runs", "web", files[0]), "utf8"));
         expect(persisted.status).toBe("aborted");
         // The partial stays for resume.
-        expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z.partial"))).toBe(false); // fake transfer never created it
+        expect(existsSync(join(fixture.destination, "2026-08-10T120000Z.partial"))).toBe(false); // fake transfer never created it
     });
 
     it("stop() aborts an in-flight one-shot run(): the report lands as aborted", async () => {
@@ -956,15 +999,18 @@ describe("Backupkit", () => {
                 target: { name: "modern", src: { kind: "remote", remote, path: "/srv/data" } },
                 // A sibling target on the SAME remote, pinned to an old binary.
                 // Its gate fails before the pipeline, so its archive stays empty.
-                extraTargets: (destination) => [
-                    makeTarget({
-                        name: "legacy",
-                        destination,
-                        src: { kind: "remote", remote, path: "/srv/data" },
-                        dst: { kind: "local", path: destination },
-                        rsync: { ...makeTarget().rsync, remoteRsyncBin: "/opt/legacy/bin/rsync" },
-                    }),
-                ],
+                extraTargets: (archiveParent) => {
+                    const legacyArchive = join(archiveParent, "legacy-archive");
+                    return [
+                        makeTarget({
+                            name: "legacy",
+                            destination: legacyArchive,
+                            src: { kind: "remote", remote, path: "/srv/data" },
+                            dst: { kind: "local", path: legacyArchive },
+                            rsync: { ...makeTarget().rsync, remoteRsyncBin: "/opt/legacy/bin/rsync" },
+                        }),
+                    ];
+                },
                 deps: {
                     probeRemote: async (params) => {
                         probed.push(params.remoteRsyncBin);
@@ -1124,7 +1170,7 @@ describe("Backupkit", () => {
         await fixture.kit.stop();
         await fixture.kit.start();
         // No tick ran: nothing was backed up, and the loop resolved immediately.
-        expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z"))).toBe(false);
+        expect(existsSync(join(fixture.destination, "2026-08-10T120000Z"))).toBe(false);
         expect(existsSync(join(fixture.stateDir, "runs", "web"))).toBe(false);
 
         // A later start is unaffected - the request applies to that one stop.
@@ -1132,7 +1178,7 @@ describe("Backupkit", () => {
         await new Promise((resolve) => setTimeout(resolve, 50));
         await fixture.kit.stop();
         await started;
-        expect(existsSync(join(fixture.destination, "web", "2026-08-10T120000Z"))).toBe(true);
+        expect(existsSync(join(fixture.destination, "2026-08-10T120000Z"))).toBe(true);
     });
 
     /**

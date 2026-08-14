@@ -33,7 +33,7 @@ describe("the starter config", () => {
         expect(target.name).toBe("example-var-www");
         expect(target.direction).toBe("pull");
         expect(target.source).toBe("/var/www");
-        expect(target.destination).toBe("/srv/backups");
+        expect(target.destination).toBe("/srv/backups/example-var-www");
         expect(target.exclude).toEqual(["cache/", "*.tmp"]);
         expect(target.schedule).toEqual({ interval: "day", intervalCount: 1, at: "03:00", on: "mon", dayOfMonth: 1 });
         expect(target.retention).toEqual({ keepLast: 7, keepDaily: 14, keepWeekly: 8, keepMonthly: 12 });

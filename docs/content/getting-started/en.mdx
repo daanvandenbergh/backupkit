@@ -72,7 +72,7 @@ Every command then looks for the config in the same order: `--config <path>`, th
 The starter ships with one example remote and one example target. At minimum you set:
 
 - a **remote** - the machine to connect to. Either spell it out with `host`, `user`, and `identityFile`, or point at an entry in your `~/.ssh/config` with `{ "alias": "myserver" }`. An alias resolves through the ssh_config of whoever runs the scheduler, so a root service uses root's, not yours - on the service track, prefer an explicit remote.
-- a **target** - what to back up. It needs a `mode`, a `direction` (use `"pull"` unless you have a reason not to), a `remote`, a `source`, and a `destination`. `schedule` is optional and defaults to once a day at 00:00 UTC.
+- a **target** - what to back up. It needs a `mode`, a `direction` (use `"pull"` unless you have a reason not to), a `remote`, a `source`, and a `destination` - that target's own directory, which no other target may share. `schedule` is optional and defaults to once a day at 00:00 UTC.
 
 `mode` is the one field with no default, and it is worth a moment: `"snapshot"` builds the versioned archive this guide is about - a dated snapshot per run, any of which you can restore. `"mirror"` keeps the destination as one in-place copy of the source instead: useful for holding two clones of a directory in step, but it has no history, so anything the source no longer has is deleted from the destination on the next run. Take `"snapshot"` unless you specifically want the copy. See [Snapshot or mirror](/configuration/#snapshot-or-mirror).
 
@@ -93,7 +93,7 @@ A minimal pull target:
             "direction": "pull",
             "remote": "example",
             "source": "/var/www",
-            "destination": "/srv/backups",
+            "destination": "/srv/backups/var-www",
             "schedule": { "interval": "day", "at": "03:00" },
         },
     },
@@ -144,7 +144,7 @@ Then look at what landed:
 sudo backupkit list
 ```
 
-Each finished snapshot is a dated directory under `<destination>/<target>/`. Files that did not change are hard-linked to the previous snapshot, so keeping history costs very little disk.
+Each finished snapshot is a dated directory directly under the target's `destination`. Files that did not change are hard-linked to the previous snapshot, so keeping history costs very little disk.
 
 ## Step 5: pick a mode and schedule it
 

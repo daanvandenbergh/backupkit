@@ -162,10 +162,12 @@ export type TargetMode = "snapshot" | "mirror";
 /** One backup target. Keyed by name in BackupkitConfig.targets. */
 export interface TargetConfig {
     /**
-     * "snapshot": versioned archive at `<destination>/<name>/<snapshot>/`,
-     * hardlinked against the previous snapshot, pruned by retention.
+     * "snapshot": versioned archive at `<destination>/<snapshot>/`, hardlinked
+     * against the previous snapshot, pruned by retention.
      * "mirror": `<destination>` IS the tree - one in-place copy of the source,
      * no snapshot directory, no history, no retention. Required, no default.
+     * `destination` means the same thing either way: this target's own
+     * directory, which no other target may share.
      * @see TargetMode
      */
     mode: TargetMode;
@@ -176,14 +178,14 @@ export interface TargetConfig {
     /** Directory to back up (contents synced). pull: absolute path ON the remote. push: absolute local path. Required. */
     source: string;
     /**
-     * Archive root. pull: absolute local path (whitespace allowed). push:
-     * absolute path ON the remote (must equal the jail root of the forced
-     * command) and may NOT contain whitespace or quote characters - it is
-     * word-split by the jail's remote-command parser, which would reject every
-     * rsync while the lifecycle commands still succeed. Snapshot mode writes
-     * <destination>/<name>/<snapshot>/; mirror mode writes <destination>
-     * itself, and everything in it that the source does not have is DELETED.
-     * Required.
+     * This target's own directory, and no other target's. pull: absolute local
+     * path (whitespace allowed). push: absolute path ON the remote (must equal
+     * the jail root of the forced command) and may NOT contain whitespace or
+     * quote characters - it is word-split by the jail's remote-command parser,
+     * which would reject every rsync while the lifecycle commands still
+     * succeed. Snapshot mode writes <destination>/<snapshot>/; mirror mode
+     * writes <destination> itself, and everything in it that the source does
+     * not have is DELETED. Required.
      */
     destination: string;
     /** rsync exclude patterns, one --exclude=<p> argv element each. Default []. */
@@ -235,7 +237,7 @@ export interface BackupkitConfig {
     name?: string;
     /** At least one entry. Key charset same as target names. */
     remotes: Record<string, RemoteConfig>;
-    /** At least one entry. Keys are target names, /^[a-z0-9][a-z0-9._@-]*$/, max 64: snapshot subdir + CLI/log identifier. Run order = document order. */
+    /** At least one entry. Keys are target names, /^[a-z0-9][a-z0-9._@-]*$/, max 64: the CLI/log identifier (no part of any path). Run order = document order. */
     targets: Record<string, TargetConfig>;
     /** Default retention for targets defining none. Omit to keep everything forever. */
     retention?: RetentionConfig;
@@ -292,7 +294,7 @@ export interface ResolvedTarget {
     remoteRef: ResolvedRemote;
     /** Directory backed up (contents synced). */
     source: string;
-    /** Archive root: snapshots at <destination>/<name>/<snapshot>/, or the mirrored tree itself. */
+    /** This target's own directory: snapshots at <destination>/<snapshot>/, or the mirrored tree itself. */
     destination: string;
     /** rsync exclude patterns. */
     exclude: string[];
@@ -317,7 +319,7 @@ export interface ResolvedTarget {
     src: Endpoint;
     /**
      * Transfer destination endpoint - the archive root side (mapped once from
-     * direction). Snapshot mode transfers into `<dst>/<name>/<snap>.partial`;
+     * direction). Snapshot mode transfers into `<dst>/<snap>.partial`;
      * mirror mode transfers into `<dst>` itself.
      */
     dst: Endpoint;

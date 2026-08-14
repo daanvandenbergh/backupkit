@@ -134,7 +134,7 @@ For anything that must survive a reboot on a server, install [the service](/daem
 
 ## Two people, one machine
 
-Per-user configs stay separate all the way down: each user's `stateDir`, `known_hosts`, and agent socket live under their own home, so two users can each run `backupkit start` against their own config without colliding. The destination lock is the exception - it lives in the archive itself, at `<destination>/<target>/.backupkit.lock`, so two users must not point at the same destination root: the second one is refused with a lock-held error and exits 3, which is exactly what that lock is for. What they cannot both have is a service - there is one system unit per machine.
+Per-user configs stay separate all the way down: each user's `stateDir`, `known_hosts`, and agent socket live under their own home, so two users can each run `backupkit start` against their own config without colliding. The destination lock is the exception - it lives in the archive itself, at `<destination>/.backupkit.lock`, so two users must not point at the same destination: the second one is refused with a lock-held error and exits 3, which is exactly what that lock is for. What they cannot both have is a service - there is one system unit per machine.
 
 Mind the lookup order again: the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file, so each of them needs `--config` or `BACKUPKIT_CONFIG`.
 

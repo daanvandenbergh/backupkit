@@ -6,21 +6,26 @@
 #
 #   restrict,command="/usr/local/bin/backupkit-remote <jailRoot>" ssh-ed25519 AAAA...
 #
+# <jailRoot> is ONE target's archive root - the target's `destination`, verbatim.
+# It holds that target's snapshots directly (<jailRoot>/<snapshot>/), so a key
+# jailed here reaches one archive and no other: two targets on the same server
+# get two roots and two authorized_keys lines.
+#
 # Reads $SSH_ORIGINAL_COMMAND and permits EXACTLY:
 #   - rsync --server invocations whose options are on a measured ALLOWLIST and
-#     whose single path operand is exactly <jailRoot>/<target>/<snapshot>.partial
-#     for a write, or <jailRoot>/<target>/<snapshot>[.partial] for a --sender
-#     read (absolute-prefix check, no ".." components, no symlinked prefix), and
+#     whose single path operand is exactly <jailRoot>/<snapshot>.partial for a
+#     write, or <jailRoot>/<snapshot>[.partial] for a --sender read
+#     (absolute-prefix check, no ".." components, no symlinked prefix), and
 #   - the canonical single-quoted lifecycle argv forms backupkit's remote
 #     store issues: `mkdir -p --`, `mkdir --`,
 #     `find <p> -maxdepth 1 -mindepth 1 -print0`, `mv --`, `rm -rf --`,
-#     `df -Pk --`, and `rsync --version`, where every path operand is under
-#     <jailRoot>/ and every leaf component is a snapshot name
-#     ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z), its .partial/.deleting form,
-#     .backupkit.lock, or a target-name-charset component. `rm -rf` is narrower
-#     still: its FINAL component must be `<snap>.partial`, `<snap>.deleting`,
-#     or `.backupkit.lock` - never a bare target directory or a complete
-#     snapshot, so no single permitted command can erase an archive's history.
+#     `df -Pk --`, and `rsync --version`, where every path operand is
+#     <jailRoot> itself or under <jailRoot>/ with every component a snapshot
+#     name ([0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{6}Z), its .partial/.deleting form,
+#     or .backupkit.lock. `rm -rf` is narrower still: its FINAL component must
+#     be `<snap>.partial`, `<snap>.deleting`, or `.backupkit.lock` - never a
+#     complete snapshot and never the root itself, so no single permitted
+#     command can erase an archive's history.
 #
 # Everything else exits 1. There is no eval anywhere: validated operands are
 # exec'd directly, so no shell ever re-parses attacker-controlled text.
@@ -61,9 +66,16 @@ is_snap() {
     return 1
 }
 
-# True when leaf component $1 is permitted: the snapshot regex family
-# (including .partial/.deleting forms), .backupkit.lock, or a
-# target-name-charset component ([a-z0-9][a-z0-9._@-]*, max 64).
+# True when component $1 is permitted: the snapshot regex family (including the
+# .partial/.deleting forms) or .backupkit.lock. Those are the only names that
+# exist inside an archive root.
+#
+# A target-name-charset component ([a-z0-9][a-z0-9._@-]*, max 64) used to be
+# accepted here, because the root was shared by every target and each one owned
+# a <target> subdirectory under it. The root is now ONE target's archive, so no
+# path the client sends names a target - and an accepted shape nothing sends is
+# an accepted shape only an attacker has a use for. Keeping it would have left
+# `mkdir <root>/.ssh`-class writes legal inside the archive.
 check_component() {
     comp=$1
     [ -n "$comp" ] || return 1
@@ -75,14 +87,7 @@ check_component() {
         *.partial) compbase=${comp%.partial} ;;
         *.deleting) compbase=${comp%.deleting} ;;
     esac
-    if is_snap "$compbase"; then
-        return 0
-    fi
-    case $comp in
-        *[!a-z0-9._@-]*) return 1 ;;
-        [!a-z0-9]*) return 1 ;;
-    esac
-    [ ${#comp} -le 64 ]
+    is_snap "$compbase"
 }
 
 # True when the `mv` (source, destination) PAIR is one of the three renames the
@@ -134,10 +139,11 @@ check_mv_pair() {
 
 # True when FINAL component $1 is a leaf the client legitimately `rm -rf`s:
 # `<snap>.partial`, `<snap>.deleting`, or `.backupkit.lock` (the only three
-# shapes remote-store.ts ever removes). A bare target-name component or a
-# COMPLETE snapshot name is deliberately NOT accepted here: check_component
-# permits both, so sharing it with the `rm -rf` verb would let a compromised
-# push client delete a target's entire archive history in one command.
+# shapes remote-store.ts ever removes). A COMPLETE snapshot name is deliberately
+# NOT accepted here: check_component permits one (promote and delete-phase-1
+# both name it), so sharing it with the `rm -rf` verb would let a compromised
+# push client delete verified history one snapshot at a time. The archive root
+# itself is refused by check_lifecycle_path before this is ever reached.
 check_delete_component() {
     dcomp=$1
     if [ "$dcomp" = ".backupkit.lock" ]; then
@@ -179,19 +185,32 @@ check_no_symlink_prefix() {
     return 0
 }
 
-# True when lifecycle path operand $1 is strictly under $ROOT with every
-# component permitted AND no existing prefix is a symlink (the resolved path
-# stays under $ROOT). $2 selects the FINAL component's policy: empty (the
-# default, used by mkdir/mv/find/df, which legitimately name a bare target
-# directory or a complete snapshot) applies check_component; "delete" (used by
-# `rm -rf` only) applies the far narrower check_delete_component. Prefix
-# components always use check_component.
+# True when lifecycle path operand $1 is $ROOT itself or strictly under $ROOT
+# with every component permitted AND no existing prefix is a symlink (the
+# resolved path stays under $ROOT). $2 selects the FINAL component's policy:
+# empty (the default, used by mkdir/mv/find/df, which legitimately name a
+# complete snapshot) applies check_component; "delete" (used by `rm -rf` only)
+# applies the far narrower check_delete_component. Prefix components always use
+# check_component.
+#
+# $ROOT ITSELF is a legal operand now that the root is one target's archive
+# rather than a shared parent: `mkdir -p --`, `find`, and `df -Pk --` all name it
+# directly (they used to name <root>/<target>). It is legal ONLY in the default
+# mode - `rm -rf -- $ROOT` would erase the whole archive in one command, which is
+# the outcome the delete policy exists to prevent, so it is refused here rather
+# than left to check_delete_component (which never sees a final component at all
+# when the operand IS the root). `mv` is safe by its own pair rule: both operands
+# must be snapshot-shaped siblings, and the root is neither.
 check_lifecycle_path() {
     lpath=$1
     lmode=$2
     case $lpath in
         *\'* | *\\*) return 1 ;;
     esac
+    if [ "$lpath" = "$ROOT" ]; then
+        [ "$lmode" = delete ] && return 1
+        return 0
+    fi
     case $lpath in
         "$ROOT"/?*) ;;
         *) return 1 ;;
@@ -218,8 +237,7 @@ check_lifecycle_path() {
 }
 
 # True when rsync path operand $1 is a path the legitimate client really names:
-# exactly `$ROOT/<target>/<leaf>`, where <target> passes check_component and
-# <leaf> depends on the transfer DIRECTION ($2):
+# exactly `$ROOT/<leaf>`, where <leaf> depends on the transfer DIRECTION ($2):
 #
 #   recv (a write, no --sender)  -> only `<snap>.partial`
 #   send (a read, --sender)      -> `<snap>` or `<snap>.partial`
@@ -227,13 +245,19 @@ check_lifecycle_path() {
 # Bounding the operand only by "somewhere under $ROOT with no .." - which is all
 # this function used to do - was a CRITICAL hole, because the option grammar
 # permits `--delete --force` (the legitimate client sends them on every run).
-# `rsync --server ... --delete --force . $ROOT/<target>` with an empty file list
-# therefore deleted every snapshot of that target in ONE command, and
-# `. $ROOT/<target>/<complete-snap>` let an attacker overwrite an
-# already-verified snapshot, or write a dot-directory such as $ROOT/.ssh.
-# Pinning the destination is what makes the permitted `--delete` harmless: it can
-# only ever delete inside the scratch partial the run is building. The shape below
-# is not a guess - it is what rsync 3.4.4 really sends (see the parity test).
+# `rsync --server ... --delete --force . $ROOT` with an empty file list therefore
+# deleted every snapshot of that target in ONE command, and
+# `. $ROOT/<complete-snap>` let an attacker overwrite an already-verified
+# snapshot, or write a dot-directory such as $ROOT/.ssh. Pinning the destination
+# is what makes the permitted `--delete` harmless: it can only ever delete inside
+# the scratch partial the run is building. The shape below is not a guess - it is
+# what rsync 3.4.4 really sends (see the parity test).
+#
+# The operand is ONE component under $ROOT (it was `<target>/<leaf>` while a
+# root was shared by every target). $ROOT itself is not a legal rsync operand in
+# either direction - that is exactly the "delete everything the sender does not
+# have" transfer above - which is also why a push MIRROR, whose destination IS
+# the root, cannot be jailed and the config validator refuses one.
 check_rsync_path() {
     rpath=${1%/}
     rpmode=$2
@@ -244,17 +268,12 @@ check_rsync_path() {
         "$ROOT"/?*) ;;
         *) return 1 ;;
     esac
-    rrest=${rpath#"$ROOT"/}
-    # Exactly two components: <target>/<leaf>. Deeper or shallower is not a shape
-    # the client ever produces.
-    case $rrest in
-        */*/*) return 1 ;;
-        */*) ;;
-        *) return 1 ;;
+    rleaf=${rpath#"$ROOT"/}
+    # Exactly one component. Deeper or shallower is not a shape the client ever
+    # produces.
+    case $rleaf in
+        */*) return 1 ;;
     esac
-    rtarget=${rrest%%/*}
-    rleaf=${rrest#*/}
-    check_component "$rtarget" || return 1
     case $rleaf in
         *.partial) is_snap "${rleaf%.partial}" || return 1 ;;
         *)

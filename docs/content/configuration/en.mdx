@@ -124,7 +124,7 @@ Backupkit still adds its own safety options on the command line, which override 
 
 ## Targets
 
-Each target is keyed by name. For a snapshot target that name becomes the snapshot subdirectory; for every target it is the identifier in the logs.
+Each target is keyed by name. The name is the identifier in the CLI and the logs, and no part of any path: where a target writes is its `destination` alone.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -132,7 +132,7 @@ Each target is keyed by name. For a snapshot target that name becomes the snapsh
 | `direction` | `"pull"` \| `"push"` | required | Pull fetches from the remote; push sends to it |
 | `remote` | string | required | A key from `remotes` |
 | `source` | string | required | Directory to back up (pull: on the remote; push: local) |
-| `destination` | string | required | Snapshot mode: the archive root. Mirror mode: the copy itself (pull: local; push: on the remote) |
+| `destination` | string | required | This target's own directory, shared with no other target. Snapshot mode: the archive root, holding `<snapshot>/` directories. Mirror mode: the copy itself (pull: local; push: on the remote) |
 | `exclude` | string[] | `[]` | rsync exclude patterns |
 | `schedule` | object | `{ interval: "day" }` | When to run - see below |
 | `retention` | object \| `false` | the top-level default | **Snapshot only.** Retention for this target; `false` means never prune |
@@ -154,7 +154,7 @@ Each target is keyed by name. For a snapshot target that name becomes the snapsh
         "direction": "pull",
         "remote": "example",
         "source": "/var/www",
-        "destination": "/srv/backups",
+        "destination": "/srv/backups/web",
     },
     // One in-place copy: /Volumes/persistance IS the tree, kept identical to the source.
     "persistance": {
@@ -168,7 +168,7 @@ Each target is keyed by name. For a snapshot target that name becomes the snapsh
 }
 ```
 
-**Snapshot** is the archive: each run writes `<destination>/<name>/<timestamp>/`, hardlinked against the previous snapshot so unchanged files cost no space, and [retention](/retention/) prunes the history on a schedule. You can restore any kept point in time.
+**Snapshot** is the archive: each run writes `<destination>/<timestamp>/`, hardlinked against the previous snapshot so unchanged files cost no space, and [retention](/retention/) prunes the history on a schedule. You can restore any kept point in time.
 
 **Mirror** is a sync: `<destination>` *is* the tree, one copy, no history. Use it to keep two clones of the same directory in step - a working directory and its copy on another machine or an external volume. What it gives up is every recovery property of the archive: **anything the source no longer has is deleted from the destination on the next run**, including a file you deleted by accident an hour ago, and there is no earlier version to go back to.
 
@@ -182,7 +182,22 @@ What changes for a mirror:
 
 **A mirror will not run a transfer that has collapsed.** Before each run backupkit estimates the source, and if it holds under half the files the last successful run moved, the transfer is refused and the run is reported as `content-collapse` - the mirror is left exactly as it was. That is the case where an unmounted volume or a half-restored directory would otherwise delete the good copy. Check the source, then `backupkit run --force <target>` performs it anyway.
 
-**A push mirror cannot be jailed** and must write `"jail": false`. The jail's forced command pins every transfer to `<destination>/<target>/<snapshot>.partial`, and that pin is exactly what keeps the `--delete` it also allows confined to the snapshot being built. A mirror writes the destination root itself, so the jail rejects it - and could not safely be taught to accept it. Mirror with `"direction": "pull"` instead wherever you can: the machine holding the copy then does the fetching, and the source needs no access to it at all.
+**A push mirror cannot be jailed** and must write `"jail": false`. The jail's forced command pins every transfer to `<destination>/<snapshot>.partial`, and that pin is exactly what keeps the `--delete` it also allows confined to the snapshot being built. A mirror writes the destination itself, so the jail rejects it - and could not safely be taught to accept it. Mirror with `"direction": "pull"` instead wherever you can: the machine holding the copy then does the fetching, and the source needs no access to it at all.
+
+### Upgrading a 1.x config
+
+In backupkit 1.x `destination` was a *shared parent* and backupkit appended the target name to it: `"destination": "/srv/backups"` on target `web` wrote to `/srv/backups/web/<timestamp>/`. In 2.0 `destination` is the archive root itself, so it means the same thing in both modes and every target owns its own directory.
+
+**Nothing on disk has to move.** Append the target name to each snapshot target's `destination` and the existing archive is exactly where 2.x looks for it:
+
+```jsonc
+// 1.x                          // 2.0
+"destination": "/srv/backups",  "destination": "/srv/backups/web",
+```
+
+Two things catch a config that was not migrated. `backupkit check` reads each **local** destination and reports any target whose snapshots it finds one level down, printing the destination to set. Two snapshot targets left sharing one parent now collide outright, and validation names both and the directories to give them. Left unfixed, such a target would validate, run, and quietly start a second archive one level up, leaving the real history unlisted, unpruned, and unusable as a hard-link base.
+
+**Push targets also need the archive server updated**: rerun `sudo backupkit jail install` there. The 2.x client sends `<destination>/<snapshot>.partial` where an older jail still demands `<destination>/<target>/<snapshot>.partial`, so until the script is updated every push is refused with a bare `backupkit-remote: rejected` (`backupkit jail status` on that server says so, and every command there warns while the installed copy is behind). Mirror targets are unaffected in either direction.
 
 ### Path rules
 
@@ -190,7 +205,7 @@ Every path field has to be absolute (`~` is rejected), free of NUL and newline, 
 
 The paths that end up inside rsync's `-e` string or a remote command are stricter still: `identityFile`, `knownHostsFile`, `rsyncBin`, `sshBin`, `rsync.remoteRsyncBin`, the path after `passphrase: "file:"`, and a push `destination` additionally reject whitespace and quote characters. `source`, `stateDir`, `logging.file`, and a pull `destination` accept both, so `/Volumes/My Backups` is a perfectly good pull destination.
 
-**Two targets may not have nesting write roots.** The write root is `<destination>/<name>` for a snapshot target and `<destination>` itself for a mirror, and no target's may equal or sit inside another's in the same place - destinations `/b` for target `a` and `/b/a` for target `b` collide, and validation says so by name rather than letting one target's archive grow inside another's. With a mirror in the mix this stops something worse than untidiness: a mirror deletes whatever its source does not have, so a mirror whose destination contained another target's archive would delete that archive on its first run.
+**Every target needs a destination of its own.** The write root is the target's `destination` in both modes, and no target's may equal or sit inside another's in the same place. Two snapshot targets pointed at one directory would interleave their snapshots in it, where each one's retention prunes the other's history and the hard-link base comes from the wrong source - so that is a config error naming both targets and the two directories to use instead. Nesting is refused for the same reason: destinations `/b` for target `a` and `/b/a` for target `b` collide. With a mirror in the mix this stops something worse than untidiness: a mirror deletes whatever its source does not have, so a mirror whose destination contained another target's archive would delete that archive on its first run.
 
 Paths are normalized when the config loads: duplicate slashes collapse and a trailing slash is stripped, so `/srv/backups//archive/` and `/srv/backups/archive` are the same destination.
 

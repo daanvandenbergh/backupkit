@@ -827,7 +827,7 @@ describe("cross-field rules", () => {
                 },
             }),
             "targets.db.destination",
-            "write root /srv/backups/web/db collides with targets.web's write root /srv/backups/web",
+            "write root /srv/backups/web collides with targets.web's write root /srv/backups",
         );
     });
 
@@ -858,7 +858,7 @@ describe("cross-field rules", () => {
                 },
             }),
             "targets.clone.destination",
-            "collides with targets.web's write root /srv/backups/web",
+            "collides with targets.web's write root /srv/backups",
         );
     });
 
@@ -871,7 +871,7 @@ describe("cross-field rules", () => {
                 },
             }),
             "targets.b.destination",
-            "write root /srv/clone collides",
+            "destination /srv/clone is also targets.a's destination",
         );
     });
 
@@ -904,9 +904,10 @@ describe("cross-field rules", () => {
         expect(validated.targets[0].target.destination).toBe("/srv/backups/archive");
         expect(validated.targets[0].target.source).toBe("/var/www");
         expect(validated.stateDir).toBe("/var/lib/backupkit");
-        // The jail's own prefix rule, applied to the resolved pair.
+        // The jail's own prefix rule, applied to the resolved pair: the operand
+        // the store really sends is `<root>/<snapshot>.partial`.
         const root = validated.targets[0].target.destination;
-        expect(posix.join(root, "web").startsWith(`${root}/`)).toBe(true);
+        expect(posix.join(root, "2026-08-10T031502Z.partial").startsWith(`${root}/`)).toBe(true);
     });
 
     // Same seam, the other half: a space in a PUSH destination is the jail root
@@ -965,13 +966,43 @@ describe("cross-field rules", () => {
         );
     });
 
-    it("allows two targets sharing a destination root (sibling snapshot roots)", () => {
+    // The pre-2.0 arrangement, and the shape a config carried over unchanged
+    // lands in: two snapshot targets pointed at one shared parent, kept apart by
+    // a `<target>` level backupkit appended for them. There is no such level any
+    // more, so this now has to FAIL - both targets would interleave their
+    // snapshots in one directory, where each one's retention prunes the other's
+    // history and --link-dest hardlinks against a base from the wrong source.
+    it("rejects two snapshot targets sharing one destination, and names the fix", () => {
+        expectFail(
+            base({
+                targets: {
+                    web: { ...TARGET, destination: "/srv/backups" },
+                    db: { ...TARGET, destination: "/srv/backups" },
+                },
+            }),
+            "targets.db.destination",
+            "destination /srv/backups is also targets.web's destination",
+        );
+        // The message has to carry the edit, not just the verdict.
+        expectFail(
+            base({
+                targets: {
+                    web: { ...TARGET, destination: "/srv/backups" },
+                    db: { ...TARGET, destination: "/srv/backups" },
+                },
+            }),
+            "targets.db.destination",
+            "/srv/backups/db and /srv/backups/web",
+        );
+    });
+
+    it("allows the same two targets once each has its own destination", () => {
         expect(() =>
             validate(
                 base({
                     targets: {
-                        web: { ...TARGET, destination: "/srv/backups" },
-                        db: { ...TARGET, destination: "/srv/backups" },
+                        web: { ...TARGET, destination: "/srv/backups/web" },
+                        db: { ...TARGET, destination: "/srv/backups/db" },
                     },
                 }),
             ),

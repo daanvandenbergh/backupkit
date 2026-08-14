@@ -85,13 +85,13 @@ export interface TargetRunOptions {
     signal?: AbortSignal;
 }
 
-/** The `<destination>/<targetName>/<snapName>.partial` endpoint on the target's destination side. */
+/** The `<destination>/<snapName>.partial` endpoint on the target's destination side. */
 function partialEndpoint(target: ResolvedTarget, snapName: string): Endpoint {
     const leaf = `${snapName}.partial`;
     if (target.dst.kind === "local") {
-        return { kind: "local", path: join(target.dst.path, target.name, leaf) };
+        return { kind: "local", path: join(target.dst.path, leaf) };
     }
-    return { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, target.name, leaf) };
+    return { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, leaf) };
 }
 
 /**

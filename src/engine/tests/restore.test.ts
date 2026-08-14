@@ -19,7 +19,7 @@ const NEW_SNAP = "2026-08-05T000000Z";
 /** Create the two complete snapshot directories on disk for a fixture kit. */
 async function seedSnapshots(fixture: KitFixture): Promise<void> {
     for (const name of [OLD_SNAP, NEW_SNAP]) {
-        const dir = join(fixture.destination, "web", name);
+        const dir = join(fixture.destination, name);
         await mkdir(dir, { recursive: true });
         await writeFile(join(dir, "a.txt"), `content of ${name}\n`);
     }
@@ -71,7 +71,7 @@ describe("restore", () => {
         fixture = await makeKit();
         await seedSnapshots(fixture);
         await expect(
-            fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.destination, "web", "out") }),
+            fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.destination, "out") }),
         ).rejects.toThrow(/inside the archive root/);
         await expect(
             fixture.kit.restore({ target: "web", snapshot: "latest", output: join(fixture.destination, "out") }),
@@ -126,7 +126,7 @@ describe("restore", () => {
             "--chmod=ug-s",
             "--no-devices",
             "--no-specials",
-            join(fixture.destination, "web", NEW_SNAP) + "/",
+            join(fixture.destination, NEW_SNAP) + "/",
             out,
         ]);
         expect(copy?.args.some((arg) => arg.includes("--delete"))).toBe(false);

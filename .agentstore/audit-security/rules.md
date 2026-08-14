@@ -173,14 +173,19 @@ even when nothing visibly fails.
     `<identity>\0<bin>`, and `check` probes every binary in use on a remote.
     *graduated: `src/rsync/tests/probe.test.ts` ("probes each binary on one host separately"),
     `src/engine/tests/backupkit.test.ts` ("probes each remoteRsyncBin on a shared remote").*
-21. `backupkit-remote.sh` re-implements the snapshot-name codec and the target-name charset in
-    POSIX shell, and it is a copy deployed out-of-band on each archive server. The single-source
-    regex guard scans `.ts` only, and the older jail suite feeds LITERAL names, so neither can see
-    a codec change: widening either grammar would ship a client whose every push operation an
-    installed jail rejects with a bare "rejected". The parity guard derives its cases from
-    `formatSnapshotName` and from `validateConfig` itself and runs the shipped script.
+21. `backupkit-remote.sh` re-implements the snapshot-name codec in POSIX shell, and it is a copy
+    deployed out-of-band on each archive server. The single-source regex guard scans `.ts` only,
+    and the older jail suite feeds LITERAL names, so neither can see a codec change: widening the
+    grammar would ship a client whose every push operation an installed jail rejects with a bare
+    "rejected". The parity guard derives its cases from `formatSnapshotName` and runs the shipped
+    script. Its second half pins the REVERSE: a jail root is ONE target's archive root (its
+    `destination`), so a target name is no part of any path the client sends, and every name
+    `validateConfig` accepts as a target must be REJECTED by the script as a path component. The
+    shell used to carry a target-name-charset arm for the shared-root layout; an accepted shape
+    nothing sends is one only an attacker has a use for, and re-adding that arm - or an appended
+    `<target>` level anywhere in the client - has to turn this red.
     *graduated: `src/snapshots/tests/jail-grammar.test.ts` - expect: the candidate set spans both
-    validator verdicts (its own vacuity guard).*
+    validator verdicts (its own vacuity guard), and every candidate is rejected as a component.*
 22. The graceful-shutdown signal reaches EVERY child, not just rsync. The snapshot store's remote
     commands and `withTransientRetry`'s backoff both take it, so a stop is bounded by the child's
     death rather than by a 60 s ssh timeout times its attempts, or by a backoff of up to the
@@ -189,11 +194,16 @@ even when nothing visibly fails.
     TTL clears. *graduated: `src/shared/tests/retry.test.ts` ("an abort mid-backoff wakes the
     sleep immediately"), `src/snapshots/tests/remote-store.test.ts` ("aborts an in-flight store
     command when the shutdown signal fires").*
-23. The jail's `rm -rf` branch uses a NARROWER component policy than every other verb. `mkdir`,
-    `mv`, `find` and `df` legitimately name a bare target directory or a complete snapshot, so
-    `check_component` permits both - and sharing that function with `rm -rf` made
-    `rm -rf -- <root>/<target>` and `rm -rf` of the newest complete snapshot legal jail commands,
-    i.e. a compromised push client could erase a target's entire history in one line. The
+23. The jail's `rm -rf` branch uses a NARROWER path policy than every other verb. `mkdir`, `find`
+    and `df` legitimately name the archive ROOT itself (the store's `ensureRoot`, listing and
+    `df` all target it) and `mv`/`find` legitimately name a complete snapshot, so
+    `check_lifecycle_path`'s default mode permits both - and sharing that mode with `rm -rf` made
+    `rm -rf -- $ROOT` and `rm -rf` of the newest complete snapshot legal jail commands,
+    i.e. a compromised push client could erase a target's entire history in one line. The root
+    arm is the newer half of this and the more dangerous one: it was added so the store could
+    name the root directly once `destination` became the archive root, and it is refused for the
+    `delete` mode explicitly rather than by `check_delete_component`, which never sees a final
+    component when the operand IS the root. The
     legitimate client never issues those shapes: its delete is two-phase (`mv` to `.deleting`,
     then `rm -rf` the `.deleting` leaf), so the only leaves it ever removes are `<snap>.partial`,
     `<snap>.deleting` and `.backupkit.lock`. `check_delete_component` enforces exactly that, and
@@ -268,19 +278,21 @@ partial fix, it is a false sense of security plus a test that reads as green.
     the protocol stream, so the argv operand the jail validated is not the one governing the
     transfer - nullifying every path check at once; rsync's own `rrsync` refuses it for this reason).
     Separately, bounding the operand only by "under $ROOT, no `..`" - with no component policy at
-    all, unlike `check_lifecycle_path` - meant `--delete --force . $ROOT/<target>` erased a target's
-    whole history in ONE command, and `. $ROOT/<target>/<complete-snap>` overwrote verified history.
-    Pinning the destination to `<target>/<snap>.partial` for a write (and `<snap>` additionally for a
-    `--sender` read) is what makes the permitted `--delete` harmless: it can only delete inside the
-    scratch partial being built. The allowlist is derived from MEASURED argv, not intent - see 24.
+    all, unlike `check_lifecycle_path` - meant `--delete --force . $ROOT` erased a target's whole
+    history in ONE command, and `. $ROOT/<complete-snap>` overwrote verified history.
+    Pinning the destination to exactly `<snap>.partial`, ONE component under the root, for a write
+    (and `<snap>` additionally for a `--sender` read) is what makes the permitted `--delete`
+    harmless: it can only delete inside the scratch partial being built. The root itself is a legal
+    operand for the LIFECYCLE verbs and never for rsync in either direction - which is also why a
+    push mirror, whose destination IS the root, cannot be jailed and the validator refuses one. The allowlist is derived from MEASURED argv, not intent - see 24.
     *graduated: `src/snapshots/tests/jail.fake.test.ts` ("the rsync path operand is pinned to the
     run's own .partial (destination policy)", "unmeasured rsync options are refused by default (the
     option allowlist)") - expect: >= 7 destination rejects and >= 8 option rejects.*
 30. Narrowing a VERB is not the same as enforcing a PROPERTY. Invariant 23 narrowed `rm -rf` to
     `<snap>.partial`/`<snap>.deleting`/`.backupkit.lock` - and the property "a compromised push
     client cannot delete a completed snapshot or a target's history" still did not hold, because
-    `mv`'s two operands were validated INDEPENDENTLY (each by `check_component`, which accepts a
-    bare target-name component). `mv -- $ROOT/<target> $ROOT/<snap>.deleting` was therefore legal,
+    `mv`'s two operands were validated INDEPENDENTLY (each by `check_lifecycle_path`, whose default
+    mode accepts the archive root). `mv -- $ROOT $ROOT/<snap>.deleting` was therefore legal,
     and its output is exactly the leaf shape `check_delete_component` then permits `rm -rf` to
     remove: two permitted commands, whole archive gone, delete policy reduced to decoration. A
     rename is a delete gadget whenever the destination namespace is deletable. `check_mv_pair`

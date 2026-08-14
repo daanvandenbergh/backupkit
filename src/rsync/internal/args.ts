@@ -43,7 +43,7 @@ export interface TransferOptions {
 export interface TransferSpec {
     /** Transfer source endpoint (formatted with exactly one trailing slash - contents are synced). */
     src: Endpoint;
-    /** Transfer destination endpoint - the `<destination>/<name>/<snap>.partial` directory. */
+    /** Transfer destination endpoint - the `<destination>/<snap>.partial` directory (the destination itself for a mirror). */
     dst: Endpoint;
     /** Resolved rsync tuning. */
     options: TransferOptions;

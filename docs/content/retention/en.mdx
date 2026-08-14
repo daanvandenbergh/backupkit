@@ -21,7 +21,7 @@ Retention is a `"mode": "snapshot"` concern only. A [mirror target](/configurati
 
 ## Every run is a hard-linked snapshot
 
-A target's snapshots live at `<destination>/<target>/<timestamp>/`, one directory per run, named with a UTC timestamp - `2026-08-10T031502Z`, colons dropped so the name is legal on exFAT, NTFS, and SMB.
+A target's snapshots live at `<destination>/<timestamp>/`, one directory per run, named with a UTC timestamp - `2026-08-10T031502Z`, colons dropped so the name is legal on exFAT, NTFS, and SMB.
 
 A run transfers into `<timestamp>.partial` and is renamed into place only once it completes, so an interrupted run never appears in history: the next run resumes or discards it. "Complete" is exactly that rename, which is why `backupkit list` and retention only ever see finished snapshots.
 

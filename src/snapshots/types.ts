@@ -24,7 +24,7 @@ export interface SnapshotInfo {
  * The client's own clock is the only legitimate writer of snapshot names, so a
  * name dated meaningfully ahead of now cannot be genuine - it is either a
  * clock-skew accident or something a jailed writer planted (one `mkdir -p --
- * <root>/<target>/2099-01-01T000000Z` is accepted by the jail by design). Such
+ * <root>/2099-01-01T000000Z` is accepted by the jail by design). Such
  * a name must never become "the newest complete snapshot": that would fail the
  * clock-skew guard on every run forever AND make the archive unprunable,
  * because a store refuses to delete its newest complete snapshot.

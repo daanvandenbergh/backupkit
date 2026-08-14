@@ -77,7 +77,8 @@ describe("runTarget pipeline", () => {
         expect(report.reason).toBeNull();
         expect(report.error).toBeNull();
         expect(seen[0].spec.linkDestBase).toBeNull();
-        expect(seen[0].spec.dst.path.endsWith(`web/${SNAP}.partial`)).toBe(true);
+        // The partial sits DIRECTLY in the destination: no target-name level.
+        expect(seen[0].spec.dst.path).toBe(`/data/archive/${SNAP}.partial`);
         expect(store.calls).toContain(`claimPartial:${SNAP}`);
         expect(store.calls).toContain(`promote:${SNAP}`);
         expect(store.names).toContain(SNAP);

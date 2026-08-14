@@ -1,22 +1,31 @@
 /**
- * Guard: the push jail's SHELL re-implementation of two name grammars stays in
- * step with the TypeScript that owns them.
+ * Guard: the push jail's SHELL re-implementation of the snapshot-name grammar
+ * stays in step with the TypeScript that owns it - and never grows a target
+ * level back.
  *
  * `backupkit-remote.sh` cannot import anything - it is a POSIX shell script
  * installed on the archive server - so it re-implements the snapshot-name codec
- * (`is_snap`) and the target-name charset (`check_component`) as globs. The
- * single-source guard in `shared/tests/regex-single-source.test.ts` scans only
- * `.ts`, so those copies are invisible to it, and `jail.fake.test.ts` feeds the
- * script LITERAL names - which keep matching the shell glob no matter what the
- * codec does. So widening either grammar in TypeScript would ship a client
- * whose every push operation an already-deployed jail rejects, reporting a bare
- * "backupkit-remote: rejected" and no hint why.
+ * (`is_snap`) as globs. The single-source guard in
+ * `shared/tests/regex-single-source.test.ts` scans only `.ts`, so that copy is
+ * invisible to it, and `jail.fake.test.ts` feeds the script LITERAL names -
+ * which keep matching the shell glob no matter what the codec does. So widening
+ * the codec in TypeScript would ship a client whose every push operation an
+ * already-deployed jail rejects, reporting a bare "backupkit-remote: rejected"
+ * and no hint why.
  *
- * This file closes exactly that gap: every case is DERIVED - snapshot names
- * from `formatSnapshotName`, target-name legality from `validateConfig` itself
- * - and run against the shipped script. Nothing is restated here, which would
- * only add a third copy to drift. Path-escape, `..`, and symlink cases belong
- * to `jail.fake.test.ts` and are not repeated.
+ * The second half is the reverse direction. A jail root is ONE target's archive
+ * root, so a target name is no part of any path the client sends; the shell used
+ * to re-implement the target-name charset too, and that arm is gone. This file
+ * pins it gone: every name the config validator accepts as a target must be
+ * REJECTED as a path component, or the pre-2.0 `<root>/<target>/<snap>` layout
+ * would quietly still be reachable through a jail that claims to confine one
+ * archive.
+ *
+ * Every case is DERIVED - snapshot names from `formatSnapshotName`, target-name
+ * legality from `validateConfig` itself - and run against the shipped script.
+ * Nothing is restated here, which would only add another copy to drift.
+ * Path-escape, `..`, and symlink cases belong to `jail.fake.test.ts` and are not
+ * repeated.
  */
 
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
@@ -112,7 +121,7 @@ describe("push jail grammar parity (executes the shipped backupkit-remote.sh)", 
         for (const name of names) {
             expect(parseSnapshotName(name)).not.toBeNull();
             for (const leaf of [name, `${name}.partial`, `${name}.deleting`]) {
-                expect({ leaf, accepted: await jailAccepts(await make("web", leaf)) }).toEqual({
+                expect({ leaf, accepted: await jailAccepts(await make(leaf)) }).toEqual({
                     leaf,
                     accepted: true,
                 });
@@ -121,20 +130,24 @@ describe("push jail grammar parity (executes the shipped backupkit-remote.sh)", 
     });
 
     it("accepts the lock directory and its snapshot-named marker", async () => {
-        expect(await jailAccepts(await make("web", ".backupkit.lock"))).toBe(true);
+        expect(await jailAccepts(await make(".backupkit.lock"))).toBe(true);
         const marker = formatSnapshotName(new Date("2026-08-10T03:15:02Z"));
-        expect(await jailAccepts(await make("web", ".backupkit.lock", marker))).toBe(true);
+        expect(await jailAccepts(await make(".backupkit.lock", marker))).toBe(true);
     });
 
-    it.each(NAME_CANDIDATES)("agrees with the config validator on the target name %j", async (name) => {
+    it("accepts the archive root itself - the store's mkdir, find and df all name it", async () => {
+        expect(await jailAccepts(root)).toBe(true);
+    });
+
+    it.each(NAME_CANDIDATES)("rejects the target name %j as a path component", async (name) => {
+        // Both verdicts of the validator matter here, and for the same reason:
+        // no target name reaches a path at all, so a name it ACCEPTS must be
+        // just as unreachable as one it refuses.
         await make(name).catch(() => undefined);
-        expect({ name, jail: await jailAccepts(join(root, name)) }).toEqual({
-            name,
-            jail: validatorAccepts(name),
-        });
+        expect({ name, jail: await jailAccepts(join(root, name)) }).toEqual({ name, jail: false });
     });
 
-    it("the candidate set really spans both verdicts", () => {
+    it("the candidate set really spans both validator verdicts", () => {
         const verdicts = NAME_CANDIDATES.map(validatorAccepts);
         expect(verdicts).toContain(true);
         expect(verdicts).toContain(false);

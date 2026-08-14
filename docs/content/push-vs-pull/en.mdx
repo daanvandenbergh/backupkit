@@ -39,8 +39,10 @@ Push is for the case where the source host has to start the connection - the arc
 The cost is that the source host now holds a key that reaches the archive. To limit the damage that key can do, put it behind a **forced command**: an `authorized_keys` setting that makes ssh run one fixed program no matter what the client asks for. Backupkit ships that program as `backupkit-remote`, and `backupkit check` prints the exact line to install on the archive server:
 
 ```
-restrict,command="/usr/local/bin/backupkit-remote '/srv/backups'" ssh-ed25519 AAAA...
+restrict,command="/usr/local/bin/backupkit-remote '/srv/backups/nas-www'" ssh-ed25519 AAAA...
 ```
+
+The directory it names is that target's `destination` - its archive root, holding its snapshots directly - so the key is confined to one target's archive and cannot reach another's. A second push target gets a second line with its own root.
 
 `restrict` turns off port forwarding, agent forwarding, PTY allocation, and X11. The forced command then allows only the `rsync --server` transfers and the few directory operations backupkit actually needs, all confined to the directory you name. Everything else is rejected. The [Security Model](/security-model/) covers exactly what it lets through.
 
@@ -75,7 +77,7 @@ Set `"jail": false` on a push target to use a plain account instead. It defaults
     "direction": "push",
     "remote": "nas",
     "source": "/var/www",
-    "destination": "/srv/backups",
+    "destination": "/srv/backups/nas-www",
     "jail": false  // accepted risk: the push key is not confined
 }
 ```
@@ -106,7 +108,7 @@ Some appliance shells go further and parse **no quoting at all**: a Hetzner Stor
         "direction": "push",
         "remote": "storagebox",
         "source": "/var/www",
-        "destination": "/home/backups",
+        "destination": "/home/backups/nas-www",
         "jail": false,  // required: the jail's grammar is the quoted form
     },
 }
@@ -114,7 +116,7 @@ Some appliance shells go further and parse **no quoting at all**: a Hetzner Stor
 
 ## A push mirror cannot be jailed
 
-A [mirror target](/configuration/#snapshot-or-mirror) writes its destination in place, and the jail cannot accept that. The forced command pins every transfer's destination to `<root>/<target>/<snapshot>.partial`, and that pin is exactly what makes the `--delete --force` it also permits harmless: a delete can only ever reach inside the scratch directory of the run in flight. A mirror's destination *is* the root, so the jail rejects its every transfer - and teaching it otherwise would mean permitting "delete anything under the root the sender no longer has", which is the one command the jail exists to refuse.
+A [mirror target](/configuration/#snapshot-or-mirror) writes its destination in place, and the jail cannot accept that. The forced command pins every transfer's destination to `<root>/<snapshot>.partial`, and that pin is exactly what makes the `--delete --force` it also permits harmless: a delete can only ever reach inside the scratch directory of the run in flight. A mirror's destination *is* the root, so the jail rejects its every transfer - and teaching it otherwise would mean permitting "delete anything under the root the sender no longer has", which is the one command the jail exists to refuse.
 
 So a push mirror is an unjailed key by construction, and the config has to say so with `"jail": false`. Since `jail` defaults to `true` on push, backupkit refuses the combination at validation rather than flipping that default quietly - a downgrade of the archive host's protection should be written down, not inferred.
 
@@ -124,7 +126,7 @@ So a push mirror is an unjailed key by construction, and the config has to say s
 
 Almost nothing. Backupkit turns `direction` into a source endpoint and a destination endpoint once, up front. No transfer, snapshot-store, disk-guard, retention, or restore code branches on the direction again - it survives only in the run reports and in `check`'s jail warning.
 
-The archive layout is identical in both directions: snapshots at `<destination>/<target>/<timestamp>/`, each run hard-linked against the previous complete one.
+The archive layout is identical in both directions: snapshots at `<destination>/<timestamp>/`, each run hard-linked against the previous complete one.
 
 Because of that symmetry you can mix directions in one config - pull most of your fleet into a central archive, and let one NAT-bound host push into the same archive, all on the same daemon.
 

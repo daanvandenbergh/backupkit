@@ -661,10 +661,10 @@ class Validator {
         }
         // Cross-field rule: a JAILED push cannot be a mirror, and this has to be
         // refused here or it fails as a mystery at run time. The jail's forced
-        // command pins every rsync destination to `$ROOT/<target>/<snap>.partial`
-        // - that pin is precisely what makes the `--delete --force` it also
-        // permits harmless, since a delete can then only reach inside the scratch
-        // partial of the run in flight. A mirror's destination IS `$ROOT`, so the
+        // command pins every rsync destination to `$ROOT/<snap>.partial` - that
+        // pin is precisely what makes the `--delete --force` it also permits
+        // harmless, since a delete can then only reach inside the scratch
+        // partial of the run in flight. A mirror writes `$ROOT` ITSELF, so the
         // jail rejects its every transfer; and it could not safely be taught to
         // accept one, because "delete anything under $ROOT the sender no longer
         // has" is the exact command the jail exists to refuse.
@@ -678,8 +678,8 @@ class Validator {
                 jailNode ?? obj,
                 `${path}.jail`,
                 'a "mirror" push cannot be jailed: the forced command pins every transfer to ' +
-                    "<destination>/<target>/<snapshot>.partial, which is what keeps its permitted --delete " +
-                    "confined - a mirror writes the destination root itself. Set \"jail\": false to accept " +
+                    "<destination>/<snapshot>.partial, which is what keeps its permitted --delete " +
+                    "confined - a mirror writes the destination itself. Set \"jail\": false to accept " +
                     "that this key has whatever access the server grants it, or use \"mode\": \"snapshot\", " +
                     "or mirror in the other direction with \"direction\": \"pull\"",
             );
@@ -694,10 +694,18 @@ class Validator {
     /**
      * Cross-field rule: no target's write root may equal or nest inside
      * another's within the same storage location (local for pull, the target's
-     * remote for push). The root is `<destination>/<name>` for a snapshot
-     * target and `<destination>` itself for a mirror.
+     * remote for push). The write root is the target's `destination` in BOTH
+     * modes - a snapshot target owns its destination outright (its snapshots
+     * are the directories in it) exactly as a mirror does.
      *
-     * Mirrors are why this rule is now load-bearing rather than tidy: a mirror
+     * That makes SHARING one destination between two snapshot targets an error
+     * rather than the normal arrangement it used to be, and this is the rule
+     * that says so. It has to: with no target-name level left to separate them,
+     * two targets pointed at one destination would interleave their snapshots
+     * in a single directory, where each one's retention prunes the other's
+     * history and `--link-dest` hardlinks against a base from the wrong source.
+     *
+     * Mirrors are why this rule is also load-bearing against data loss: a mirror
      * transfers with `--delete --force`, so a mirror whose destination CONTAINS
      * another target's archive deletes that archive on its first run - the one
      * config mistake in this file that destroys data rather than failing.
@@ -706,7 +714,7 @@ class Validator {
         const roots: { name: string; scope: string; root: string }[] = targets.map(({ name, target }) => ({
             name,
             scope: target.direction === "pull" ? "local" : `remote:${target.remote}`,
-            root: target.mode === "mirror" ? normalizePath(target.destination) : `${normalizePath(target.destination)}/${name}`,
+            root: normalizePath(target.destination),
         }));
         for (let i = 0; i < roots.length; i += 1) {
             for (let j = 0; j < i; j += 1) {
@@ -719,10 +727,18 @@ class Validator {
                     a.root === b.root || a.root.startsWith(`${b.root}/`) || b.root.startsWith(`${a.root}/`);
                 if (nested) {
                     const node = nodes.get(b.name)!;
+                    // An EQUAL pair is the shape an upgraded pre-2.0 config
+                    // lands in - two targets that used to share one archive
+                    // root and were kept apart by a target-name level that no
+                    // longer exists - so it names the exact fix rather than
+                    // just the collision.
                     this.fail(
                         node,
                         `targets.${b.name}.destination`,
-                        `write root ${b.root} collides with targets.${a.name}'s write root ${a.root} - choose a distinct destination`,
+                        a.root === b.root
+                            ? `destination ${b.root} is also targets.${a.name}'s destination - a destination holds ONE target's ` +
+                                  `backup, so give each its own directory (e.g. ${b.root}/${b.name} and ${a.root}/${a.name})`
+                            : `write root ${b.root} collides with targets.${a.name}'s write root ${a.root} - choose a distinct destination`,
                     );
                 }
             }

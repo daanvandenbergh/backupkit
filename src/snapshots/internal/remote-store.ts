@@ -212,7 +212,7 @@ class RemoteLockBackend implements LockBackend {
 
 /** The remote `SnapshotStore` implementation over one jailed archive root. */
 export class RemoteSnapshotStore implements SnapshotStore {
-    /** Absolute remote archive root: `<destination>/<targetName>` (POSIX). */
+    /** Absolute remote archive root: the target's `destination` (POSIX), holding `<snapshot>/` directories directly. */
     private readonly root: string;
 
     /** The remote command seam (the real one runs through `runRemote`). */

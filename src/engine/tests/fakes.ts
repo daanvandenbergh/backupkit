@@ -262,10 +262,13 @@ export async function makeKit(params: {
     deps?: Partial<BackupkitDeps>;
     /**
      * Extra targets appended after the default one, built from the fixture's
-     * archive root (a sibling target needs a real, permission-clean local
-     * destination - preflight refuses a destination root that does not exist).
+     * archive PARENT (`<root>/archive`'s parent, i.e. `<root>`). Each one needs
+     * a destination of its OWN - a destination is one target's archive root, so
+     * two targets sharing one would share a lock and interleave their snapshots.
+     * Every local destination is created, permission-clean, before the engine
+     * sees it: preflight refuses a destination root that does not exist.
      */
-    extraTargets?: (destination: string) => ResolvedTarget[];
+    extraTargets?: (archiveParent: string) => ResolvedTarget[];
 } = {}): Promise<KitFixture> {
     const root = await mkdtemp(join(tmpdir(), "backupkit-engine-"));
     const configPath = join(root, "config.jsonc");
@@ -286,8 +289,13 @@ export async function makeKit(params: {
     const config = makeConfig({
         configPath,
         stateDir,
-        targets: [target, ...(params.extraTargets?.(destination) ?? [])],
+        targets: [target, ...(params.extraTargets?.(root) ?? [])],
     });
+    for (const configured of config.targets) {
+        if (configured.dst.kind === "local") {
+            await mkdir(configured.dst.path, { recursive: true, mode: 0o700 });
+        }
+    }
     const clock = { now: new Date("2026-08-10T12:00:00Z") };
     const execCalls: RecordedExec[] = [];
     const kit = new Backupkit(config, {

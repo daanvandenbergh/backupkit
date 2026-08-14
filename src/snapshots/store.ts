@@ -7,8 +7,6 @@
  * newest-snapshot invariant.
  */
 
-import { join, posix } from "node:path";
-
 import { SnapshotStoreError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import type { RetryPolicy } from "../shared/retry.js";
@@ -56,15 +54,15 @@ export interface SnapshotStore {
 }
 
 /**
- * The slice of a resolved target the store needs: its name (the snapshot
- * subdirectory under the destination root) and the archive-root endpoint.
+ * The slice of a resolved target the store needs: its name (for error messages
+ * only - it is no part of any path) and the archive-root endpoint.
  * Structurally satisfied by `ResolvedTarget`, keeping the module graph at
  * `snapshots -> ssh, exec, shared` (no config dependency).
  */
 export interface StoreTarget {
-    /** Target name: the snapshot subdirectory under the destination root. */
+    /** Target name, used only to name the target in errors. */
     name: string;
-    /** The archive-root endpoint (the transfer destination side). */
+    /** The archive-root endpoint: the target's `destination`, which holds its snapshots directly. */
     dst: Endpoint;
     /**
      * Push mode: whether the remote key is confined by the `backupkit-remote`
@@ -112,22 +110,23 @@ export interface SnapshotStoreDeps {
 /**
  * Open the snapshot store for one target: the local fs implementation when the
  * destination endpoint is local (pull mode), the jailed-remote-command
- * implementation when it is remote (push mode). The store root is
- * `<destination>/<targetName>`.
+ * implementation when it is remote (push mode). The store root IS the target's
+ * `destination` - snapshots sit directly in it, with no target-name level in
+ * between (one destination therefore belongs to exactly one target, which
+ * `checkSnapshotRoots` enforces).
  */
 export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): SnapshotStore {
     const now = deps.now ?? (() => new Date());
     if (target.dst.kind === "local") {
-        return new LocalSnapshotStore(join(target.dst.path, target.name), deps.log, now);
+        return new LocalSnapshotStore(target.dst.path, deps.log, now);
     }
     const ssh = deps.ssh;
     if (ssh === undefined) {
         throw new SnapshotStoreError(`target ${target.name} has a remote destination but no ssh settings were provided`);
     }
     const remote = target.dst.remote;
-    const root = posix.join(target.dst.path, target.name);
     return new RemoteSnapshotStore(
-        root,
+        target.dst.path,
         // A per-call retryPolicy (the store's NO_RETRY on every mutating
         // command) always wins over the test-only store-wide override: it is a
         // correctness requirement, not a knob.

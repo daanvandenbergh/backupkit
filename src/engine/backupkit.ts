@@ -8,7 +8,7 @@
  */
 
 import { closeSync, constants as fsConstants, openSync, writeSync } from "node:fs";
-import { lstat, readFile, realpath, statfs } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, statfs } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 
@@ -531,11 +531,11 @@ export class Backupkit {
      */
     private storeFor(target: ResolvedTarget, context: SshContext, signal?: AbortSignal): SnapshotStore {
         // A mirror target has no snapshot store, and opening one for it would
-        // not merely be useless - the store root would be `<destination>/<name>`,
-        // a path INSIDE the mirrored tree, so listing it would report whatever
-        // the source happens to have there and removing from it would delete the
-        // user's own files. Every caller must branch on `mode` before asking;
-        // this is the backstop that turns "forgot to" into a crash.
+        // not merely be useless - the store root would be `<destination>`, which
+        // for a mirror IS the mirrored tree, so listing it would report the
+        // user's own files and removing from it would delete them. Every caller
+        // must branch on `mode` before asking; this is the backstop that turns
+        // "forgot to" into a crash.
         if (target.mode === "mirror") {
             throw new ConfigError(
                 `target ${target.name} is a mirror - it has no snapshot store (this is a bug: the caller should have skipped it)`,
@@ -575,8 +575,7 @@ export class Backupkit {
             }
         }
         try {
-            const root = posix.join(target.dst.path, target.name);
-            const result = await runRemote(target.dst.remote, ["df", "-Pk", "--", root], {
+            const result = await runRemote(target.dst.remote, ["df", "-Pk", "--", target.dst.path], {
                 sshBin: this.sshBin(),
                 context: "unattended",
                 authSock: this.authSockFor(target.dst.remote),
@@ -1038,7 +1037,7 @@ export class Backupkit {
             // A mirror takes no lock at all, so it always reports false.
             let lockHeld = false;
             if (target.mode !== "mirror" && target.dst.kind === "local") {
-                lockHeld = await lstat(join(target.dst.path, target.name, ".backupkit.lock")).then(
+                lockHeld = await lstat(join(target.dst.path, ".backupkit.lock")).then(
                     () => true,
                     () => false,
                 );
@@ -1203,8 +1202,8 @@ export class Backupkit {
         // The snapshot endpoint on the destination side.
         const snapEndpoint: Endpoint =
             target.dst.kind === "local"
-                ? { kind: "local", path: join(target.dst.path, target.name, snapshot) }
-                : { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, target.name, snapshot) };
+                ? { kind: "local", path: join(target.dst.path, snapshot) }
+                : { kind: "remote", remote: target.dst.remote, path: posix.join(target.dst.path, snapshot) };
         const sshTokens = this.sshCommandFor(target.dst.kind === "remote" ? target.dst.remote : null);
         const env =
             target.dst.kind === "remote" && this.authSockFor(target.dst.remote) !== null
@@ -1413,6 +1412,51 @@ export class Backupkit {
      * reading of config-named files (the `.pub` sidecar included) - the report
      * comes back with the local rows unknown and no remote rows at all.
      */
+    /**
+     * The pre-2.0 archive layout, found where the config now says the archive
+     * root is: `<destination>/<name>/<snapshot>/` instead of
+     * `<destination>/<snapshot>/`. One error per target it is found on.
+     *
+     * This exists because the upgrade fails SILENTLY otherwise, and the silence
+     * is expensive. `destination` used to be a shared parent that backupkit
+     * appended the target name to; it is now the target's own archive root. A
+     * config carried over unchanged therefore still validates, still runs, and
+     * starts a SECOND archive one level up - while the real history sits in a
+     * subdirectory whose name fails the snapshot regex, so it is invisible to
+     * `list`, never pruned by retention, and never used as a `--link-dest` base.
+     * The next run makes a full un-hardlinked copy of everything and the disk
+     * usage doubles. The fix is a one-line config edit and no data movement at
+     * all (append `/<name>` to the destination), which is precisely why it is
+     * worth naming instead of leaving to be discovered.
+     *
+     * ponytail: LOCAL destinations only - one `readdir` per target, no ssh. A
+     * push target does not need this, because it fails LOUDLY on its own: the
+     * 2.x client sends `$ROOT/<snap>.partial` where the archive server's older
+     * jail still demands `$ROOT/<target>/<snap>.partial`, so every push is
+     * rejected outright until `backupkit jail install` is rerun there (which
+     * `jail status`, and every command's drift warning, already say).
+     */
+    private async legacyLayoutErrors(): Promise<string[]> {
+        const errors: string[] = [];
+        for (const target of this.config.targets) {
+            if (target.mode !== "snapshot" || target.dst.kind !== "local") {
+                continue;
+            }
+            const legacy = join(target.dst.path, target.name);
+            const entries = await readdir(legacy).catch(() => [] as string[]);
+            if (!entries.some((entry) => parseSnapshotName(entry) !== null)) {
+                continue;
+            }
+            errors.push(
+                `target ${target.name}: snapshots found at ${legacy}, one level below its destination ${target.dst.path}. ` +
+                    "backupkit 2.0 no longer appends the target name - a destination IS the archive root - so this target " +
+                    `would start a second, empty archive at ${target.dst.path} and leave that history orphaned. ` +
+                    `Fix the config, not the disk: set "destination": "${legacy}".`,
+            );
+        }
+        return errors;
+    }
+
     async check(): Promise<CheckReport> {
         const errors: string[] = [];
         try {
@@ -1426,6 +1470,9 @@ export class Backupkit {
             errors.push(sanitize(error instanceof Error ? error.message : String(error)));
             return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], encryptedKeys: [], errors };
         }
+
+        // Only past the gate: this reads directories the config names.
+        errors.push(...(await this.legacyLayoutErrors()));
 
         // Which of the two ways to schedule this config supports. Reported, not
         // judged: an encrypted key is a valid setup that belongs to

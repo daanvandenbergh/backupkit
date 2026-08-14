@@ -1,6 +1,6 @@
 /**
  * The local (pull-mode) snapshot store: `node:fs/promises` against the archive
- * root `<destination>/<targetName>`. Completeness is purely name-based; every
+ * root - the target's `destination` itself. Completeness is purely name-based; every
  * destructive operation acts only on names matching the single snapshot-name
  * regex or its `.partial`/`.deleting` forms (security invariant 6), promote is
  * one atomic `rename`, delete is two-phase (`.deleting` rename then recursive
@@ -266,7 +266,7 @@ class LocalLockBackend implements LockBackend {
 
 /** The local `SnapshotStore` implementation over one archive root directory. */
 export class LocalSnapshotStore implements SnapshotStore {
-    /** Absolute archive root: `<destination>/<targetName>`. */
+    /** Absolute archive root: the target's `destination`, holding `<snapshot>/` directories directly. */
     private readonly root: string;
 
     /** Logger for lock warnings. */

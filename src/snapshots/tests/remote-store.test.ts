@@ -1,4 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -683,7 +684,7 @@ describe("openStore", () => {
     it("throws when the destination is remote but no ssh settings are given", () => {
         const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
         expect(() =>
-            openStore({ name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true }, { log }),
+            openStore({ name: "web", dst: { kind: "remote", remote, path: ROOT }, jail: true }, { log }),
         ).toThrow(SnapshotStoreError);
     });
 
@@ -703,7 +704,7 @@ describe("openStore", () => {
         it("sends each store command as one fully quoted shell word sequence to the alias destination", async () => {
             const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
+                { name: "web", dst: { kind: "remote", remote, path: ROOT }, jail: true },
                 {
                     log,
                     ssh: {
@@ -733,7 +734,7 @@ describe("openStore", () => {
             const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const controller = new AbortController();
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
+                { name: "web", dst: { kind: "remote", remote, path: ROOT }, jail: true },
                 {
                     log,
                     ssh: {
@@ -771,7 +772,7 @@ describe("openStore", () => {
         it("never re-sends the lock mkdir when the transport blips, even with a retrying store policy", async () => {
             const remote: ResolvedRemote = { kind: "alias", restrictedShell: false, name: "myserver", alias: "myserver" };
             const store = openStore(
-                { name: "web", dst: { kind: "remote", remote, path: "/srv/backups" }, jail: true },
+                { name: "web", dst: { kind: "remote", remote, path: ROOT }, jail: true },
                 {
                     log,
                     ssh: {
@@ -809,9 +810,15 @@ describe("mkdtemp hygiene helper", () => {
         await rm(tmp, { recursive: true, force: true });
     });
 
-    it("local stores opened via openStore operate under <destination>/<name>", async () => {
+    it("local stores opened via openStore operate on the destination ITSELF, with no target-name level", async () => {
+        // A snapshot placed directly in the destination is the archive. If
+        // openStore appended the target name again, this listing would come back
+        // empty and the target would silently start a second archive one level
+        // down - the pre-2.0 layout, reintroduced.
+        await mkdir(join(tmp, OLD), { recursive: true });
         const store = openStore({ name: "web", dst: { kind: "local", path: tmp }, jail: false }, { log });
+        await expect(store.listComplete()).resolves.toEqual([OLD]);
         await store.claimPartial(NEW);
-        await expect(store.listComplete()).resolves.toEqual([]);
+        expect(existsSync(join(tmp, "web"))).toBe(false);
     });
 });

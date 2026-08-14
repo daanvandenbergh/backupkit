@@ -40,13 +40,13 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
         // "myserver": { "alias": "myserver" },
     },
 
-    // What to back up. The key is the target name: for a snapshot target it is
-    // the snapshot subdirectory (<destination>/<name>/<timestamp>/), and for
-    // every target it is the log identifier.
+    // What to back up. The key is the target name - the CLI and log identifier.
+    // It is no part of any path: where a target writes is its "destination"
+    // alone, so give every target a destination directory of its own.
     "targets": {
         "example-var-www": {
             // Required on every target, no default.
-            // "snapshot": versioned archive at <destination>/<name>/<timestamp>/,
+            // "snapshot": versioned archive at <destination>/<timestamp>/,
             //   hardlinked against the previous snapshot, pruned by retention.
             // "mirror": <destination> IS the tree - one in-place copy of the
             //   source, no history, no retention. Anything in the destination
@@ -61,10 +61,11 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
             "remote": "example",
             // Directory to back up. pull: path ON the remote. push: local path.
             "source": "/var/www",
-            // Archive root. pull: local path. push: path ON the remote.
-            // snapshot mode writes <destination>/<name>/<timestamp>/;
+            // This target's own directory, shared with no other target.
+            // pull: local path. push: path ON the remote.
+            // snapshot mode writes <destination>/<timestamp>/;
             // mirror mode writes <destination> itself.
-            "destination": "/srv/backups",
+            "destination": "/srv/backups/example-var-www",
             // rsync exclude patterns.
             "exclude": ["cache/", "*.tmp"],
             // How often: "interval" is "minute" | "hour" | "day" | "week" | "month";
@@ -92,9 +93,9 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
         // history, no "retention" or "minFree" keys - and anything the source
         // no longer has is deleted from the destination on the next run.
         // A push mirror must also write "jail": false: the forced command pins
-        // every transfer to <destination>/<target>/<snapshot>.partial, which is
-        // what keeps its permitted --delete confined, and a mirror writes the
-        // destination root itself. Mirror the other way ("direction": "pull")
+        // every transfer to <destination>/<snapshot>.partial, which is what
+        // keeps its permitted --delete confined, and a mirror writes the
+        // destination itself. Mirror the other way ("direction": "pull")
         // to keep the archive host in control of the transfer.
         // "persistance": {
         //     "mode": "mirror",

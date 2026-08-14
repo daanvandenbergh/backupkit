@@ -73,7 +73,7 @@ describe.skipIf(rsyncProbe === null)("engine integration (real local rsync, full
         // Run 1: first snapshot, promoted, report persisted.
         const first = await kit.run({ force: true });
         expect(first.targets[0].status).toBe("success");
-        const snap1 = join(destination, "web", "2026-08-10T120000Z");
+        const snap1 = join(destination, "2026-08-10T120000Z");
         expect(existsSync(snap1)).toBe(true);
         expect(existsSync(`${snap1}.partial`)).toBe(false);
         expect(await readFile(join(snap1, "a.txt"), "utf8")).toBe("alpha v1\n");
@@ -86,7 +86,7 @@ describe.skipIf(rsyncProbe === null)("engine integration (real local rsync, full
         clock.now = new Date("2026-08-11T12:00:00Z");
         const second = await kit.run();
         expect(second.targets[0].status).toBe("success");
-        const snap2 = join(destination, "web", "2026-08-11T120000Z");
+        const snap2 = join(destination, "2026-08-11T120000Z");
         const unchanged1 = await stat(join(snap1, "sub", "b.txt"));
         const unchanged2 = await stat(join(snap2, "sub", "b.txt"));
         expect(unchanged2.ino).toBe(unchanged1.ino);
@@ -102,7 +102,7 @@ describe.skipIf(rsyncProbe === null)("engine integration (real local rsync, full
         expect(third.targets[0].status).toBe("success");
         expect(existsSync(snap1)).toBe(false);
         expect(existsSync(snap2)).toBe(true);
-        expect(existsSync(join(destination, "web", "2026-08-12T120000Z"))).toBe(true);
+        expect(existsSync(join(destination, "2026-08-12T120000Z"))).toBe(true);
 
         // Restore latest to a fresh path, verified, byte-identical.
         const out = join(root, "restored");
@@ -117,12 +117,12 @@ describe.skipIf(rsyncProbe === null)("engine integration (real local rsync, full
     it("resumes an orphaned partial via claimPartial instead of restarting", async () => {
         const kit = makeEngine(null);
         // Plant a stale partial (as a crashed run would leave behind).
-        const stale = join(destination, "web", "2026-08-09T000000Z.partial");
+        const stale = join(destination, "2026-08-09T000000Z.partial");
         await mkdir(stale, { recursive: true });
         await writeFile(join(stale, "left-behind.txt"), "from the dead run\n");
         const report = await kit.run({ force: true });
         expect(report.targets[0].status).toBe("success");
-        const snap = join(destination, "web", "2026-08-10T120000Z");
+        const snap = join(destination, "2026-08-10T120000Z");
         expect(existsSync(snap)).toBe(true);
         expect(existsSync(stale)).toBe(false);
         // rsync --delete cleaned the leftover from the resumed partial.
