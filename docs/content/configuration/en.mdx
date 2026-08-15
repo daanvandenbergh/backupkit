@@ -133,7 +133,7 @@ Each target is keyed by name. The name is the identifier in the CLI and the logs
 | `remote` | string | required | A key from `remotes` |
 | `source` | string | required | Directory to back up (pull: on the remote; push: local) |
 | `destination` | string | required | This target's own directory, shared with no other target. Snapshot mode: the archive root, holding `<snapshot>/` directories. Mirror mode: the copy itself (pull: local; push: on the remote) |
-| `exclude` | string[] | `[]` | rsync exclude patterns |
+| `exclude` | string[] | `[]` | rsync exclude patterns - see below |
 | `schedule` | object | `{ interval: "day" }` | When to run - see below |
 | `retention` | object \| `false` | the top-level default | **Snapshot only.** Retention for this target; `false` means never prune |
 | `retry` | object | `{ attempts: 5 }` | Transfer attempts per run, 1-10 |
@@ -182,7 +182,21 @@ What changes for a mirror:
 
 **A mirror will not run a transfer that has collapsed.** Before each run backupkit estimates the source, and if it holds under half the files the last successful run moved, the transfer is refused and the run is reported as `content-collapse` - the mirror is left exactly as it was. That is the case where an unmounted volume or a half-restored directory would otherwise delete the good copy. Check the source, then `backupkit run --force <target>` performs it anyway.
 
-**A push mirror cannot be jailed** and must write `"jail": false`. The jail's forced command pins every transfer to `<destination>/<snapshot>.partial`, and that pin is exactly what keeps the `--delete` it also allows confined to the snapshot being built. A mirror writes the destination itself, so the jail rejects it - and could not safely be taught to accept it. Mirror with `"direction": "pull"` instead wherever you can: the machine holding the copy then does the fetching, and the source needs no access to it at all.
+**A push mirror cannot be jailed** and must write `"jail": false`. The jail's forced command pins every transfer to `<destination>/<snapshot>.partial`, and that pin is exactly what keeps the deletes it also allows confined to the snapshot being built. A mirror writes the destination itself, so the jail rejects it - and could not safely be taught to accept it. Mirror with `"direction": "pull"` instead wherever you can: the machine holding the copy then does the fetching, and the source needs no access to it at all.
+
+### Excludes
+
+`exclude` is a list of rsync patterns, each passed as one `--exclude=<pattern>` argument, verbatim - never through a shell, so spaces, quotes and `$(...)` in a pattern are literal characters and nothing else. A pattern with no `/` matches by name at any depth, so `".Trashes"` catches every `.Trashes` in the tree; end it with `/` to match directories only, and start it with `/` to anchor it at the source root.
+
+```jsonc
+"exclude": [".Trashes", "node_modules/", "*.tmp", "/var/cache"],
+```
+
+**An exclude also removes what is already in the destination.** Backupkit passes `--delete-excluded`, so a pattern means "this must not be in the backup", not merely "do not send it again". Add `"node_modules/"` to a mirror target that has been running for a month and the next run deletes the `node_modules` already sitting in the destination. That is the point - an exclude that left an old copy behind forever would look like it was being ignored - but it means **excludes are destructive on the destination side**, so add one deliberately. rsync's own default is the opposite, and this is the one place backupkit departs from it.
+
+In snapshot mode this can never reach your history: each run writes a fresh `<snapshot>.partial` directory, so the sweep only ever touches the snapshot being built. Snapshots already promoted keep whatever they held when they were made.
+
+Only `NUL` and newline are refused in a pattern; everything else rsync's filter syntax accepts is passed through untouched.
 
 ### Upgrading a 1.x config
 

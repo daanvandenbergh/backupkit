@@ -116,7 +116,7 @@ Some appliance shells go further and parse **no quoting at all**: a Hetzner Stor
 
 ## A push mirror cannot be jailed
 
-A [mirror target](/configuration/#snapshot-or-mirror) writes its destination in place, and the jail cannot accept that. The forced command pins every transfer's destination to `<root>/<snapshot>.partial`, and that pin is exactly what makes the `--delete --force` it also permits harmless: a delete can only ever reach inside the scratch directory of the run in flight. A mirror's destination *is* the root, so the jail rejects its every transfer - and teaching it otherwise would mean permitting "delete anything under the root the sender no longer has", which is the one command the jail exists to refuse.
+A [mirror target](/configuration/#snapshot-or-mirror) writes its destination in place, and the jail cannot accept that. The forced command pins every transfer's destination to `<root>/<snapshot>.partial`, and that pin is exactly what makes the `--delete-excluded --force` it also permits harmless: a delete can only ever reach inside the scratch directory of the run in flight. A mirror's destination *is* the root, so the jail rejects its every transfer - and teaching it otherwise would mean permitting "delete anything under the root the sender no longer has", which is the one command the jail exists to refuse.
 
 So a push mirror is an unjailed key by construction, and the config has to say so with `"jail": false`. Since `jail` defaults to `true` on push, backupkit refuses the combination at validation rather than flipping that default quietly - a downgrade of the archive host's protection should be written down, not inferred.
 

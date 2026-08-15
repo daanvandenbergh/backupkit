@@ -50,13 +50,13 @@ const CAPTURED_ARGV: ReadonlyArray<readonly [string, string]> = [
     ],
     [
         "full production push",
-        `rsync --server -lHtpXrSze.iLsfxCIvu --timeout=600 --bwlimit=10240 --delete --force --partial ` +
+        `rsync --server -lHtpXrSze.iLsfxCIvu --timeout=600 --bwlimit=10240 --delete-excluded --force --partial ` +
             `--numeric-ids --link-dest ../${BASE} --info=STATS2 . <ROOT>/${SNAP}.partial`,
     ],
     ["estimate (dry-run)", `rsync --server -nlogDtprze.iLsfxCIvu --stats --numeric-ids . <ROOT>/${SNAP}.partial`],
     [
         "verify (dry-run, checksum, itemize)",
-        `rsync --server -nlHogDtprcSe.iLsfxCIvu --log-format=%i --timeout=600 --delete --force --partial ` +
+        `rsync --server -nlHogDtprcSe.iLsfxCIvu --log-format=%i --timeout=600 --delete-excluded --force --partial ` +
             `--numeric-ids --info=STATS2 . <ROOT>/${SNAP}.partial`,
     ],
     ["restore read (--sender, complete snapshot)", `rsync --server --sender -logtpre.iLsfxCIvu --numeric-ids . <ROOT>/${BASE}/`],

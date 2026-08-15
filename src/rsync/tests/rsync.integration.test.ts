@@ -82,6 +82,37 @@ describe.skipIf(rsyncProbe === null)("rsync integration (real local rsync)", () 
         expect(existsSync(join(snap, "cache"))).toBe(false);
     }, 30_000);
 
+    /**
+     * The --delete-excluded promise, and the reason it is not left to rsync's
+     * default: an exclude added AFTER a path was already backed up must purge
+     * that path from the destination. rsync's default protects an excluded file
+     * on the receiver from the delete scan, so without --delete-excluded the
+     * stale copy below survives every future run and the exclude reads as
+     * silently broken. Mirror-shaped (destination IS the tree), because that is
+     * the mode where the destination outlives a single run.
+     */
+    it("mirror re-run: an exclude purges the copy already in the destination", async () => {
+        const bin = (rsyncProbe as { bin: string }).bin;
+        const mirror = join(root, "mirror");
+        // First run, no excludes: the whole tree lands, cache/ included.
+        await runTransfer({ rsyncBin: bin, spec: spec(srcDir, mirror), retryAttempts: 5, log: silentLog });
+        expect(existsSync(join(mirror, "cache", "junk.tmp"))).toBe(true);
+
+        // A file the source never had, to prove plain --delete still works too.
+        await writeFile(join(mirror, "stale.txt"), "gone next run\n");
+
+        const result = await runTransfer({
+            rsyncBin: bin,
+            spec: spec(srcDir, mirror, { exclude: ["cache/"] }),
+            retryAttempts: 5,
+            log: silentLog,
+        });
+        expect(result.status).toBe("success");
+        expect(existsSync(join(mirror, "cache"))).toBe(false);
+        expect(existsSync(join(mirror, "stale.txt"))).toBe(false);
+        expect(await readFile(join(mirror, "a.txt"), "utf8")).toBe("alpha v1\n");
+    }, 30_000);
+
     it("second snapshot: unchanged files hardlink into --link-dest, changed files diverge", async () => {
         const bin = (rsyncProbe as { bin: string }).bin;
         const firstPartial = join(storeDir, "2026-08-10T031500Z.partial");

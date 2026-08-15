@@ -384,8 +384,12 @@ validate_rsync() {
             #
             # Measured on rsync 3.4.4 across backupkit's five real invocations
             # (transfer, incremental, estimate, verify, restore-read), the
-            # forwarded set is: --sender --numeric-ids --delete --force --partial
-            # --timeout=N --bwlimit=N --info=X --log-format=%i --link-dest ../X.
+            # forwarded set is: --sender --numeric-ids --delete-excluded --force
+            # --partial --timeout=N --bwlimit=N --info=X --log-format=%i
+            # --link-dest ../X. (The client sends --delete AND --delete-excluded;
+            # rsync forwards only the latter, which implies the former. --delete
+            # stays in the allowlist below: it is what an older client sends, and
+            # both are equally bounded by the pinned path operand.)
             # The parity test feeds those captured argv strings to this script;
             # they are documentation of the happy path, not the security boundary.
             #
@@ -394,7 +398,7 @@ validate_rsync() {
             # deny list below still has to be maintained, and why the three
             # already known (--remove-source-files, --inplace, --append) are named
             # there rather than left to shape inference.
-            --numeric-ids | --delete | --force | --partial | --sparse | --stats)
+            --numeric-ids | --delete | --delete-excluded | --force | --partial | --sparse | --stats)
                 ;;
             # Path-naming, command-executing, symlink-following, and
             # argv-defeating options. Both the `=value` and the bare

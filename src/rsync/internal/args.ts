@@ -101,7 +101,17 @@ export function buildArgs(spec: TransferSpec, mode: BuildMode): string[] {
     if (o.compress) {
         args.push("-z");
     }
-    args.push("--delete", "--force", "--partial");
+    // --delete-excluded makes an exclude mean "must not be in the destination"
+    // rather than rsync's default "do not transfer it, and protect whatever copy
+    // the destination already has". Without it an exclude added to a mirror
+    // target is only ever honored for FUTURE content: the stale copy already in
+    // the archive is hidden from the delete scan and lives there forever, which
+    // reads as the exclude silently not working. It is unconditional because in
+    // snapshot mode it cannot reach history - the destination is the run's own
+    // `<snap>.partial`, so it only sweeps a resumed partial - and in mirror mode
+    // it is what "the destination IS the tree" already promises. rsync folds
+    // --delete into it on the wire (see the jail parity fixtures).
+    args.push("--delete", "--delete-excluded", "--force", "--partial");
     args.push(`--timeout=${o.ioTimeoutSec}`);
     args.push("--info=stats2");
     if (!o.preserveOwnership) {

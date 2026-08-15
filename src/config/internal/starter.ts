@@ -66,7 +66,10 @@ export const STARTER_CONFIG: string = `// backupkit - /etc/backupkit/config.json
             // snapshot mode writes <destination>/<timestamp>/;
             // mirror mode writes <destination> itself.
             "destination": "/srv/backups/example-var-www",
-            // rsync exclude patterns.
+            // rsync exclude patterns. A pattern with no "/" matches by name at
+            // any depth. Note these are DESTRUCTIVE on the destination side:
+            // adding one deletes what it matches from the destination on the
+            // next run (--delete-excluded), it does not just stop sending it.
             "exclude": ["cache/", "*.tmp"],
             // How often: "interval" is "minute" | "hour" | "day" | "week" | "month";
             // "intervalCount" = every N intervals (default 1). Optional anchors:
