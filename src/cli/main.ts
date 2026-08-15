@@ -27,6 +27,7 @@ import { listCommand } from "./internal/commands/list.js";
 import { pruneCommand } from "./internal/commands/prune.js";
 import { restoreCommand } from "./internal/commands/restore.js";
 import { runCommand } from "./internal/commands/run.js";
+import { remoteCommand, targetCommand } from "./internal/commands/show.js";
 import { startCommand } from "./internal/commands/start.js";
 import { statusCommand } from "./internal/commands/status.js";
 import { unlockCommand } from "./internal/commands/unlock.js";
@@ -49,6 +50,8 @@ const COMMANDS: Record<string, Command> = {
     list: listCommand,
     ls: listCommand,
     status: statusCommand,
+    target: targetCommand,
+    remote: remoteCommand,
     restore: restoreCommand,
     prune: pruneCommand,
     unlock: unlockCommand,

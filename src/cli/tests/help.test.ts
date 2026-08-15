@@ -21,6 +21,8 @@ const COMMANDS = [
     "list",
     "ls",
     "status",
+    "target",
+    "remote",
     "restore",
     "prune",
     "unlock",
