@@ -209,10 +209,16 @@ export interface RestoreReport {
     target: string;
     /** The resolved snapshot name that was copied. */
     snapshot: string;
-    /** The output path the snapshot was copied to. */
+    /** The output path the snapshot was copied to (would be copied to, on a dry run). */
     output: string;
     /** True only when the opt-in verify pass ran and found no difference. */
     verified: boolean;
+    /**
+     * Non-null only on a dry run, and only when rsync's stats block parsed:
+     * what the real copy would write. Null on a real restore, and on a dry run
+     * whose output could not be parsed.
+     */
+    plan: { files: number; bytes: number } | null;
 }
 
 /** One row of `status()`: everything an operator needs about one target. */

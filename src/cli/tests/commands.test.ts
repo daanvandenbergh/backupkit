@@ -219,13 +219,50 @@ describe("restore", () => {
 
     it("calls the engine and prints the restored line (verified marker included)", async () => {
         const h = fakeDeps();
-        h.engine.restoreReport = { target: "web", snapshot: "2026-08-10T031500Z", output: "/tmp/out", verified: true };
+        h.engine.restoreReport = { target: "web", snapshot: "2026-08-10T031500Z", output: "/tmp/out", verified: true, plan: null };
         expect(await main(["restore", "web", "latest", "--output", "/tmp/out", "--verify"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({
             method: "restore",
-            options: { target: "web", snapshot: "latest", output: "/tmp/out", verify: true },
+            options: { target: "web", snapshot: "latest", output: "/tmp/out", verify: true, dryRun: false },
         });
         expect(h.out).toEqual(["Restored snapshot 2026-08-10T031500Z of web to /tmp/out (contents verified)"]);
+    });
+
+    it("--dry-run reports the projected copy and says nothing was written", async () => {
+        const h = fakeDeps();
+        h.engine.restoreReport = {
+            target: "web",
+            snapshot: "2026-08-10T031500Z",
+            output: "/tmp/out",
+            verified: false,
+            plan: { files: 1, bytes: 2048 },
+        };
+        expect(await main(["restore", "web", "latest", "--output", "/tmp/out", "--dry-run"], h.deps)).toBe(0);
+        expect(h.engine.calls[0]).toEqual({
+            method: "restore",
+            options: { target: "web", snapshot: "latest", output: "/tmp/out", verify: false, dryRun: true },
+        });
+        expect(h.out).toEqual([
+            "Would restore snapshot 2026-08-10T031500Z of web to /tmp/out: 1 file, 2.0 KiB",
+            "Dry run - nothing was written. Drop --dry-run to restore.",
+        ]);
+    });
+
+    it("--dry-run with an unparsable stats block still reports the plan, without a size", async () => {
+        const h = fakeDeps();
+        expect(await main(["restore", "web", "latest", "--output", "/tmp/out", "--dry-run"], h.deps)).toBe(0);
+        expect(h.out[0]).toBe(
+            "Would restore snapshot 2026-08-10T031500Z of web to /tmp/out: size unknown (rsync printed no stats)",
+        );
+    });
+
+    it("refuses --dry-run with --verify instead of silently ignoring one", async () => {
+        const h = fakeDeps();
+        expect(await main(["restore", "web", "latest", "--output", "/tmp/out", "--dry-run", "--verify"], h.deps)).toBe(
+            64,
+        );
+        expect(h.engine.calls).toEqual([]);
+        expect(h.err.join("\n")).toContain("nothing to verify");
     });
 });
 

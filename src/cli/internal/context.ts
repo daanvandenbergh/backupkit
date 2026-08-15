@@ -41,8 +41,14 @@ export interface EngineLike {
     status(options?: { targets?: string[] }): Promise<TargetStatus[]>;
     /** List complete snapshots, oldest first. */
     listSnapshots(options?: { targets?: string[] }): Promise<SnapshotInfo[]>;
-    /** Copy one snapshot ("latest" accepted) to a non-existent output path. */
-    restore(options: { target: string; snapshot: string; output: string; verify?: boolean }): Promise<RestoreReport>;
+    /** Copy one snapshot ("latest" accepted) to a non-existent output path; `dryRun` only reports what it would write. */
+    restore(options: {
+        target: string;
+        snapshot: string;
+        output: string;
+        verify?: boolean;
+        dryRun?: boolean;
+    }): Promise<RestoreReport>;
     /** Apply retention now. */
     prune(options?: { targets?: string[]; dryRun?: boolean; force?: boolean }): Promise<PruneReport>;
     /** Clear a leaked destination lock; a live lock needs `force`. */

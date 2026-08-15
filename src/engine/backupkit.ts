@@ -25,7 +25,7 @@ import { findEncryptedKeys, loadKeys } from "../ssh/agent.js";
 import { quoteShellArg } from "../ssh/internal/quote.js";
 import { checkFilePermissions, defaultPermissionDeps, type PermissionDeps } from "../ssh/permissions.js";
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
-import { dryRunStats, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
+import { dryRunStats, parseStats2, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
 import { planRetention, type RetentionPlan } from "../retention/retention.js";
 import { openStore, type SnapshotStore } from "../snapshots/store.js";
 import { splitFutureSnapshots, type SnapshotInfo } from "../snapshots/types.js";
@@ -1131,8 +1131,26 @@ export class Backupkit {
         return rows;
     }
 
-    /** Copy one snapshot (`"latest"` accepted) to a non-existent output path; optional checksum verify pass. */
-    async restore(options: { target: string; snapshot: string; output: string; verify?: boolean }): Promise<RestoreReport> {
+    /**
+     * Copy one snapshot (`"latest"` accepted) to a non-existent output path;
+     * optional checksum verify pass. With `dryRun`, every check still runs
+     * (snapshot exists, output is fresh and outside every archive root, remote
+     * rsync is new enough) but rsync is passed `--dry-run`, so nothing is
+     * written and the report carries the projected file count and byte size
+     * instead. `verify` has nothing to verify then, so the combination is
+     * refused rather than silently ignored.
+     */
+    async restore(options: {
+        target: string;
+        snapshot: string;
+        output: string;
+        verify?: boolean;
+        dryRun?: boolean;
+    }): Promise<RestoreReport> {
+        const dryRun = options.dryRun === true;
+        if (dryRun && options.verify === true) {
+            throw new RestoreError("a dry run writes nothing, so there is nothing to verify - drop one of dryRun/verify");
+        }
         const target = this.config.targets.find((t) => t.name === options.target);
         if (target === undefined) {
             throw new ConfigError(
@@ -1227,13 +1245,26 @@ export class Backupkit {
 
         // The copy: never --delete, symlinks copied as symlinks, awaited and exit-checked.
         const { bin } = await this.localRsync();
-        const copy = await this.deps.execFn(bin, ["-a", "--sparse", "-H", ...hardening, ...remoteArgs, src, output], {
-            env,
-        });
+        const preview = dryRun ? ["--dry-run", "--info=stats2"] : [];
+        const copy = await this.deps.execFn(
+            bin,
+            ["-a", "--sparse", "-H", ...hardening, ...preview, ...remoteArgs, src, output],
+            { env },
+        );
         if (copy.exitCode !== 0) {
             throw new RestoreError(
-                `restore copy failed (rsync exit ${copy.exitCode ?? "signal"}): ${sanitize(copy.stderr).slice(-500)}`,
+                `restore ${dryRun ? "dry run" : "copy"} failed (rsync exit ${copy.exitCode ?? "signal"}): ${sanitize(copy.stderr).slice(-500)}`,
             );
+        }
+        if (dryRun) {
+            const stats = parseStats2(copy.stdout);
+            return {
+                target: target.name,
+                snapshot,
+                output,
+                verified: false,
+                plan: stats === null ? null : { files: stats.filesTransferred, bytes: stats.totalTransferredSize },
+            };
         }
 
         // Opt-in verify: checksum dry-run; any content-change itemize line fails.
@@ -1256,7 +1287,7 @@ export class Backupkit {
             }
             verified = true;
         }
-        return { target: target.name, snapshot, output, verified };
+        return { target: target.name, snapshot, output, verified, plan: null };
     }
 
     /**

@@ -215,6 +215,28 @@ const PAGES: Record<string, HelpPage> = {
             CONFIG_OPTION,
         ],
     },
+    target: {
+        usage: "backupkit target [options] <TARGET>",
+        summary: "Show one target's settings, as backupkit resolved them",
+        description:
+            "Print every setting of one target the way backupkit resolved it - each default filled in with the value actually used, not left blank as it is in the config file. This is the config the next run of that target will obey.\n\nThe transfer endpoints and the full remote are left out of the table (they are derived from direction, source, destination, and the named remote); `--json` includes them.",
+        args: [{ term: "TARGET", text: "The target to show" }],
+        options: [
+            { term: "--json", text: "Print one JSON document on stdout instead of a table" },
+            CONFIG_OPTION,
+        ],
+    },
+    remote: {
+        usage: "backupkit remote [options] <REMOTE>",
+        summary: "Show one remote's settings, as backupkit resolved them",
+        description:
+            "Print every setting of one remote the way backupkit resolved it - for an explicit remote its host, user, port, key, passphrase source and known_hosts file; for an ssh_config remote the alias, which is all backupkit knows (ssh resolves the rest). The closing line names the targets using it.",
+        args: [{ term: "REMOTE", text: "The remote to show" }],
+        options: [
+            { term: "--json", text: "Print one JSON document on stdout instead of a table" },
+            CONFIG_OPTION,
+        ],
+    },
     restore: {
         usage: "backupkit restore [options] <TARGET> <SNAPSHOT>",
         summary: "Copy a snapshot to a fresh path",
@@ -226,6 +248,10 @@ const PAGES: Record<string, HelpPage> = {
         ],
         options: [
             { term: "--output <path>", text: "Path to restore into - must not exist (required)" },
+            {
+                term: "--dry-run",
+                text: "Write nothing: run every check and report what the copy would write (cannot be combined with --verify)",
+            },
             { term: "--verify", text: "Re-read the copy and verify checksums afterwards" },
             CONFIG_OPTION,
         ],

@@ -51,7 +51,7 @@ export class FakeEngine implements EngineLike {
     snapshots: SnapshotInfo[] = [];
 
     /** Result of restore(). */
-    restoreReport: RestoreReport = { target: "web", snapshot: "2026-08-10T031500Z", output: "/tmp/out", verified: false };
+    restoreReport: RestoreReport = { target: "web", snapshot: "2026-08-10T031500Z", output: "/tmp/out", verified: false, plan: null };
 
     /** Result of prune(). */
     pruneReport: PruneReport = { targets: [] };
@@ -109,7 +109,13 @@ export class FakeEngine implements EngineLike {
     }
 
     /** Fake restore. */
-    restore(options: { target: string; snapshot: string; output: string; verify?: boolean }): Promise<RestoreReport> {
+    restore(options: {
+        target: string;
+        snapshot: string;
+        output: string;
+        verify?: boolean;
+        dryRun?: boolean;
+    }): Promise<RestoreReport> {
         return this.answer("restore", options, this.restoreReport);
     }
 

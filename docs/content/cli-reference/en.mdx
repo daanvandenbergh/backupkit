@@ -1,6 +1,6 @@
 ---
 title: "CLI Reference"
-description: "Every backupkit command with its flags: run, start, daemon, service, logs, list, status, restore, prune, unlock, check, init, jail - plus JSON output and exit codes."
+description: "Every backupkit command with its flags: run, start, daemon, service, logs, list, status, target, remote, restore, prune, unlock, check, init, jail - plus JSON output and exit codes."
 tab: "Reference"
 group: "CLI"
 order: 1
@@ -13,7 +13,7 @@ keywords:
     - service
     - start
 image: "/assets/docs/cli-reference/hero.en.jpg"
-updated: "2026-08-12"
+updated: "2026-08-15"
 ---
 
 The `backupkit` binary is a thin layer over the engine. An unknown flag, subcommand, or target name is a hard error that lists the valid names, so a typo never turns into a surprise. This page covers every command, its flags, and the exit codes.
@@ -44,6 +44,10 @@ Commands:
   list|ls [options] [TARGET...]          List complete snapshots (alias: ls)
   status [options] [TARGET...]           One row per target: last run, next due, lock
                                          state
+  target [options] <TARGET>              Show one target's settings, as backupkit resolved
+                                         them
+  remote [options] <REMOTE>              Show one remote's settings, as backupkit resolved
+                                         them
   restore [options] <TARGET> <SNAPSHOT>  Copy a snapshot to a fresh path
   prune [options] [TARGET...]            Apply the retention policy now
   unlock [options] [TARGET...]           Clear a destination lock left behind by a killed
@@ -81,6 +85,8 @@ Arguments:
 
 Options:
   --output <path>  Path to restore into - must not exist (required)
+  --dry-run        Write nothing: run every check and report what the copy would write
+                   (cannot be combined with --verify)
   --verify         Re-read the copy and verify checksums afterwards
   --config <path>  Config file to use (default: $BACKUPKIT_CONFIG, else
                    /etc/backupkit/config.jsonc for root, else ~/.backupkit/config.jsonc)
@@ -99,7 +105,9 @@ backupkit service   install|uninstall|start|stop|restart|status [--config P]
 backupkit logs      [-f|--follow] [-n N|--lines N] [--config P]
 backupkit list      [TARGET...] [--json] [--config P]        (alias: ls)
 backupkit status    [TARGET...] [--json] [--config P]
-backupkit restore   TARGET SNAPSHOT|latest --output PATH [--verify] [--config P]
+backupkit target    TARGET [--json] [--config P]
+backupkit remote    REMOTE [--json] [--config P]
+backupkit restore   TARGET SNAPSHOT|latest --output PATH [--dry-run] [--verify] [--config P]
 backupkit prune     [TARGET...] [--dry-run] [--force] [--config P]
 backupkit unlock    [TARGET...] [--force] [--config P]
 backupkit check     [--config P]
@@ -107,7 +115,7 @@ backupkit init      [--force] [--config P]
 backupkit jail      install|status [--path P]
 ```
 
-`run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target.
+`run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target. `target` and `remote` are the exception: each dumps exactly one named entry of the config, so the name is required.
 
 **Three of these commands run the same scheduler**, and picking between them is the one architectural choice backupkit asks of you. `start` runs it in your session ([Run It Yourself](/run-it-yourself/)); `service` installs and drives it as a root daemon ([Run It as a Service](/daemon-setup/)); `daemon` is the loop that service unit executes, which you rarely type yourself. Of the three, only `start` can unlock a passphrase-protected key and keep a schedule running against it.
 
@@ -165,9 +173,37 @@ The `LOCK` column covers **local** destinations only. A push target's lock lives
 
 It is derived from the run reports and the due calculation, so it is instant and needs no root. `service status` prints the same table with a unit-state header on top.
 
+### target
+
+Print one target's settings as a `FIELD`/`VALUE` table - **as backupkit resolved them**, not as they are written in the config file. Every default is filled in with the value the next run will actually use, so an option you never wrote still shows up with the value it has. Nested settings are flattened onto dotted paths (`schedule.interval`, `rsync.ioTimeoutSec`, `minFree.percent`); an empty list and an unset value both read `(none)`.
+
+```
+$ backupkit target web
+FIELD               VALUE
+name                web
+mode                snapshot
+direction           pull
+remoteName          box
+source              /srv/www
+destination         /data/archive/web
+exclude             node_modules, .cache
+schedule.interval   day
+...
+
+Its remote: backupkit remote box
+```
+
+The table leaves out the fields that are derived from the ones above it - the resolved remote, and the transfer endpoints backupkit maps from `direction`, `source`, and `destination` - because they repeat the same remote three times. `--json` prints the whole resolved target object, those included, and nothing else.
+
+### remote
+
+The same dump for one remote. An explicit remote shows its host, user, port, key, passphrase source, `known_hosts` file, and `restrictedShell`; an [ssh_config remote](/configuration/#remotes) shows the alias and nothing more, because the alias is all backupkit knows - `ssh` resolves the rest, and `backupkit check` is what reports what it resolved to. The closing line names the targets using this remote, or says no target does.
+
+`--json` prints the resolved remote object on its own.
+
 ### restore
 
-Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--verify` adds a checksum pass after the copy. See [Restoring a Backup](/restore/).
+Copy one snapshot to an `--output` path that does not exist yet. `SNAPSHOT` can be `latest`. `--dry-run` runs every check and reports what the copy would write without writing it; `--verify` adds a checksum pass after the copy. The two cannot be combined - a dry run writes nothing to verify. See [Restoring a Backup](/restore/).
 
 Restoring a mirror target is an error naming its destination: a mirror keeps one live copy and no history, so there is no point in time to restore - copy from the destination directly.
 
@@ -234,9 +270,11 @@ The `authorized_keys` lines that point at the script come from `backupkit check`
 
 ## JSON output
 
-`--json` exists on the two read-only commands machines actually consume: `status` and `list`. Each prints one JSON document on stdout, with logs going to stderr only.
+`--json` exists on the read-only commands machines actually consume: `status`, `list`, `target`, and `remote`. Each prints one JSON document on stdout, with logs going to stderr only.
 
 `list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, nextDueAt, lastResult, consecutiveFailures, lockHeld }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `consecutiveFailures` is a number, and `lockHeld` is a boolean that is always `false` for a push target.
+
+`target --json` and `remote --json` each print one resolved object - the same shape the engine runs on, every default already filled in, and for `target` the derived remote and endpoints the table omits.
 
 `run`, `prune`, `check`, `service`, and `logs` have no `--json`. The stored run reports, the printed prune plan, and journald's `-o json` already cover the machine-readable side.
 

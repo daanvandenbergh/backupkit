@@ -1,6 +1,6 @@
 ---
 title: "Restoring a Backup"
-description: "Copy a snapshot back out with backupkit restore, restore the latest one, and optionally checksum-verify the copy."
+description: "Copy a snapshot back out with backupkit restore, preview it with --dry-run, restore the latest one, and optionally checksum-verify the copy."
 tab: "Guide"
 group: "Operate"
 order: 3
@@ -47,6 +47,23 @@ backupkit restore var-www latest --output /tmp/restored-www
 
 Name a snapshot that does not exist or is not complete, and restore refuses, naming the newest complete snapshot for that target so you can retry with a valid name. On an archive with no complete snapshots at all it just says so - there is nothing to point you at.
 
+## Seeing what a restore would do first
+
+`--dry-run` runs the whole thing except the writing: it resolves `latest`, checks the snapshot is complete, checks `--output` is fresh and outside every archive root, probes the remote rsync for a push target, and then asks rsync what the copy would move.
+
+```bash
+backupkit restore var-www latest --output /tmp/restored-www --dry-run
+```
+
+```
+Would restore snapshot 2026-08-10T031500Z of var-www to /tmp/restored-www: 12482 files, 3.4 GiB
+Dry run - nothing was written. Drop --dry-run to restore.
+```
+
+Nothing is created - not even the output directory - so you can repeat it as often as you like, and the same command without `--dry-run` restores for real. The numbers are what the copy would transfer at that moment; a snapshot never changes after it is promoted, so they do not drift.
+
+`--dry-run` and `--verify` cannot be combined: a dry run writes no copy, so there is nothing to checksum. Passing both is refused rather than one being silently ignored.
+
 ## Where you can restore to
 
 The `--output` path must not already exist - there is no restore-into-existing mode.
@@ -81,10 +98,10 @@ const report = await kit.restore({
     output: "/tmp/restored-www",
     verify: true,
 });
-// report: { target, snapshot, output, verified }
+// report: { target, snapshot, output, verified, plan }
 ```
 
-The same rules apply: `snapshot` accepts `latest`, `output` has to be a fresh path outside every archive, and `verified` is `true` only after a clean verify pass.
+The same rules apply: `snapshot` accepts `latest`, `output` has to be a fresh path outside every archive, and `verified` is `true` only after a clean verify pass. Pass `dryRun: true` (never together with `verify`) for the preview: nothing is written and `plan` carries `{ files, bytes }` - what the copy would have transferred, or `null` if rsync printed no parsable stats. On a real restore `plan` is always `null`.
 
 ## Related
 

@@ -5,6 +5,7 @@
  * `--delete`.
  */
 
+import { existsSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -115,7 +116,7 @@ describe("restore", () => {
         await seedSnapshots(fixture);
         const out = join(fixture.root, "out");
         const report = await fixture.kit.restore({ target: "web", snapshot: "latest", output: out });
-        expect(report).toEqual({ target: "web", snapshot: NEW_SNAP, output: out, verified: false });
+        expect(report).toEqual({ target: "web", snapshot: NEW_SNAP, output: out, verified: false, plan: null });
         const copy = fixture.execCalls.at(-1);
         expect(copy?.bin).toBe("/fake/rsync");
         expect(copy?.args).toEqual([
@@ -130,6 +131,86 @@ describe("restore", () => {
             out,
         ]);
         expect(copy?.args.some((arg) => arg.includes("--delete"))).toBe(false);
+    });
+
+    it("dryRun passes --dry-run, writes nothing, and reports the projected copy", async () => {
+        fixture = await makeKit({
+            deps: {
+                execFn: async (bin, args, options) => {
+                    fixture?.execCalls.push({ bin, args: [...args], options });
+                    return makeExecResult({
+                        stdout: [
+                            "Number of files: 12 (reg: 10, dir: 2)",
+                            "Number of regular files transferred: 10",
+                            "Total transferred file size: 4,096 bytes",
+                        ].join("\n"),
+                    });
+                },
+            },
+        });
+        await seedSnapshots(fixture);
+        const out = join(fixture.root, "out");
+        const report = await fixture.kit.restore({ target: "web", snapshot: "latest", output: out, dryRun: true });
+        expect(report).toEqual({
+            target: "web",
+            snapshot: NEW_SNAP,
+            output: out,
+            verified: false,
+            plan: { files: 10, bytes: 4096 },
+        });
+        // One rsync ran, it carried --dry-run, and it still carried the ingest hardening.
+        expect(fixture.execCalls).toHaveLength(1);
+        expect(fixture.execCalls[0].args).toContain("--dry-run");
+        expect(fixture.execCalls[0].args).toContain("--info=stats2");
+        expect(fixture.execCalls[0].args).toContain("--chmod=ug-s");
+        expect(existsSync(out)).toBe(false);
+    });
+
+    it("dryRun with an unparsable stats block reports a null plan rather than failing", async () => {
+        fixture = await makeKit();
+        await seedSnapshots(fixture);
+        const report = await fixture.kit.restore({
+            target: "web",
+            snapshot: "latest",
+            output: join(fixture.root, "out"),
+            dryRun: true,
+        });
+        expect(report.plan).toBeNull();
+    });
+
+    // The safety gates are the whole point of a preview: a dry run that says
+    // "fine" on an output path the real restore would refuse is a lie.
+    it("dryRun still refuses an existing output and one inside an archive root", async () => {
+        fixture = await makeKit();
+        await seedSnapshots(fixture);
+        const out = join(fixture.root, "out");
+        await mkdir(out);
+        await expect(
+            fixture.kit.restore({ target: "web", snapshot: "latest", output: out, dryRun: true }),
+        ).rejects.toThrow(/already exists/);
+        await expect(
+            fixture.kit.restore({
+                target: "web",
+                snapshot: "latest",
+                output: join(fixture.destination, "out"),
+                dryRun: true,
+            }),
+        ).rejects.toThrow(/inside the archive root/);
+    });
+
+    it("refuses dryRun together with verify - there is nothing to verify", async () => {
+        fixture = await makeKit();
+        await seedSnapshots(fixture);
+        await expect(
+            fixture.kit.restore({
+                target: "web",
+                snapshot: "latest",
+                output: join(fixture.root, "out"),
+                dryRun: true,
+                verify: true,
+            }),
+        ).rejects.toThrow(RestoreError);
+        expect(fixture.execCalls).toEqual([]);
     });
 
     // Invariant 12: `-a` implies -p and -D, so an unhardened restore recreates a
