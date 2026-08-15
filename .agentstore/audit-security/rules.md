@@ -281,8 +281,11 @@ partial fix, it is a false sense of security plus a test that reads as green.
     all, unlike `check_lifecycle_path` - meant `--delete --force . $ROOT` erased a target's whole
     history in ONE command, and `. $ROOT/<complete-snap>` overwrote verified history.
     Pinning the destination to exactly `<snap>.partial`, ONE component under the root, for a write
-    (and `<snap>` additionally for a `--sender` read) is what makes the permitted `--delete`
-    harmless: it can only delete inside the scratch partial being built. The root itself is a legal
+    (and `<snap>` additionally for a `--sender` read) is what makes the permitted deletes
+    harmless: they can only reach inside the scratch partial being built. That covers
+    `--delete-excluded` as well, which the client now always sends and rsync forwards IN PLACE OF
+    `--delete` (it implies it) - same blast radius, bounded by the same pinned operand, and it is on
+    the allowlist because it was MEASURED on the wire, not because it looked benign. The root itself is a legal
     operand for the LIFECYCLE verbs and never for rsync in either direction - which is also why a
     push mirror, whose destination IS the root, cannot be jailed and the validator refuses one. The allowlist is derived from MEASURED argv, not intent - see 24.
     *graduated: `src/snapshots/tests/jail.fake.test.ts` ("the rsync path operand is pinned to the

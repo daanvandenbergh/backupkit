@@ -196,6 +196,8 @@ What changes for a mirror:
 
 In snapshot mode this can never reach your history: each run writes a fresh `<snapshot>.partial` directory, so the sweep only ever touches the snapshot being built. Snapshots already promoted keep whatever they held when they were made.
 
+**A broad exclude can trip the collapse guard on its first run.** The guard compares the file count against the last successful run, so excluding something that was more than half the tree looks exactly like a source that has gone missing: a mirror refuses the transfer and reports `content-collapse`, and a snapshot target promotes but prunes nothing. That is the guard doing its job - confirm the shrink is the exclude you just added, then `backupkit run --force <target>` once. From the following run the new count is the baseline.
+
 Only `NUL` and newline are refused in a pattern; everything else rsync's filter syntax accepts is passed through untouched.
 
 ### Upgrading a 1.x config
