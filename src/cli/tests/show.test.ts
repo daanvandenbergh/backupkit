@@ -97,10 +97,29 @@ describe("backupkit target <name>", () => {
         expect(h.err[0]).toBe('Error: unknown target "nope" (configured: web)');
     });
 
-    it.each([[[]], [["web", "db"]]])("rejects %j with a usage error naming the usage", async (names) => {
+    it("rejects two names with a usage error naming the usage", async () => {
         const h = fakeDeps({ config: config() });
-        expect(await main(["target", ...names], h.deps)).toBe(64);
-        expect(h.err[0]).toBe("Error: expected exactly one name - usage: backupkit target <name>");
+        expect(await main(["target", "web", "db"], h.deps)).toBe(64);
+        expect(h.err[0]).toBe("Error: expected at most one name - usage: backupkit target [<name>]");
+    });
+});
+
+describe("backupkit target (no name)", () => {
+    it("lists every configured target, one row each", async () => {
+        const h = fakeDeps({ config: config() });
+        expect(await main(["target"], h.deps)).toBe(0);
+        const text = h.out.join("\n");
+        expect(h.out[0]).toMatch(/^TARGET {2,}MODE {2,}DIRECTION {2,}REMOTE {2,}SOURCE {2,}DESTINATION$/);
+        expect(text).toMatch(/^web {2,}snapshot {2,}pull {2,}box {2,}\/data\/src {2,}\/data\/archive$/m);
+        expect(h.out.at(-1)).toBe("One target: backupkit target <name>");
+    });
+
+    it("--json prints the whole resolved target array and nothing else", async () => {
+        const h = fakeDeps({ config: config() });
+        expect(await main(["target", "--json"], h.deps)).toBe(0);
+        const parsed = JSON.parse(h.out.join("\n")) as { name: string }[];
+        expect(parsed.map((target) => target.name)).toEqual(["web"]);
+        expect(h.out).toHaveLength(1);
     });
 });
 
@@ -142,5 +161,30 @@ describe("backupkit remote <name>", () => {
         const h = fakeDeps({ config: config() });
         expect(await main(["remote", name], h.deps)).toBe(64);
         expect(h.out).toEqual([]);
+    });
+
+    it("rejects two names with a usage error naming the usage", async () => {
+        const h = fakeDeps({ config: config() });
+        expect(await main(["remote", "box", "spare"], h.deps)).toBe(64);
+        expect(h.err[0]).toBe("Error: expected at most one name - usage: backupkit remote [<name>]");
+    });
+});
+
+describe("backupkit remote (no name)", () => {
+    it("lists every configured remote with its ssh address and users", async () => {
+        const h = fakeDeps({ config: config() });
+        expect(await main(["remote"], h.deps)).toBe(0);
+        const text = h.out.join("\n");
+        expect(h.out[0]).toMatch(/^REMOTE {2,}KIND {2,}ADDRESS {2,}USED BY$/);
+        expect(text).toMatch(/^box {2,}explicit {2,}backup@10\.0\.0\.9 {2,}web$/m);
+        expect(text).toMatch(/^spare {2,}alias {2,}spare {2,}no target$/m);
+        expect(h.out.at(-1)).toBe("One remote: backupkit remote <name>");
+    });
+
+    it("--json prints the whole resolved remotes record and nothing else", async () => {
+        const h = fakeDeps({ config: config() });
+        expect(await main(["remote", "--json"], h.deps)).toBe(0);
+        expect(JSON.parse(h.out.join("\n"))).toEqual(config().remotes);
+        expect(h.out).toHaveLength(1);
     });
 });

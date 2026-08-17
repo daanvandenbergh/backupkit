@@ -91,8 +91,8 @@ The one guard that stays is the one a mirror cannot recover from without: before
 | `backupkit run [TARGET...]` | Back up due targets now (`--force` ignores the schedule, `--dry-run` transfers nothing). |
 | `backupkit status [TARGET...]` | One row per target: last run, next due, consecutive failures, lock state (`--json`). |
 | `backupkit list [TARGET...]` | Complete snapshots, oldest first (alias `ls`, `--json`). |
-| `backupkit target TARGET` | Dump one target's settings as backupkit resolved them - every default filled in (`--json`). |
-| `backupkit remote REMOTE` | Dump one remote's settings as backupkit resolved them, and the targets using it (`--json`). |
+| `backupkit target [TARGET]` | Dump one target's settings as backupkit resolved them - every default filled in; no name lists every target (`--json`). |
+| `backupkit remote [REMOTE]` | Dump one remote's settings as backupkit resolved them, and the targets using it; no name lists every remote (`--json`). |
 | `backupkit restore TARGET SNAP` | Copy a snapshot (`SNAP` may be `latest`) to a fresh `--output` path; never overwrites, never deletes. `--dry-run` previews it. |
 | `backupkit prune [TARGET...]` | Apply retention now (`--dry-run` prints the keep/prune plan; `--force` overrides the planted-snapshot guard). |
 | `backupkit unlock [TARGET...]` | Clear a destination lock a killed run left behind. A live lock is reported, not removed, unless `--force`. |

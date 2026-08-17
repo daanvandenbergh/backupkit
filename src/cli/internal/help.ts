@@ -216,22 +216,22 @@ const PAGES: Record<string, HelpPage> = {
         ],
     },
     target: {
-        usage: "backupkit target [options] <TARGET>",
+        usage: "backupkit target [options] [TARGET]",
         summary: "Show one target's settings, as backupkit resolved them",
         description:
-            "Print every setting of one target the way backupkit resolved it - each default filled in with the value actually used, not left blank as it is in the config file. This is the config the next run of that target will obey.\n\nThe transfer endpoints and the full remote are left out of the table (they are derived from direction, source, destination, and the named remote); `--json` includes them.",
-        args: [{ term: "TARGET", text: "The target to show" }],
+            "Print every setting of one target the way backupkit resolved it - each default filled in with the value actually used, not left blank as it is in the config file. This is the config the next run of that target will obey.\n\nThe transfer endpoints and the full remote are left out of the table (they are derived from direction, source, destination, and the named remote); `--json` includes them.\n\nWith no TARGET, list every configured target instead - one row each with its mode, direction, remote, source, and destination.",
+        args: [{ term: "TARGET", text: "The target to show (default: list them all)" }],
         options: [
             { term: "--json", text: "Print one JSON document on stdout instead of a table" },
             CONFIG_OPTION,
         ],
     },
     remote: {
-        usage: "backupkit remote [options] <REMOTE>",
+        usage: "backupkit remote [options] [REMOTE]",
         summary: "Show one remote's settings, as backupkit resolved them",
         description:
-            "Print every setting of one remote the way backupkit resolved it - for an explicit remote its host, user, port, key, passphrase source and known_hosts file; for an ssh_config remote the alias, which is all backupkit knows (ssh resolves the rest). The closing line names the targets using it.",
-        args: [{ term: "REMOTE", text: "The remote to show" }],
+            "Print every setting of one remote the way backupkit resolved it - for an explicit remote its host, user, port, key, passphrase source and known_hosts file; for an ssh_config remote the alias, which is all backupkit knows (ssh resolves the rest). The closing line names the targets using it.\n\nWith no REMOTE, list every configured remote instead - one row each with its kind, ssh address, and the targets using it.",
+        args: [{ term: "REMOTE", text: "The remote to show (default: list them all)" }],
         options: [
             { term: "--json", text: "Print one JSON document on stdout instead of a table" },
             CONFIG_OPTION,

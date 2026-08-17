@@ -105,8 +105,8 @@ backupkit service   install|uninstall|start|stop|restart|status [--config P]
 backupkit logs      [-f|--follow] [-n N|--lines N] [--config P]
 backupkit list      [TARGET...] [--json] [--config P]        (alias: ls)
 backupkit status    [TARGET...] [--json] [--config P]
-backupkit target    TARGET [--json] [--config P]
-backupkit remote    REMOTE [--json] [--config P]
+backupkit target    [TARGET] [--json] [--config P]
+backupkit remote    [REMOTE] [--json] [--config P]
 backupkit restore   TARGET SNAPSHOT|latest --output PATH [--dry-run] [--verify] [--config P]
 backupkit prune     [TARGET...] [--dry-run] [--force] [--config P]
 backupkit unlock    [TARGET...] [--force] [--config P]
@@ -115,7 +115,7 @@ backupkit init      [--force] [--config P]
 backupkit jail      install|status [--path P]
 ```
 
-`run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target. `target` and `remote` are the exception: each dumps exactly one named entry of the config, so the name is required.
+`run`, `status`, `list`, `prune`, and `unlock` take optional target names. Name none and the command applies to every target. `target` and `remote` take at most one name: name one and you get its full resolved dump, name none and you get a one-row-per-entry listing of them all.
 
 **Three of these commands run the same scheduler**, and picking between them is the one architectural choice backupkit asks of you. `start` runs it in your session ([Run It Yourself](/run-it-yourself/)); `service` installs and drives it as a root daemon ([Run It as a Service](/daemon-setup/)); `daemon` is the loop that service unit executes, which you rarely type yourself. Of the three, only `start` can unlock a passphrase-protected key and keep a schedule running against it.
 
@@ -195,11 +195,35 @@ Its remote: backupkit remote box
 
 The table leaves out the fields that are derived from the ones above it - the resolved remote, and the transfer endpoints backupkit maps from `direction`, `source`, and `destination` - because they repeat the same remote three times. `--json` prints the whole resolved target object, those included, and nothing else.
 
+Name no target and it lists them all instead - one row each, so the names the dump takes are discoverable from the same command:
+
+```
+$ backupkit target
+TARGET  MODE      DIRECTION  REMOTE  SOURCE    DESTINATION
+web     snapshot  pull       box     /srv/www  /data/archive/web
+db      mirror    push       box     /var/db   /srv/mirror/db
+
+One target: backupkit target <name>
+```
+
+`--json` on the listing prints the whole resolved target array.
+
 ### remote
 
 The same dump for one remote. An explicit remote shows its host, user, port, key, passphrase source, `known_hosts` file, and `restrictedShell`; an [ssh_config remote](/configuration/#remotes) shows the alias and nothing more, because the alias is all backupkit knows - `ssh` resolves the rest, and `backupkit check` is what reports what it resolved to. The closing line names the targets using this remote, or says no target does.
 
-`--json` prints the resolved remote object on its own.
+Name no remote and it lists them all - kind, the `user@host` (or alias) `ssh` is given, and the targets using each one:
+
+```
+$ backupkit remote
+REMOTE  KIND      ADDRESS          USED BY
+box     explicit  backup@10.0.0.9  web, db
+spare   alias     spare            no target
+
+One remote: backupkit remote <name>
+```
+
+`--json` prints the resolved remote object on its own, or the whole remotes record when no name is given.
 
 ### restore
 
