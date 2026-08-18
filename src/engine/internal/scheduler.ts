@@ -65,9 +65,11 @@ interface BackoffState {
 
 /**
  * In-memory backoff bookkeeping, rehydrated from run reports at startup and
- * updated as each report is recorded. Owns the mandatory error-level log on
- * every state transition: enter (first failure), extend (further failures),
- * ceiling, and clear (first success/warning after failures).
+ * updated as each report is recorded. Owns the mandatory log line on every
+ * state transition: enter (first failure), extend (further failures) and
+ * ceiling at error level, and clear (first success/warning after failures) at
+ * INFO - recovery is good news, and logging it at error level made a healthy
+ * target's last line read as a failure.
  */
 export class BackoffTracker {
     /** Per-target state. */
@@ -87,8 +89,9 @@ export class BackoffTracker {
     }
 
     /**
-     * Record one finished run and log any backoff transition at error level.
-     * `aborted` and `skipped` never change the state.
+     * Record one finished run and log any backoff transition - failures at
+     * error level, the recovery at info. `aborted` and `skipped` never change
+     * the state.
      */
     record(target: string, status: RunStatus, finishedAt: Date): void {
         const current = this.state.get(target) ?? { failures: 0, anchor: null };
@@ -103,7 +106,10 @@ export class BackoffTracker {
         }
         if ((status === "success" || status === "warning") && current.failures > 0) {
             this.state.set(target, { failures: 0, anchor: null });
-            this.log.error("clearing failure backoff after successful run", { target });
+            this.log.info("recovered - back on schedule, no backoff pending", {
+                target,
+                afterFailures: current.failures,
+            });
             return;
         }
         if (status === "success" || status === "warning") {

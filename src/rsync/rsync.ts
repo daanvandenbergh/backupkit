@@ -354,7 +354,7 @@ export async function dryRunStats(params: {
             const tail = sshStderrTail(result.stderr);
             const cls = classifyExit(result.exitCode, tail);
             if (!cls.promote) {
-                throw new TransferError(`delta estimate failed: ${cls.message}`, {
+                throw new TransferError(`sizing up the changes failed: ${cls.message}`, {
                     exitCode: result.exitCode,
                     retriable: cls.retriable,
                     stderrTail: tail,
@@ -362,7 +362,7 @@ export async function dryRunStats(params: {
             }
             const stats = parseStats2(result.stdout);
             if (stats === null) {
-                throw new TransferError("delta estimate produced no parsable rsync stats output", {
+                throw new TransferError("sizing up the changes produced no parsable rsync stats output", {
                     exitCode: result.exitCode,
                     retriable: false,
                     stderrTail: tail,
@@ -372,6 +372,6 @@ export async function dryRunStats(params: {
         },
         CONTROL_RETRY_POLICY,
         params.log,
-        "delta estimate",
+        "sizing up the changes",
     );
 }

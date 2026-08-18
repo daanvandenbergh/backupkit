@@ -216,7 +216,7 @@ describe("runMirror pipeline", () => {
             makeDeps({
                 transfer: fakeTransfer(makeTransferResult(), seen),
                 estimate: async () => {
-                    throw new TransferError("delta estimate produced no parsable rsync stats output", {
+                    throw new TransferError("sizing up the changes produced no parsable rsync stats output", {
                         exitCode: 0,
                         retriable: false,
                         stderrTail: "",
