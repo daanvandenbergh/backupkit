@@ -65,11 +65,15 @@ interface BackoffState {
 
 /**
  * In-memory backoff bookkeeping, rehydrated from run reports at startup and
- * updated as each report is recorded. Owns the mandatory log line on every
- * state transition: enter (first failure), extend (further failures) and
- * ceiling at error level, and clear (first success/warning after failures) at
- * INFO - recovery is good news, and logging it at error level made a healthy
- * target's last line read as a failure.
+ * updated as each report is recorded. Logs ONLY the transitions INTO backoff -
+ * enter (first failure), extend (further failures), ceiling - each at error
+ * level, right after the `backup failed` line that caused it, because they
+ * carry the one fact that line does not: when the next attempt happens.
+ *
+ * Clearing the backoff is deliberately SILENT. It happens after the `backup
+ * finished` line has already said the run succeeded, so a second line adds
+ * nothing a reader does not have - and it used to say it at error level, which
+ * made a healthy target's LAST line read as a failure.
  */
 export class BackoffTracker {
     /** Per-target state. */
@@ -89,9 +93,9 @@ export class BackoffTracker {
     }
 
     /**
-     * Record one finished run and log any backoff transition - failures at
-     * error level, the recovery at info. `aborted` and `skipped` never change
-     * the state.
+     * Record one finished run, logging an error line when it moves the target
+     * further INTO backoff. Success and warning clear the state silently;
+     * `aborted` and `skipped` never change it.
      */
     record(target: string, status: RunStatus, finishedAt: Date): void {
         const current = this.state.get(target) ?? { failures: 0, anchor: null };
@@ -102,14 +106,6 @@ export class BackoffTracker {
             const nextAttemptAt = formatUtc(new Date(finishedAt.getTime() + delayMs));
             const phase = failures === 1 ? "entering" : delayMs >= BACKOFF_CAP_MS ? "at ceiling for" : "extending";
             this.log.error(`${phase} failure backoff`, { target, failures, nextAttemptAt });
-            return;
-        }
-        if ((status === "success" || status === "warning") && current.failures > 0) {
-            this.state.set(target, { failures: 0, anchor: null });
-            this.log.info("recovered - back on schedule, no backoff pending", {
-                target,
-                afterFailures: current.failures,
-            });
             return;
         }
         if (status === "success" || status === "warning") {

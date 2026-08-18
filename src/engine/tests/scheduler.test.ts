@@ -87,8 +87,8 @@ describe("nextDueAt", () => {
 describe("BackoffTracker transitions", () => {
     const finished = new Date("2026-08-10T12:00:00Z");
 
-    it("logs one line per transition: enter, extend, ceiling at error, the recovery at info - and none otherwise", () => {
-        const { log, lines } = captureLogger("info");
+    it("logs only the transitions INTO backoff; clearing it is silent", () => {
+        const { log, lines } = captureLogger("debug");
         const tracker = new BackoffTracker(log);
         const errorLines = (): string[] => lines.filter((line) => line.includes("ERROR"));
 
@@ -106,18 +106,16 @@ describe("BackoffTracker transitions", () => {
         }
         expect(errorLines().at(-1)).toContain("at ceiling for failure backoff");
 
-        // Recovery is good news: it must NEVER be an ERROR line. A healthy
-        // target whose last line reads ERROR is unreadable - the user cannot
-        // tell the backup worked.
-        const beforeRecovery = errorLines().length;
-        tracker.record("web", "success", finished);
-        expect(errorLines()).toHaveLength(beforeRecovery);
-        expect(lines.at(-1)).toContain("INFO");
-        expect(lines.at(-1)).toContain("recovered");
-        expect(lines.at(-1)).toContain("afterFailures=6");
-
+        // Clearing the backoff logs NOTHING, at any level. It lands after the
+        // `backup finished` line has already reported the success, so a line
+        // here only makes a healthy target's LAST line look like a problem.
         const count = lines.length;
         tracker.record("web", "success", finished);
+        expect(tracker.failuresFor("web")).toBe(0);
+        expect(tracker.untilFor("web")).toBeNull();
+        expect(lines).toHaveLength(count);
+
+        tracker.record("web", "warning", finished);
         tracker.record("web", "skipped", finished);
         tracker.record("web", "aborted", finished);
         expect(lines).toHaveLength(count);
