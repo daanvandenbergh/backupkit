@@ -740,7 +740,7 @@ export class Backupkit {
             return null;
         } catch (error) {
             const message = sanitize(error instanceof Error ? error.message : String(error));
-            this.log.error("could not reach this target's backup server (rsync check failed), so this target cannot run", {
+            this.log.error("the pre-run check against this target's backup server failed, so this target cannot run", {
                 target: target.name,
                 remote: remote.name,
                 error: message,

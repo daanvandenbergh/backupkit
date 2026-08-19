@@ -181,7 +181,7 @@ Keys need no attention across a reboot: the service only ever holds unencrypted 
 
 A target that keeps failing does not spin. Its backoff grows as `15 min * 2^(n-1)` from the consecutive-failure count, capped at 6 hours.
 
-Backoff only ever delays a target's next run - it never stops scheduling it. Every transition (entering backoff, extending it, hitting the ceiling, clearing) is logged at error level. Service-level restarts stay paced at 15 seconds independently of this.
+Backoff only ever delays a target's next run - it never stops scheduling it. The transitions *into* backoff - entering it, extending it, hitting the ceiling - are logged at error level, right after the failure that caused them, because they carry the one fact that line does not: when the next attempt happens. Clearing the backoff logs nothing: it happens after `backup finished` has already reported the success, so a line there would only make a healthy target's last log entry look like a problem. Service-level restarts stay paced at 15 seconds independently of this.
 
 A failing target's `nextDueAt` in `backupkit status` already includes any active backoff, so you can see exactly when it will retry.
 

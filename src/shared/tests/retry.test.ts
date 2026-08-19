@@ -87,6 +87,46 @@ describe("withTransientRetry", () => {
         expect(warns[0]).toContain("list hit a temporary problem - trying again");
         expect(warns[0]).toContain("attempt=2");
         expect(warns[0]).toContain("delayMs=2000");
+        // The cause is the field that makes a retry storm readable: without it
+        // a night of dropped Wi-Fi and a night of a dead server log identically.
+        expect(warns[0]).toContain("blip 1");
+    });
+
+    it("carries the failure cause on every warn, trimmed so a 2 KiB stderr tail cannot flood the log", async () => {
+        const { logger, warns } = warnCapture();
+        const head = "no answer from the host";
+        const long = `${head} [ssh said: ${"x".repeat(4000)}]`;
+        const op = async (): Promise<never> => {
+            throw Object.assign(new Error(long), { retriable: true });
+        };
+        const promise = withTransientRetry(op, CONTROL_RETRY_POLICY, logger, "ssh backup");
+        promise.catch(() => {});
+        await vi.advanceTimersByTimeAsync(2000);
+        await vi.advanceTimersByTimeAsync(4000);
+        await expect(promise).rejects.toThrow(head);
+        expect(warns).toHaveLength(2);
+        for (const warn of warns) {
+            expect(warn).toContain(head);
+            expect(warn).toContain("...");
+            expect(warn.length).toBeLessThan(500);
+        }
+    });
+
+    it("renders a non-Error throw as its string form rather than [object Object]", async () => {
+        const { logger, warns } = warnCapture();
+        let first = true;
+        const op = async (): Promise<string> => {
+            if (first) {
+                first = false;
+                // eslint-disable-next-line no-throw-literal
+                throw Object.assign(Object.create(null) as object, { retriable: true, toString: () => "raw blip" });
+            }
+            return "ok";
+        };
+        const promise = withTransientRetry(op, CONTROL_RETRY_POLICY, logger, "list");
+        await vi.advanceTimersByTimeAsync(2000);
+        await expect(promise).resolves.toBe("ok");
+        expect(warns[0]).toContain("raw blip");
     });
 
     it("control policy exhausts after 3 attempts with delays 2s then 4s", async () => {

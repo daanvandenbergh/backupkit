@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { isPermanentSshStderr, matchPermanentSshPattern, sshStderrTail } from "../classify.js";
+import {
+    describeTransientSshStderr,
+    isPermanentSshStderr,
+    matchPermanentSshPattern,
+    matchTransientSshCause,
+    SSH_NO_ANSWER_MESSAGE,
+    sshStderrTail,
+} from "../classify.js";
 
 /**
  * Shared permanent-pattern fixtures (the rsync 255-cross-table reuses these
@@ -65,5 +72,76 @@ describe("sshStderrTail", () => {
         const tail = sshStderrTail(flood);
         expect(tail.length).toBeLessThanOrEqual(2048);
         expect(isPermanentSshStderr(tail)).toBe(true);
+    });
+});
+
+/**
+ * Real stderr lines per transient cause, one per wording the platforms
+ * actually emit. The whole point of the classifier is that a reader can tell
+ * "my Wi-Fi dropped" from "the server is off", so each fixture also states
+ * which side the message must blame.
+ */
+const TRANSIENT_FIXTURES = [
+    { label: "linux network unreachable", stderr: "ssh: connect to host backup port 22: Network is unreachable", cause: "no-network" },
+    { label: "network down", stderr: "ssh: connect to host backup port 22: Network is down", cause: "no-network" },
+    { label: "no route", stderr: "ssh: connect to host 10.0.0.11 port 22: No route to host", cause: "no-network" },
+    { label: "host unreachable", stderr: "ssh: connect to host 10.0.0.11 port 22: Host is unreachable", cause: "no-network" },
+    { label: "dns could not resolve", stderr: "ssh: Could not resolve hostname backup: Name or service not known", cause: "dns" },
+    { label: "dns temporary failure", stderr: "ssh: Could not resolve hostname backup: Temporary failure in name resolution", cause: "dns" },
+    { label: "dns macos wording", stderr: "ssh: Could not resolve hostname backup: nodename nor servname provided, or not known", cause: "dns" },
+    { label: "dns no address", stderr: "ssh: Could not resolve hostname backup: No address associated with hostname", cause: "dns" },
+    { label: "refused", stderr: "ssh: connect to host 10.0.0.11 port 22: Connection refused", cause: "refused" },
+    { label: "linux timeout", stderr: "ssh: connect to host 10.0.0.11 port 22: Connection timed out", cause: "unanswered" },
+    { label: "macos timeout", stderr: "ssh: connect to host 10.0.0.11 port 22: Operation timed out", cause: "unanswered" },
+    { label: "reset", stderr: "Connection reset by peer", cause: "dropped" },
+    { label: "closed by remote", stderr: "Connection closed by remote host", cause: "dropped" },
+    { label: "broken pipe", stderr: "client_loop: send disconnect: Broken pipe", cause: "dropped" },
+    { label: "handshake drop", stderr: "kex_exchange_identification: read: Connection reset by peer", cause: "dropped" },
+] as const;
+
+describe("transient ssh cause", () => {
+    it.each(TRANSIENT_FIXTURES)("names the cause for $label", ({ stderr, cause }) => {
+        const tail = sshStderrTail(stderr);
+        expect(matchTransientSshCause(tail)).toBe(cause);
+        expect(describeTransientSshStderr(tail)).toBeTruthy();
+    });
+
+    it("blames THIS machine for a dead link or DNS, and never the host", () => {
+        for (const { stderr } of TRANSIENT_FIXTURES.filter((f) => f.cause === "no-network" || f.cause === "dns")) {
+            expect(describeTransientSshStderr(sshStderrTail(stderr))).toContain("this machine");
+        }
+    });
+
+    it("says the host is UP when it actively refused the port", () => {
+        const message = describeTransientSshStderr(sshStderrTail("ssh: connect to host h port 22: Connection refused"));
+        expect(message).toContain("UP");
+    });
+
+    it("refuses to pick a side when nothing answered - the whole point of the change", () => {
+        const message = describeTransientSshStderr(sshStderrTail("ssh: connect to host h port 22: Connection timed out"));
+        expect(message).toBe(SSH_NO_ANSWER_MESSAGE);
+        expect(message).toContain("may be offline");
+        expect(message).toContain("network/route to it may be down");
+    });
+
+    it("returns null for stderr it does not recognise, and for empty stderr", () => {
+        expect(matchTransientSshCause("")).toBeNull();
+        expect(describeTransientSshStderr("")).toBeNull();
+        expect(describeTransientSshStderr(sshStderrTail("some rsync noise nobody classified"))).toBeNull();
+    });
+
+    it("is purely explanatory: a permanent failure still classifies permanent", () => {
+        // A cause match must never be read as "transient" on its own - only
+        // isPermanentSshStderr decides retry, and an auth failure whose stderr
+        // ALSO carries a reset line must stay permanent.
+        const tail = sshStderrTail("Connection reset by peer\ndaan@h: Permission denied (publickey).");
+        expect(matchTransientSshCause(tail)).toBe("dropped");
+        expect(isPermanentSshStderr(tail)).toBe(true);
+    });
+
+    it("survives a 2 KiB control-character flood pushing the needle to the tail edge", () => {
+        const tail = sshStderrTail(`${"\u0000".repeat(4000)}ssh: connect to host h port 22: Network is unreachable`);
+        expect(tail.length).toBeLessThanOrEqual(2048);
+        expect(matchTransientSshCause(tail)).toBe("no-network");
     });
 });

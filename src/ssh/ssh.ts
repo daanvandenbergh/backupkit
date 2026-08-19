@@ -8,11 +8,18 @@
 
 import { exec, minimalEnv, type ExecResult } from "../exec/exec.js";
 import { SshError } from "../shared/errors.js";
+import { formatDuration } from "../shared/format.js";
 import type { Logger } from "../shared/logger.js";
 import { CONTROL_RETRY_POLICY, withTransientRetry, type RetryPolicy } from "../shared/retry.js";
 import { sanitize } from "../shared/sanitize.js";
 import type { ResolvedRemote } from "../shared/types.js";
-import { isPermanentSshStderr, matchPermanentSshPattern, sshStderrTail } from "./classify.js";
+import {
+    describeTransientSshStderr,
+    isPermanentSshStderr,
+    matchPermanentSshPattern,
+    SSH_NO_ANSWER_MESSAGE,
+    sshStderrTail,
+} from "./classify.js";
 import { bareShellArg, quoteShellArg } from "./internal/quote.js";
 
 /** An alias-kind resolved remote. */
@@ -149,7 +156,9 @@ function sshFailureMessage(remote: ResolvedRemote, tail: string): string {
             `verify the host, then edit ${where} manually (backupkit never auto-removes a pinned key)`
         );
     }
-    return `ssh ${dest} failed (exit 255): ${tail}`;
+    const cause = describeTransientSshStderr(tail);
+    const why = cause ?? SSH_NO_ANSWER_MESSAGE;
+    return `ssh ${dest} failed (exit 255): ${why}${tail === "" ? "" : ` [ssh said: ${tail}]`}`;
 }
 
 /**
@@ -187,9 +196,11 @@ export async function runRemote(
                 signal: options.signal,
             });
             if (result.timedOut) {
-                throw new SshError(`ssh ${dest} timed out after ${options.timeoutMs ?? 60_000}ms`, {
-                    retriable: true,
-                });
+                const waitedMs = options.timeoutMs ?? 60_000;
+                throw new SshError(
+                    `ssh ${dest} gave up after ${formatDuration(waitedMs)}: ${SSH_NO_ANSWER_MESSAGE}`,
+                    { retriable: true },
+                );
             }
             if (result.exitCode === null) {
                 throw new SshError(`ssh ${dest} was killed by signal ${result.signal ?? "unknown"}`, {

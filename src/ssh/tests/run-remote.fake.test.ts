@@ -189,7 +189,10 @@ describe("runRemote (fake ssh)", () => {
                 ["true"],
                 options([{ sleepMs: 30_000 }], { timeoutMs: 250, retryPolicy: { attempts: 1, baseDelayMs: 1, capMs: 2 } }),
             ),
-        ).rejects.toThrowError(/timed out/);
+            // The message must name BOTH possibilities. A timeout cannot tell an
+            // offline host from a dead local link, and the old "timed out after
+            // 60000ms" wording read as a verdict on the host.
+        ).rejects.toThrowError(/gave up after 250ms.*may be offline.*network\/route to it may be down/);
         expect(Date.now() - started).toBeLessThan(10_000);
     });
 

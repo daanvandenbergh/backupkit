@@ -16,7 +16,7 @@ import { SshError, TransferError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { CONTROL_RETRY_POLICY, transferRetryPolicy, withTransientRetry } from "../shared/retry.js";
 import { sanitize } from "../shared/sanitize.js";
-import { sshStderrTail } from "../ssh/classify.js";
+import { describeTransientSshStderr, sshStderrTail } from "../ssh/classify.js";
 import { buildArgs, type TransferSpec } from "./internal/args.js";
 import { classifyExit, type ExitClass } from "./internal/classify.js";
 import { parseStats2, type RsyncStats } from "./internal/stats.js";
@@ -159,9 +159,12 @@ export function probeRemoteRsync(params: {
             const result = await params.runRemote([bin, "--version"]);
             const tail = sshStderrTail(result.stderr);
             if (result.exitCode === 255 || result.exitCode === null || result.timedOut) {
-                throw new SshError(`rsync version probe failed on ${params.identity}: ${tail || "ssh transport error"}`, {
-                    retriable: classifyExit(255, tail).retriable,
-                });
+                const why = describeTransientSshStderr(tail) ?? "the ssh transport failed before rsync could answer";
+                throw new SshError(
+                    `could not ask ${params.identity} for its rsync version: ${why}` +
+                        (tail === "" ? "" : ` [ssh said: ${tail}]`),
+                    { retriable: classifyExit(255, tail).retriable },
+                );
             }
             if (result.exitCode === 127) {
                 refuse(`${bin} not found on ${params.identity} - ${fix}`);

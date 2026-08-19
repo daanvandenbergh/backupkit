@@ -56,6 +56,9 @@ export function computeRetryDelayMs(attempt: number, policy: RetryPolicy, random
     return Math.round(base * (0.8 + 0.4 * random));
 }
 
+/** How much of a failure message the per-attempt warn carries before it is trimmed. */
+const CAUSE_MAX_CHARS = 200;
+
 /** Whether the shutdown signal (if any) has fired. A function so each call re-reads it after an await. */
 function isAborted(signal: AbortSignal | undefined): boolean {
     return signal !== undefined && signal.aborted;
@@ -87,11 +90,28 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /**
+ * The failing error's message, trimmed to one readable log field.
+ *
+ * Without this the warn said only "hit a temporary problem", so a night of
+ * dropped Wi-Fi and a night of a dead backup server produced byte-identical
+ * logs - the reader could see THAT it retried and never WHY. The classifiers
+ * put the plain-language cause at the FRONT of every message they build, so
+ * the head of the string is the part worth keeping; the tail is the raw
+ * stderr, up to 2 KiB of it, which belongs in the final error and not in
+ * sixteen warn lines.
+ */
+function retryCause(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error);
+    return message.length > CAUSE_MAX_CHARS ? `${message.slice(0, CAUSE_MAX_CHARS)}...` : message;
+}
+
+/**
  * Run `op` with capped-exponential retries on transient failures. Delay
  * before attempt k = min(baseDelayMs * 2^(k-2), capMs), ±20% jitter. Retries
  * only errors whose `retriable` flag is true (set by the classifiers);
  * everything else rethrows immediately. Each retried attempt logs one warn
- * naming the label, attempt number, and delay. Pure timers - no fs, no
+ * naming the label, attempt number, delay, and the trimmed failure cause -
+ * without that last field a retry storm says nothing about what is failing. Pure timers - no fs, no
  * child_process.
  *
  * `signal` is the graceful-shutdown signal: once aborted, no further attempt
@@ -117,7 +137,12 @@ export async function withTransientRetry<T>(
             }
             const next = attempt + 1;
             const delayMs = computeRetryDelayMs(next, policy, Math.random());
-            log.warn(`${label} hit a temporary problem - trying again`, { attempt: next, of: policy.attempts, delayMs });
+            log.warn(`${label} hit a temporary problem - trying again`, {
+                attempt: next,
+                of: policy.attempts,
+                delayMs,
+                cause: retryCause(error),
+            });
             await sleep(delayMs, signal);
             // Aborted while waiting: the backoff woke early precisely so this
             // check happens now rather than after the full delay. Rethrow the

@@ -7,7 +7,11 @@
  * (spec section 4).
  */
 
-import { matchPermanentSshPattern, type PermanentSshPattern } from "../../ssh/classify.js";
+import {
+    describeTransientSshStderr,
+    matchPermanentSshPattern,
+    type PermanentSshPattern,
+} from "../../ssh/classify.js";
 
 /**
  * The message this classifier reports per permanent ssh failure class. The
@@ -93,14 +97,20 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
         return row("warning", false, true, "rsync completed with skipped files (exit 23)");
     }
     if (TRANSIENT_EXIT_CODES.has(exitCode)) {
-        return row("transient", true, false, `transient rsync failure (exit ${exitCode})`);
+        return row(
+            "transient",
+            true,
+            false,
+            `the link to the remote died mid-transfer (rsync exit ${exitCode}) - a network drop, not your data`,
+        );
     }
     if (exitCode === 255) {
         const pattern = matchPermanentSshPattern(stderrTail);
         if (pattern !== null) {
             return row("fatal", false, false, PERMANENT_SSH_MESSAGE[pattern]);
         }
-        return row("transient", true, false, "ssh transport error (exit 255)");
+        const cause = describeTransientSshStderr(stderrTail);
+        return row("transient", true, false, `ssh transport error (exit 255)${cause === null ? "" : ` - ${cause}`}`);
     }
     if (exitCode === 11) {
         return row("disk", false, false, "rsync file I/O error (exit 11) - disk full or destination unwritable");
