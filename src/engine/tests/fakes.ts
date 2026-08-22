@@ -322,6 +322,14 @@ export async function makeKit(params: {
             return result;
         },
         estimate: async () => makeStats(),
+        // The reachability probe is the ONE seam that touches a real socket.
+        // Left live it makes these tests depend on the machine's DNS: the
+        // fixture's alias resolves to the literal `myserver`, which an ISP
+        // wildcard answers and an honest resolver does not - so the daemon
+        // tests skipped their target on whichever runs happened to fail the
+        // lookup. Reachable by default; the probe's own behaviour is tested
+        // against real sockets in `src/ssh/tests/reach.test.ts`.
+        reach: async () => ({ ok: true, failure: null, detail: "" }),
         ...params.deps,
     });
     return { kit, root, source, destination, stateDir, execCalls, target, clock };

@@ -445,3 +445,33 @@ partial fix, it is a false sense of security plus a test that reads as green.
     `src/engine/tests/backupkit.test.ts` ("prune: the past-dated insertion guard", 6 rows incl.
     --force and --dry-run) - expect: at least one reject row and three accept rows in each, so
     neither guard can be satisfied by tripping on everything.*
+42. The reachability probe (`src/ssh/reach.ts`) opens the ONLY TCP socket in this codebase that is
+    not an ssh/rsync child, and it may dial exactly one destination: the host and port of the
+    remote it was handed - `remote.host`/`remote.port` for an explicit remote, or the `ssh -G`
+    resolution of the alias. It must never contact a third-party "are you online?" endpoint (a
+    public resolver, a captive-portal probe URL, a vendor health check). That reads as harmless
+    plumbing and is not: it turns every scheduler tick on every install into a beacon announcing
+    that this machine runs backupkit, to a party the user never configured, on a machine whose
+    whole reason for running this package is that its data is worth protecting. It also lies -
+    a reachable public resolver says nothing about whether the archive host is up, which is the
+    only question the probe exists to answer.
+    The second half is the direction it may fail in. The probe is allowed to conclude "provably
+    cut off" and nothing else; every inconclusive outcome MUST return `ok: true`. A host that
+    answers and refuses the port is UP (`ECONNREFUSED`/`ECONNRESET` pass), an alias whose
+    `ssh -G` will not resolve is unknown, a throw inside the probe is unknown. Getting this
+    backwards fails silently in the worst possible direction: a probe that returns `ok: false`
+    on an inconclusive answer SKIPS the target with no report and no backoff, which is exactly
+    the shape of "backups quietly stopped and `status` kept showing last week's success".
+    Widening the skip is never the fix for a noisy log - the level rules are.
+    ✗ `if (outcome !== null) return { ok: false, ... }`  // refused/unknown treated as an outage
+    ✓ `if (outcome === null || HOST_IS_UP_CODES.has(outcome)) return REACHABLE`
+    ```hunt
+    rg -n "createConnection|net\.connect|reachRemote|ok: false" src/
+    expect: >= 4
+    witness: src/ssh/reach.ts
+    ```
+    *graduated: `src/ssh/tests/reach.test.ts` ("passes when the host answers but REFUSES the
+    port", "passes an alias it cannot resolve rather than guessing an outage") and
+    `src/engine/tests/scheduler.test.ts` ("a reachable probe never suppresses a real failure") -
+    expect: at least two passing-on-inconclusive rows alongside the dns/unreachable rejects, so
+    the probe cannot be satisfied by passing everything either.*

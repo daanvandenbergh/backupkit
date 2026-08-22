@@ -7,11 +7,12 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { LockHeldError } from "../../shared/errors.js";
+import { LockHeldError, SshError } from "../../shared/errors.js";
 import { parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { ScheduleSpec } from "../../shared/time.js";
 import { deriveBackoff } from "../internal/reports.js";
 import { BACKOFF_CAP_MS, backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "../internal/scheduler.js";
+import type { ReachResult } from "../../ssh/reach.js";
 import type { TargetRunReport } from "../types.js";
 import { captureLogger, makeTarget } from "./fakes.js";
 
@@ -90,21 +91,32 @@ describe("BackoffTracker transitions", () => {
     it("logs only the transitions INTO backoff; clearing it is silent", () => {
         const { log, lines } = captureLogger("debug");
         const tracker = new BackoffTracker(log);
+        const backoffLines = (): string[] => lines.filter((line) => line.includes("failure backoff"));
         const errorLines = (): string[] => lines.filter((line) => line.includes("ERROR"));
 
+        // A failure with a retry already scheduled is a WARNING: the run that
+        // caused it logged one line above, and nobody has to do anything. Only
+        // the ceiling - six consecutive failures, retries plainly not working -
+        // is an ERROR. A night of flaky Wi-Fi must not read like a broken key.
         tracker.record("web", "failed", finished);
-        expect(errorLines()).toHaveLength(1);
-        expect(errorLines()[0]).toContain("entering failure backoff");
-        expect(errorLines()[0]).toContain("failures=1");
+        expect(backoffLines()).toHaveLength(1);
+        expect(backoffLines()[0]).toContain("WARN");
+        expect(backoffLines()[0]).toContain("entering failure backoff");
+        expect(backoffLines()[0]).toContain("failures=1");
+        expect(errorLines()).toHaveLength(0);
 
         tracker.record("web", "failed", finished);
-        expect(errorLines()).toHaveLength(2);
-        expect(errorLines()[1]).toContain("extending failure backoff");
+        expect(backoffLines()).toHaveLength(2);
+        expect(backoffLines()[1]).toContain("WARN");
+        expect(backoffLines()[1]).toContain("extending failure backoff");
+        expect(errorLines()).toHaveLength(0);
 
         for (let i = 0; i < 4; i += 1) {
             tracker.record("web", "failed", finished);
         }
-        expect(errorLines().at(-1)).toContain("at ceiling for failure backoff");
+        expect(backoffLines().at(-1)).toContain("at ceiling for failure backoff");
+        expect(backoffLines().at(-1)).toContain("ERROR");
+        expect(errorLines()).toHaveLength(1);
 
         // Clearing the backoff logs NOTHING, at any level. It lands after the
         // `backup finished` line has already reported the success, so a line
@@ -159,8 +171,15 @@ describe("Scheduler loop (fake timers)", () => {
         newest?: Record<string, string | null>;
         outcome?: (target: string) => TargetRunReport;
         lastFulfilledAt?: (target: ReturnType<typeof makeTarget>) => Promise<Date | null>;
-    }): { scheduler: Scheduler; runs: string[]; tracker: BackoffTracker; recorded: TargetRunReport[] } {
-        const { log } = captureLogger("error");
+        reachable?: (target: ReturnType<typeof makeTarget>) => Promise<ReachResult>;
+    }): {
+        scheduler: Scheduler;
+        runs: string[];
+        tracker: BackoffTracker;
+        recorded: TargetRunReport[];
+        lines: string[];
+    } {
+        const { log, lines } = captureLogger("debug");
         const tracker = new BackoffTracker(log);
         const runs: string[] = [];
         const recorded: TargetRunReport[] = [];
@@ -170,6 +189,7 @@ describe("Scheduler loop (fake timers)", () => {
             now: () => new Date(),
             tickMs: 30_000,
             backoff: tracker,
+            reachable: params.reachable,
             // `newest` stays snapshot-NAMED in these fixtures (that is what a
             // snapshot target's store answers with); the engine's own parse to a
             // Date is mirrored here.
@@ -192,7 +212,7 @@ describe("Scheduler loop (fake timers)", () => {
                 tracker.record(target.name, status, new Date(persisted.finishedAt));
             },
         });
-        return { scheduler, runs, tracker, recorded };
+        return { scheduler, runs, tracker, recorded, lines };
     }
 
     it("first tick runs due targets sequentially in config order; a fulfilled window does not rerun", async () => {
@@ -360,6 +380,103 @@ describe("Scheduler loop (fake timers)", () => {
         // And the refreshed cache keeps the target quiet for the rest of the window.
         expect(runs).toEqual(["web"]);
         expect(listCalls).toBe(2);
+        scheduler.stop();
+        await loop;
+    });
+
+    // Regression: an offline laptop dialled every due target, burned three ssh
+    // retries and a 60 s timeout each, and recorded a FAILED RUN worded exactly
+    // like a revoked key - a night of dropped Wi-Fi produced a wall of ERROR
+    // lines and drove the backoff to its 6 h ceiling, so the backup that could
+    // finally run when the link returned was still hours from being attempted.
+    it("an unreachable backup server skips the target: one warn, no report, no backoff", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        let reachable = false;
+        let probes = 0;
+        const { scheduler, runs, tracker, recorded, lines } = makeLoop({
+            targets: [target],
+            reachable: async () => {
+                probes += 1;
+                return reachable
+                    ? { ok: true, failure: null, detail: "" }
+                    : { ok: false, failure: "no-link", detail: "this machine has no network interface up" };
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(runs).toEqual([]);
+        // Not a failed run: nothing was learned about the target.
+        expect(recorded).toEqual([]);
+        expect(tracker.failuresFor("web")).toBe(0);
+        expect(tracker.untilFor("web")).toBeNull();
+        const warned = lines.filter((line) => line.includes("not reachable"));
+        expect(warned).toHaveLength(1);
+        expect(warned[0]).toContain("WARN");
+        expect(warned[0]).toContain("cause=no-link");
+        // The outage is logged on its EDGES: ten more ticks stay silent.
+        for (let i = 0; i < 10; i += 1) {
+            await vi.advanceTimersByTimeAsync(30_000);
+        }
+        expect(probes).toBeGreaterThan(1);
+        expect(lines.filter((line) => line.includes("not reachable"))).toHaveLength(1);
+        expect(lines.filter((line) => line.includes("ERROR"))).toEqual([]);
+
+        // And with no backoff to serve, the FIRST tick after the network
+        // returns runs the window that was missed.
+        reachable = true;
+        await vi.advanceTimersByTimeAsync(30_000);
+        expect(runs).toEqual(["web"]);
+        expect(lines.filter((line) => line.includes("reachable again"))).toHaveLength(1);
+        scheduler.stop();
+        await loop;
+    });
+
+    // The probe may only DELAY a backup. An answering-but-refusing host, or any
+    // inconclusive probe, must pass so the real condition still reaches ssh and
+    // its classifier - a wrong "unreachable" silently stops backups, which is
+    // worse than every log line it would save.
+    it("a reachable probe never suppresses a real failure", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { scheduler, recorded, lines } = makeLoop({
+            targets: [target],
+            reachable: async () => ({ ok: true, failure: null, detail: "" }),
+            lastFulfilledAt: async () => {
+                throw new Error("ssh: Permission denied (publickey).");
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].status).toBe("failed");
+        // A permanent cause keeps its ERROR level - this is the line that must
+        // still stand out once the network noise is gone.
+        const failure = lines.filter((line) => line.includes("due check"));
+        expect(failure).toHaveLength(1);
+        expect(failure[0]).toContain("ERROR");
+        scheduler.stop();
+        await loop;
+    });
+
+    // The sibling of the rule above: a due check that failed for a TRANSIENT
+    // reason is a warning, not an error. It still records a failed run (the
+    // backoff has to space the retries out), but the level says who has to act.
+    it("a transient due-check failure logs at warn; the run is still recorded as failed", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { scheduler, recorded, tracker, lines } = makeLoop({
+            targets: [target],
+            lastFulfilledAt: async () => {
+                throw new SshError("ssh web timed out after 60000ms", { retriable: true });
+            },
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].status).toBe("failed");
+        expect(tracker.failuresFor("web")).toBe(1);
+        expect(lines.filter((line) => line.includes("ERROR"))).toEqual([]);
+        const warned = lines.filter((line) => line.includes("could not reach the backup server"));
+        expect(warned).toHaveLength(1);
+        expect(warned[0]).toContain("WARN");
         scheduler.stop();
         await loop;
     });

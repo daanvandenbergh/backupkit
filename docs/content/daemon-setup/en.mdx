@@ -181,7 +181,26 @@ Keys need no attention across a reboot: the service only ever holds unencrypted 
 
 A target that keeps failing does not spin. Its backoff grows as `15 min * 2^(n-1)` from the consecutive-failure count, capped at 6 hours.
 
-Backoff only ever delays a target's next run - it never stops scheduling it. The transitions *into* backoff - entering it, extending it, hitting the ceiling - are logged at error level, right after the failure that caused them, because they carry the one fact that line does not: when the next attempt happens. Clearing the backoff logs nothing: it happens after `backup finished` has already reported the success, so a line there would only make a healthy target's last log entry look like a problem. Service-level restarts stay paced at 15 seconds independently of this.
+Backoff only ever delays a target's next run - it never stops scheduling it. The transitions *into* backoff - entering it, extending it, hitting the ceiling - are logged right after the failure that caused them, because they carry the one fact that line does not: when the next attempt happens. Entering and extending are **warnings**: a failure with a retry already scheduled needs nobody's attention. Hitting the **ceiling** is an **error** - six consecutive failures means the retries are not working and this is no longer something that fixes itself. Clearing the backoff logs nothing: it happens after `backup finished` has already reported the success, so a line there would only make a healthy target's last log entry look like a problem. Service-level restarts stay paced at 15 seconds independently of this.
+
+## Reachability: the network is checked first
+
+Before a due target is dialled, the scheduler checks that its backup server is actually reachable - the local interfaces are up, its hostname resolves, and a TCP connection to its SSH port is answered. Only your configured backup server is probed; backupkit never contacts a third-party "are you online?" service.
+
+If it is unreachable, the target is **skipped, not failed**: one warning naming the cause, no run report, and the failure backoff is left untouched. A run that never happened because the Wi-Fi was down is not evidence about the target - and recording it as a failure is what used to turn one bad night into a wall of errors climbing to the 6-hour ceiling, so that the backup which could finally run when the link came back was still hours from being attempted. Because nothing is backed off, the very first tick after the network returns runs the missed window.
+
+The state is logged on its **edges**: one line when the outage starts, one when it ends. Ticks in between stay silent.
+
+The probe can only ever delay a backup, never stop one, and it never decides that a failure is permanent. A host that answers - even to refuse the port - passes it, as does any probe that cannot reach a verdict, so every real condition still reaches SSH and gets reported properly.
+
+## Severity says who has to act
+
+A failure that reaches the log picks its level from its **cause**, so that a night of flaky internet does not read like a broken configuration:
+
+- **Warning** - a transient failure: no route, DNS did not answer, the connection timed out or dropped. The next attempt may well fix it and there is nothing to do.
+- **Error** - a permanent failure: authentication refused, a host key that is not pinned, a host key that changed. It will still be there tomorrow, and it needs you.
+
+So `ERROR` in a backupkit log means something is genuinely wrong, and `grep ERROR` is a useful thing to run.
 
 A failing target's `nextDueAt` in `backupkit status` already includes any active backoff, so you can see exactly when it will retry.
 

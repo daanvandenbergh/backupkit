@@ -162,3 +162,18 @@ export function isBackupkitError(error: unknown): error is BackupkitError {
         typeof (error as { code?: unknown }).code === "string"
     );
 }
+
+/**
+ * Whether a failure is TRANSIENT - the classifier-set `retriable` flag on an
+ * `SshError`/`TransferError`, read structurally so it also holds for an error
+ * that crossed a package boundary.
+ *
+ * It answers one question two places need: "was this the network, or is
+ * something actually wrong?". `withTransientRetry` reads it to decide whether
+ * to try again; the daemon's failure log sites read it to decide the LEVEL. A
+ * night of dropped Wi-Fi used to emit the same ERROR lines as a revoked key,
+ * so a log full of red said nothing about whether a human had to do anything.
+ */
+export function isTransientFailure(error: unknown): boolean {
+    return typeof error === "object" && error !== null && (error as { retriable?: unknown }).retriable === true;
+}

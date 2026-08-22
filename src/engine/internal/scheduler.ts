@@ -9,8 +9,9 @@
  */
 
 import type { ResolvedTarget } from "../../config/types.js";
+import type { ReachResult } from "../../ssh/reach.js";
 import type { Logger } from "../../shared/logger.js";
-import { isBackupkitError } from "../../shared/errors.js";
+import { isBackupkitError, isTransientFailure } from "../../shared/errors.js";
 import { formatUtc } from "../../shared/format.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
@@ -104,8 +105,14 @@ export class BackoffTracker {
             this.state.set(target, { failures, anchor: finishedAt });
             const delayMs = backoffDelayMs(failures);
             const nextAttemptAt = formatUtc(new Date(finishedAt.getTime() + delayMs));
-            const phase = failures === 1 ? "entering" : delayMs >= BACKOFF_CAP_MS ? "at ceiling for" : "extending";
-            this.log.error(`${phase} failure backoff`, { target, failures, nextAttemptAt });
+            const atCeiling = delayMs >= BACKOFF_CAP_MS;
+            const phase = failures === 1 ? "entering" : atCeiling ? "at ceiling for" : "extending";
+            // A failure with a retry already scheduled is a WARNING, not an
+            // error: nobody has to do anything, and the run that caused it has
+            // said its piece one line above. Only the CEILING is an error -
+            // six consecutive failures means the retries are not working and
+            // this is no longer something that fixes itself.
+            this.log[atCeiling ? "error" : "warn"](`${phase} failure backoff`, { target, failures, nextAttemptAt });
             return;
         }
         if (status === "success" || status === "warning") {
@@ -158,6 +165,14 @@ export interface SchedulerDeps {
     recordOutcome: (target: ResolvedTarget, status: RunStatus, reason: string, error: string) => Promise<void>;
     /** The shared backoff tracker (rehydrated by the engine before the loop starts). */
     backoff: BackoffTracker;
+    /**
+     * Whether the machine can reach this target's backup server right now -
+     * link, DNS, then one TCP connect to the ssh port (`ssh/reach.ts`).
+     * Omitted, every target is assumed reachable and dialled as before.
+     * A `false` answer SKIPS the target with no report and no backoff, so it
+     * must only ever be false when dialling provably cannot work.
+     */
+    reachable?: (target: ResolvedTarget) => Promise<ReachResult>;
 }
 
 /**
@@ -179,6 +194,9 @@ export class Scheduler {
 
     /** Wakes the sleeping loop early on stop(). */
     private wake: (() => void) | null = null;
+
+    /** Per-target unreachable detail currently logged, so an outage is reported on its EDGES and not every 30 s. */
+    private readonly unreachable = new Map<string, string>();
 
     /** Construct the loop over its dependencies. */
     constructor(deps: SchedulerDeps) {
@@ -230,6 +248,9 @@ export class Scheduler {
             if (until !== null && now.getTime() < until.getTime()) {
                 continue;
             }
+            if (!(await this.reachableNow(target))) {
+                continue;
+            }
             let newest = this.newestCache.get(target.name);
             if (newest === undefined) {
                 try {
@@ -243,10 +264,17 @@ export class Scheduler {
                     // engaged, and `status` reported the last success forever
                     // while nothing ran for weeks.
                     const message = String(error);
-                    this.deps.log.error("could not list snapshots for the due check - target run recorded as failed", {
-                        target: target.name,
-                        error: message,
-                    });
+                    // Level follows the CAUSE. A dropped link is a warning -
+                    // the next tick retries it and no human action exists; a
+                    // permanent failure (refused key, changed host key) is an
+                    // error, because it will still be there tomorrow.
+                    const transient = isTransientFailure(error);
+                    this.deps.log[transient ? "warn" : "error"](
+                        transient
+                            ? "could not reach the backup server for the due check - recorded as failed, will retry"
+                            : "could not list snapshots for the due check - target run recorded as failed",
+                        { target: target.name, error: message },
+                    );
                     // A failing state dir must never end the daemon loop.
                     await this.deps.recordOutcome(target, "failed", "due-check-failed", message).catch((writeError) => {
                         this.deps.log.error("could not persist the due-check failure report", {
@@ -313,5 +341,45 @@ export class Scheduler {
                 });
             }
         }
+    }
+
+    /**
+     * Whether this target's backup server is reachable, logging the state on
+     * its EDGES only - one line when an outage starts, one when it ends.
+     *
+     * An unreachable server is NOT recorded as a failed run. A run that never
+     * happened because the network was down is not evidence about the target,
+     * and recording it as one is what turned a night of dropped Wi-Fi into a
+     * wall of ERROR lines climbing to the 6 h backoff ceiling - so that when
+     * the link came back, the backup that could finally run was still an hour
+     * from being attempted. Skipping leaves the backoff untouched, so the very
+     * next tick after the network returns runs the missed window.
+     *
+     * The probe can only DELAY a backup, never stop one, and it never decides
+     * a failure is permanent: an answering-but-refusing host passes it, so
+     * every real condition still reaches ssh and its classifier.
+     */
+    private async reachableNow(target: ResolvedTarget): Promise<boolean> {
+        if (this.deps.reachable === undefined) {
+            return true;
+        }
+        const result = await this.deps.reachable(target);
+        if (!result.ok) {
+            if (this.unreachable.get(target.name) !== result.detail) {
+                this.unreachable.set(target.name, result.detail);
+                this.deps.log.warn("backup server not reachable - skipping this target until it is", {
+                    target: target.name,
+                    cause: result.failure ?? "unknown",
+                    detail: result.detail,
+                });
+            }
+            return false;
+        }
+        if (this.unreachable.delete(target.name)) {
+            this.deps.log.info("backup server is reachable again - resuming scheduled backups", {
+                target: target.name,
+            });
+        }
+        return true;
     }
 }

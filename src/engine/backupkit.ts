@@ -15,7 +15,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { loadConfig } from "../config/config.js";
 import type { ResolvedConfig, ResolvedTarget } from "../config/types.js";
 import { exec, minimalEnv, type ExecOptions, type ExecResult } from "../exec/exec.js";
-import { ConfigError, isBackupkitError, RestoreError } from "../shared/errors.js";
+import { ConfigError, isBackupkitError, isTransientFailure, RestoreError } from "../shared/errors.js";
 import { formatEndpoint, formatUtc } from "../shared/format.js";
 import { Logger } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
@@ -24,6 +24,7 @@ import type { Endpoint, ResolvedRemote } from "../shared/types.js";
 import { findEncryptedKeys, loadKeys } from "../ssh/agent.js";
 import { quoteShellArg } from "../ssh/internal/quote.js";
 import { checkFilePermissions, defaultPermissionDeps, type PermissionDeps } from "../ssh/permissions.js";
+import { reachRemote, remoteEndpoint, type ReachResult, type RemoteEndpoint } from "../ssh/reach.js";
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
 import { dryRunStats, parseStats2, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
 import { planRetention, type RetentionPlan } from "../retention/retention.js";
@@ -84,6 +85,8 @@ export interface BackupkitDeps {
     permissionDeps?: PermissionDeps;
     /** Scheduler tick interval override in ms. Default 30000. */
     tickMs?: number;
+    /** Reachability probe (link, DNS, one TCP connect). Default ssh/'s `reachRemote`. */
+    reach?: typeof reachRemote;
     /** Logger override (tests). Default: a Logger built from `config.logging`. */
     logger?: Logger;
 }
@@ -252,6 +255,8 @@ export class Backupkit {
         hasTty: boolean | undefined;
         /** Scheduler tick interval override. */
         tickMs: number | undefined;
+        /** Reachability probe. */
+        reach: typeof reachRemote;
     };
 
     /** The root logger (config level, optional file sink). */
@@ -280,6 +285,9 @@ export class Backupkit {
 
     /** Memoized remote rsync probes per connection identity + probed binary (failures clear the memo so a fixed host re-probes next run). */
     private readonly remoteProbes = new Map<string, Promise<string>>();
+
+    /** Memoized `host:port` per remote name - fixed configuration, so the per-tick reachability probe never re-runs `ssh -G`. */
+    private readonly remoteEndpoints = new Map<string, Promise<RemoteEndpoint | null>>();
 
     /** Per-remote key-priming failures from preflight: remote name -> actionable message. Targets on these remotes fail individually. */
     private keyFailures = new Map<string, string>();
@@ -328,6 +336,7 @@ export class Backupkit {
             permissionDeps: deps.permissionDeps ?? defaultPermissionDeps(),
             hasTty: deps.hasTty,
             tickMs: deps.tickMs,
+            reach: deps.reach ?? reachRemote,
         };
         this.log =
             deps.logger ??
@@ -740,12 +749,44 @@ export class Backupkit {
             return null;
         } catch (error) {
             const message = sanitize(error instanceof Error ? error.message : String(error));
-            this.log.error("the pre-run check against this target's backup server failed, so this target cannot run", {
-                target: target.name,
-                remote: remote.name,
-                error: message,
-            });
+            // Level follows the CAUSE, same rule as the scheduler's due check:
+            // an unreachable host is a warning the next attempt may well fix,
+            // a refused key or a changed host key is an error that needs a
+            // human. Logging both at error level is what made a night of flaky
+            // Wi-Fi read exactly like a broken configuration.
+            const transient = isTransientFailure(error);
+            this.log[transient ? "warn" : "error"](
+                transient
+                    ? "could not reach this target's backup server - skipping this run, will retry"
+                    : "the pre-run check against this target's backup server failed, so this target cannot run",
+                { target: target.name, remote: remote.name, error: message },
+            );
             return this.syntheticReport(target, "failed", "remote-unavailable", message);
+        }
+    }
+
+    /**
+     * Whether this target's backup server is reachable right now. Local
+     * targets (no remote) always are. Every failure to answer is reported as
+     * REACHABLE: the probe exists to recognise a dead network, and an
+     * inconclusive probe is not one - a wrong "unreachable" would silently
+     * stop backups, which is far worse than the noisy log it prevents.
+     */
+    private async reachTarget(target: ResolvedTarget): Promise<ReachResult> {
+        const remote = remoteOf(target);
+        if (remote === null) {
+            return { ok: true, failure: null, detail: "" };
+        }
+        try {
+            let endpoint = this.remoteEndpoints.get(remote.name);
+            if (endpoint === undefined) {
+                endpoint = remoteEndpoint(remote, { sshBin: this.sshBin() });
+                this.remoteEndpoints.set(remote.name, endpoint);
+                endpoint.catch(() => this.remoteEndpoints.delete(remote.name));
+            }
+            return await this.deps.reach(remote, { sshBin: this.sshBin(), endpoint: await endpoint });
+        } catch {
+            return { ok: true, failure: null, detail: "" };
         }
     }
 
@@ -977,6 +1018,7 @@ export class Backupkit {
             backoff: this.backoff,
             lastFulfilledAt: (target) => this.lastFulfilledAt(target),
             runTarget: (target) => this.runOne(target, { signal }),
+            reachable: (target) => this.reachTarget(target),
             recordOutcome: async (target, status, reason, error) => {
                 const report = this.syntheticReport(target, status, reason, sanitize(error));
                 await this.ensureBackoffState(target);

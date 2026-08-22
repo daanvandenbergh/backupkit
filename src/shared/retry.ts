@@ -6,6 +6,7 @@
  * child_process.
  */
 
+import { isTransientFailure } from "./errors.js";
 import type { Logger } from "./logger.js";
 
 /** Retry policy: total attempts and the capped-exponential delay parameters. */
@@ -130,9 +131,7 @@ export async function withTransientRetry<T>(
         try {
             return await op();
         } catch (error) {
-            const retriable =
-                typeof error === "object" && error !== null && (error as { retriable?: unknown }).retriable === true;
-            if (!retriable || attempt >= policy.attempts || isAborted(signal)) {
+            if (!isTransientFailure(error) || attempt >= policy.attempts || isAborted(signal)) {
                 throw error;
             }
             const next = attempt + 1;
