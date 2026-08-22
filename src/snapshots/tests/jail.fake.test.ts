@@ -509,6 +509,24 @@ describe("backupkit-remote jail script", () => {
             ["--remove-source-files deletes through the sender", "--remove-source-files"],
             // Writes THROUGH a --link-dest hardlink, mutating promoted snapshots.
             ["--inplace writes through a --link-dest hardlink", "--inplace"],
+            // The five valueless flags rsync 3.4.4 already ships that the
+            // permissive `--*` arm used to wave through. A valueless option is
+            // invisible to every filter in validate_rsync except its own name,
+            // so each one has to be named or it passes - which is exactly the
+            // residual the deny list exists to absorb.
+            //
+            // --trust-sender is --protect-args by another route: it turns off
+            // the receiver's checks on the file list, and in push mode the
+            // sender is the untrusted party.
+            ["--trust-sender disarms the receiver's file-list checks", "--trust-sender"],
+            // Switches off the argument handling the rsync >= 3.2.5 floor exists
+            // to guarantee (CVE-2022-29154 class), from inside the jail.
+            ["--old-args restores pre-3.2.4 argument re-splitting", "--old-args"],
+            // The --inplace hazard aimed at a device node rather than a hardlink.
+            ["--write-devices writes through an existing device node", "--write-devices"],
+            ["--copy-devices reads a device node as file data", "--copy-devices"],
+            // chown/mknod inside the archive, on a receiver that can do it.
+            ["--super asks the receiver for super-user actions", "--super"],
             // A value that can name a file is refused whatever the option is
             // called - this is what replaced a pure allowlist, which would have
             // broken every push the first time an rsync upgrade forwarded a new

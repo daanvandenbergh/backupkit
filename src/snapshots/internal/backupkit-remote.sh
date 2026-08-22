@@ -393,11 +393,34 @@ validate_rsync() {
             # The parity test feeds those captured argv strings to this script;
             # they are documentation of the happy path, not the security boundary.
             #
-            # The residual this accepts, stated plainly: a future rsync could add
-            # a VALUELESS destructive option and it would pass. That is why the
-            # deny list below still has to be maintained, and why the three
-            # already known (--remove-source-files, --inplace, --append) are named
-            # there rather than left to shape inference.
+            # The residual this accepts, stated plainly: a VALUELESS destructive
+            # option that nobody has named below will pass. That is why the deny
+            # list below has to be MAINTAINED against each rsync release rather
+            # than left to shape inference - a valueless flag is invisible to
+            # every filter here except its own name.
+            #
+            # An audit of rsync 3.4.4's full option set against this list found
+            # five such flags already shipping, every one of them in a group this
+            # comment already claims to refuse:
+            #   --trust-sender  turns OFF the receiver's safety checks on the
+            #                   sender's file list. In push mode the sender IS
+            #                   the untrusted party, so this is `--protect-args`
+            #                   by another route: the argv stops being what
+            #                   governs the transfer.
+            #   --old-args      restores the pre-3.2.4 whitespace re-splitting of
+            #                   arguments - i.e. it switches off the very
+            #                   protection the project's rsync >= 3.2.5 floor
+            #                   exists to guarantee (CVE-2022-29154 class).
+            #   --write-devices writes THROUGH an existing device node instead of
+            #                   replacing it - the `--inplace` hazard aimed at a
+            #                   device rather than a hardlink.
+            #   --copy-devices  reads a device node's contents as file data.
+            #   --super         asks the receiver to attempt super-user actions
+            #                   (chown, mknod), widening what a transfer may
+            #                   create inside the archive.
+            # None appears in the measured forwarded set, so refusing them costs
+            # the honest client nothing. `--fake-super` is NOT in that group: the
+            # client really does send it.
             --numeric-ids | --delete | --delete-excluded | --force | --partial | --sparse | --stats)
                 ;;
             # Path-naming, command-executing, symlink-following, and
@@ -408,7 +431,8 @@ validate_rsync() {
             --rsync-path | --rsync-path=* | --rsh | --rsh=* | -e | --daemon \
                 | --copy-links | --copy-unsafe-links | --copy-dirlinks | --keep-dirlinks \
                 | --munge-links | --no-munge-links \
-                | --protect-args | --secluded-args \
+                | --protect-args | --secluded-args | --trust-sender | --old-args \
+                | --super | --write-devices | --copy-devices \
                 | --files-from | --files-from=* | --read-batch | --read-batch=* \
                 | --write-batch | --write-batch=* | --only-write-batch | --only-write-batch=* \
                 | --temp-dir | --temp-dir=* | -T | --partial-dir | --partial-dir=* \

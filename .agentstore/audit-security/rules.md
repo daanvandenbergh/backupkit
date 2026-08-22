@@ -288,9 +288,26 @@ partial fix, it is a false sense of security plus a test that reads as green.
     the allowlist because it was MEASURED on the wire, not because it looked benign. The root itself is a legal
     operand for the LIFECYCLE verbs and never for rsync in either direction - which is also why a
     push mirror, whose destination IS the root, cannot be jailed and the validator refuses one. The allowlist is derived from MEASURED argv, not intent - see 24.
+    THE STANDING OBLIGATION: the `--*` arm accepts any option that is VALUELESS or whose value
+    carries no path characters, so a valueless destructive flag is invisible to every filter in
+    `validate_rsync` except its own NAME. The deny list is therefore not a finished artifact - it
+    must be re-diffed against each rsync release, and "we have not seen it" is not a reason to
+    accept a flag. Diffing rsync 3.4.4's full option set against it found five already shipping,
+    each in a group the file already claimed to refuse: `--trust-sender` (turns OFF the receiver's
+    checks on the sender's file list - `--protect-args` by another route, and in push mode the
+    sender IS the untrusted party), `--old-args` (restores pre-3.2.4 whitespace re-splitting of
+    arguments, i.e. switches off the very protection the project's rsync >= 3.2.5 floor exists to
+    guarantee), `--write-devices` (writes THROUGH an existing device node - the `--inplace` hazard
+    aimed at a device), `--copy-devices` (reads a device node as file data), and `--super` (asks the
+    receiver to attempt chown/mknod). None was in the measured forwarded set, so refusing them cost
+    the honest client nothing - which is the test to apply to the next one too. `--fake-super` is
+    NOT in that group: the client really sends it.
+    The re-diff is the maintenance step: `rsync --help | grep -oE '\-\-[a-z0-9-]+'` against the deny
+    arm, then judge each unnamed flag by whether it names a path, executes, follows a symlink, makes
+    the argv non-authoritative, or widens what the receiver may create.
     *graduated: `src/snapshots/tests/jail.fake.test.ts` ("the rsync path operand is pinned to the
     run's own .partial (destination policy)", "unmeasured rsync options are refused by default (the
-    option allowlist)") - expect: >= 7 destination rejects and >= 8 option rejects.*
+    option allowlist)") - expect: >= 7 destination rejects and >= 17 option rejects.*
 30. Narrowing a VERB is not the same as enforcing a PROPERTY. Invariant 23 narrowed `rm -rf` to
     `<snap>.partial`/`<snap>.deleting`/`.backupkit.lock` - and the property "a compromised push
     client cannot delete a completed snapshot or a target's history" still did not hold, because
