@@ -438,10 +438,10 @@ export async function loadKeys(remotes: readonly ResolvedRemote[], deps: AgentDe
             for (const remote of group) {
                 failures.set(remote.name, message);
             }
-            deps.log.error("key priming failed - targets on this key's remotes will fail until it is fixed", {
-                key: group[0].identityFile,
-                error: message,
-            });
+            deps.log.error(
+                "this SSH key could not be loaded into the agent - every target using it will fail until that is fixed",
+                { key: group[0].identityFile, error: message },
+            );
         }
     }
     return { sock, failures };

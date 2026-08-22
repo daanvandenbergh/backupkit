@@ -12,7 +12,7 @@ import type { ResolvedTarget } from "../../config/types.js";
 import type { ReachResult } from "../../ssh/reach.js";
 import type { Logger } from "../../shared/logger.js";
 import { describeError, isBackupkitError, isTransientFailure } from "../../shared/errors.js";
-import { formatUtc } from "../../shared/format.js";
+import { formatDuration, formatUtc } from "../../shared/format.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
 import type { RunStatus, TargetRunReport } from "../types.js";
@@ -106,13 +106,19 @@ export class BackoffTracker {
             const delayMs = backoffDelayMs(failures);
             const nextAttemptAt = formatUtc(new Date(finishedAt.getTime() + delayMs));
             const atCeiling = delayMs >= BACKOFF_CAP_MS;
-            const phase = failures === 1 ? "entering" : atCeiling ? "at ceiling for" : "extending";
             // A failure with a retry already scheduled is a WARNING, not an
             // error: nobody has to do anything, and the run that caused it has
             // said its piece one line above. Only the CEILING is an error -
             // six consecutive failures means the retries are not working and
             // this is no longer something that fixes itself.
-            this.log[atCeiling ? "error" : "warn"](`${phase} failure backoff`, { target, failures, nextAttemptAt });
+            //
+            // "entering/extending failure backoff" was accurate and meant
+            // nothing to a reader: the two facts they need are how long
+            // backupkit will now wait and how many times this has happened.
+            const message = atCeiling
+                ? `this target has failed ${failures} times in a row - backing off the maximum ${formatDuration(delayMs)} between attempts`
+                : `waiting ${formatDuration(delayMs)} before trying this target again`;
+            this.log[atCeiling ? "error" : "warn"](message, { target, failures, nextAttemptAt });
             return;
         }
         if (status === "success" || status === "warning") {
@@ -277,10 +283,10 @@ export class Scheduler {
                     );
                     // A failing state dir must never end the daemon loop.
                     await this.deps.recordOutcome(target, "failed", "due-check-failed", message).catch((writeError) => {
-                        this.deps.log.error("could not persist the due-check failure report", {
-                            target: target.name,
-                            error: describeError(writeError),
-                        });
+                        this.deps.log.error(
+                            "the failure above could not be written to the state directory, so backupkit status will not show it",
+                            { target: target.name, error: describeError(writeError) },
+                        );
                     });
                     continue;
                 }
@@ -313,7 +319,7 @@ export class Scheduler {
                 }
             } catch (error) {
                 if (isBackupkitError(error) && error.code === "lock-held") {
-                    this.deps.log.warn("destination lock held - skipping until next tick", {
+                    this.deps.log.warn("another backupkit run is already working on this target - skipping it for now", {
                         target: target.name,
                         error: error.message,
                     });
@@ -328,16 +334,16 @@ export class Scheduler {
                 // by ProtectSystem=strict), when the report write inside the
                 // pipeline fails, or on any unexpected throw.
                 const message = describeError(error);
-                this.deps.log.error("target run threw unexpectedly - recorded as failed", {
+                this.deps.log.error("this target hit an unexpected error inside backupkit - recorded as a failed run", {
                     target: target.name,
                     error: message,
                 });
                 // A failing state dir must never end the daemon loop.
                 await this.deps.recordOutcome(target, "failed", "run-threw", message).catch((writeError) => {
-                    this.deps.log.error("could not persist the unexpected-throw failure report", {
-                        target: target.name,
-                        error: describeError(writeError),
-                    });
+                    this.deps.log.error(
+                        "the failure above could not be written to the state directory, so backupkit status will not show it",
+                        { target: target.name, error: describeError(writeError) },
+                    );
                 });
             }
         }

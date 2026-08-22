@@ -30,13 +30,21 @@ describe("describeError", () => {
         ["EXDEV", "EXDEV: cross-device link, rename '/a' -> '/b'", "DIFFERENT filesystems"],
         ["EROFS", "EROFS: read-only file system, mkdir '/archive'", "read-only"],
         ["EMLINK", "EMLINK: too many links, link '/a' -> '/b'", "hard-link limit"],
-        ["ENOENT", "spawn /usr/bin/rsync ENOENT", "does not exist"],
     ])("explains %s in the reader's terms", (_code, message, expected) => {
         const described = describeError(syscallError(_code, message));
         // The OS text is KEPT - it names the path and the syscall, which the
         // explanation deliberately does not.
         expect(described).toContain(message);
         expect(described).toContain(expected);
+    });
+
+    // A failed spawn is the one ENOENT that is NOT about a backup file: the
+    // generic wording sent the reader looking for a missing directory when the
+    // answer is that rsync or ssh is not installed at that path.
+    it("says a missing PROGRAM when a spawn fails, not a missing file", () => {
+        const described = describeError(syscallError("ENOENT", "spawn /opt/homebrew/bin/rsync ENOENT"));
+        expect(described).toContain("that program is not installed, or is not at that path");
+        expect(described).not.toContain("the file or directory does not exist");
     });
 
     it("leaves an unrecognised code as the OS wrote it rather than guessing", () => {

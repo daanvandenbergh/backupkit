@@ -248,7 +248,10 @@ describe("runTransfer: retry wiring", () => {
         );
         expect(calls).toHaveLength(1);
         expect(attemptLog[0].class).toBe("disk");
-        expect(String((outcome.err as Error).message)).toMatch(/disk/);
+        // The message now names the actual cause read out of rsync's stderr;
+        // the "disk" CLASS is what the retry loop reads, and it is asserted
+        // above where it belongs.
+        expect(String((outcome.err as Error).message)).toMatch(/filesystem is FULL|disk/);
     });
 
     it("a signal death is never retried (shutdown path)", async () => {

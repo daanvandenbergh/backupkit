@@ -200,7 +200,7 @@ const ERRNO_MEANING: Record<string, string> = {
     ENOENT: "the file or directory does not exist (or a program backupkit needs is not installed)",
     EACCES: "permission denied - the user running backupkit may not read or write that path",
     EPERM: "the operation is not permitted for this user, even though the path exists",
-    ENOSPC: "the filesystem is FULL - free space or the backup cannot continue",
+    ENOSPC: "the filesystem is FULL - nothing more can be written until space is freed",
     EDQUOT: "the disk quota for this user is exhausted",
     EROFS: "the filesystem is mounted read-only",
     EXDEV: "source and destination are on DIFFERENT filesystems, so this cannot be a rename or a hard link - snapshots need one filesystem per archive root",
@@ -258,6 +258,12 @@ export function describeError(error: unknown): string {
     const code = typeof error === "object" && error !== null ? (error as { code?: unknown }).code : undefined;
     if (typeof code !== "string") {
         return message;
+    }
+    // A failed spawn reads `spawn /opt/homebrew/bin/rsync ENOENT`, where the
+    // generic ENOENT wording ("the file or directory does not exist") sends the
+    // reader looking for a missing backup file rather than a missing program.
+    if (code === "ENOENT" && message.startsWith("spawn ")) {
+        return `${message} - that program is not installed, or is not at that path`;
     }
     const meaning = errnoMeaning(code);
     // Never explain twice: a message that already carries the meaning (the

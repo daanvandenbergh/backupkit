@@ -181,7 +181,14 @@ Keys need no attention across a reboot: the service only ever holds unencrypted 
 
 A target that keeps failing does not spin. Its backoff grows as `15 min * 2^(n-1)` from the consecutive-failure count, capped at 6 hours.
 
-Backoff only ever delays a target's next run - it never stops scheduling it. The transitions *into* backoff - entering it, extending it, hitting the ceiling - are logged right after the failure that caused them, because they carry the one fact that line does not: when the next attempt happens. Entering and extending are **warnings**: a failure with a retry already scheduled needs nobody's attention. Hitting the **ceiling** is an **error** - six consecutive failures means the retries are not working and this is no longer something that fixes itself. Clearing the backoff logs nothing: it happens after `backup finished` has already reported the success, so a line there would only make a healthy target's last log entry look like a problem. Service-level restarts stay paced at 15 seconds independently of this.
+Backoff only ever delays a target's next run - it never stops scheduling it. Each step is logged right after the failure that caused it, because it carries the one fact that line does not: when the next attempt happens.
+
+```
+WARN  waiting 30m before trying this target again target=web failures=2 nextAttemptAt=2026-08-22T03:45:00Z
+ERROR this target has failed 6 times in a row - backing off the maximum 6h between attempts target=web failures=6 ...
+```
+
+The first five are **warnings**: a failure with a retry already scheduled needs nobody's attention. Reaching the **ceiling** is an **error** - six consecutive failures means the retries are not working and this is no longer something that fixes itself. Clearing the backoff logs nothing: it happens after `backup finished` has already reported the success, so a line there would only make a healthy target's last log entry look like a problem. Service-level restarts stay paced at 15 seconds independently of this.
 
 ## Reachability: the network is checked first
 
@@ -200,7 +207,12 @@ A failure that reaches the log picks its level from its **cause**, so that a nig
 - **Warning** - a transient failure: no route, DNS did not answer, the connection timed out or dropped. The next attempt may well fix it and there is nothing to do.
 - **Error** - a permanent failure: authentication refused, a host key that is not pinned, a host key that changed. It will still be there tomorrow, and it needs you.
 
-So `ERROR` in a backupkit log means something is genuinely wrong, and `grep ERROR` is a useful thing to run.
+So `ERROR` in a backupkit log means something is genuinely wrong, and `grep ERROR` is a useful thing to run. The line that reports a run failing follows the same rule and says what happens next:
+
+```
+WARN  backup did not finish - a temporary problem; the next scheduled attempt will try again ranFor="4m 12s" error="..."
+ERROR backup FAILED and will not fix itself - every attempt hits the same problem until it is resolved ranFor=3s error="..."
+```
 
 ## Errors say what actually happened
 
@@ -209,6 +221,7 @@ An exit code names a *class* of failure; the line that says *which* failure is i
 | What the tool said | What backupkit logs |
 | --- | --- |
 | `rsync error: ... (code 12) at io.c(228)` after `backupkit-remote: rejected` | the backup server's jail refused the command - reinstall it with `backupkit jail` (and it is **not** retried, because a refusal cannot succeed on a second try) |
+| `rsync: [receiver] write failed on "...": No space left on device (28)` | the destination filesystem is FULL |
 | `rsync: change_dir "/srv/data" failed: No such file or directory (2)` | the source directory could not be entered - it does not exist, or this user may not read it |
 | `rsync: --link-dest arg does not exist` | the previous snapshot this run was going to hard-link against is gone; the next run makes a full copy |
 | `EXDEV: cross-device link, rename ...` | source and destination are on different filesystems - an archive root must be one filesystem |
@@ -216,7 +229,7 @@ An exit code names a *class* of failure; the line that says *which* failure is i
 | `mv: ... Invalid cross-device link` on the server | the same, on the backup server |
 | `ssh: Could not resolve hostname ...` | the hostname could not be resolved - DNS on this machine or its network, not the host |
 
-The raw text is always kept alongside the reading, quoted as `[rsync said: ...]`, `[ssh said: ...]` or `[the server said: ...]` - the explanation is a reading, and the original is the evidence. An error backupkit does not recognise is passed through exactly as the tool wrote it rather than padded with a guess.
+The specific cause **replaces** the exit code's generic reading rather than following it, so a message never says the same thing twice; the exit code stays as a parenthetical, because it is the fact that decided whether the run is retried. The raw text is always kept alongside, quoted as `[rsync said: ...]`, `[ssh said: ...]` or `[the server said: ...]` - the explanation is a reading, and the original is the evidence. An error backupkit does not recognise keeps the generic reading and is passed through exactly as the tool wrote it, rather than padded with a guess.
 
 A failing target's `nextDueAt` in `backupkit status` already includes any active backoff, so you can see exactly when it will retry.
 

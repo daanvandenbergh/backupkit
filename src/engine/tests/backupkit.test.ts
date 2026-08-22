@@ -811,7 +811,11 @@ describe("Backupkit", () => {
         const loop = fixture.kit.start();
         // Poll until the first run's snapshot appears.
         const snapshot = join(fixture.destination, "2026-08-10T120000Z");
-        for (let i = 0; i < 200 && !existsSync(snapshot); i += 1) {
+        // Generous budget, not a slow test: the loop exits the moment the
+        // snapshot appears (a few ticks), and only a machine under heavy
+        // parallel-test load ever gets near the ceiling. A 2 s budget made this
+        // fail intermittently in a full run and never on its own.
+        for (let i = 0; i < 1000 && !existsSync(snapshot); i += 1) {
             await new Promise((resolve) => setTimeout(resolve, 10));
         }
         expect(existsSync(snapshot)).toBe(true);
@@ -850,11 +854,16 @@ describe("Backupkit", () => {
     it("stop() aborts an in-flight one-shot run(): the report lands as aborted", async () => {
         // Regression: run() had no abort path, so a signalled `backupkit run`
         // silently kept the transfer going and orphaned the rsync child.
+        let started: () => void = () => {};
+        const inFlight = new Promise<void>((resolve) => {
+            started = resolve;
+        });
         const fixture = track(
             await makeKit({
                 deps: {
                     transfer: async (params) =>
                         new Promise((_resolve, reject) => {
+                            started();
                             params.signal?.addEventListener("abort", () =>
                                 reject(new TransferError("transfer aborted", { exitCode: null, retriable: false, stderrTail: "" })),
                             );
@@ -863,8 +872,12 @@ describe("Backupkit", () => {
             }),
         );
         const running = fixture.kit.run({ force: true });
-        // Wait until the transfer is in flight.
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        // Wait for the transfer to ACTUALLY be in flight, not for a duration
+        // that is usually long enough. A fixed 100 ms sleep made this test
+        // flaky under a loaded parallel run: the pipeline had not reached the
+        // transfer yet, so stop() landed before there was anything to abort and
+        // the run finished normally.
+        await inFlight;
         await fixture.kit.stop();
         const report = await running;
         expect(report.targets).toHaveLength(1);

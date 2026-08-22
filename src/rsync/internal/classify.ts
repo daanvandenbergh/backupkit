@@ -156,27 +156,46 @@ function rsyncErrorLine(stderrTail: string): string | null {
 /** How much of rsync's own stderr line is carried into the message before it is trimmed. */
 const SAID_MAX_CHARS = 300;
 
+/** The matched meaning (or null) and the quoted `[rsync said: ...]` clause (or "") for one tail. */
+function rsyncStderrParts(stderrTail: string): { meaning: string | null; quoted: string } {
+    const meaning = STDERR_MEANING.find(({ needle }) => needle.test(stderrTail))?.meaning ?? null;
+    const said = rsyncErrorLine(stderrTail);
+    const trimmed = said === null || said.length <= SAID_MAX_CHARS ? said : `${said.slice(0, SAID_MAX_CHARS)}...`;
+    return { meaning, quoted: trimmed === null ? "" : ` [rsync said: ${trimmed}]` };
+}
+
 /**
  * The plain-language reading of an rsync stderr tail plus the one line rsync
  * actually wrote, or null when the tail says nothing recognisable. `tail` must
- * already be sanitized. Callers APPEND this to the exit-code row; it never
- * replaces it, because the exit code is what decided retry vs fail and the
- * reader needs both.
+ * already be sanitized.
  */
 export function describeRsyncStderr(stderrTail: string): string | null {
-    const matched = STDERR_MEANING.find(({ needle }) => needle.test(stderrTail));
-    const said = rsyncErrorLine(stderrTail);
-    if (matched === undefined && said === null) {
+    const { meaning, quoted } = rsyncStderrParts(stderrTail);
+    if (meaning === null && quoted === "") {
         return null;
     }
-    const quoted = said === null ? "" : ` [rsync said: ${said.length > SAID_MAX_CHARS ? `${said.slice(0, SAID_MAX_CHARS)}...` : said}]`;
-    return `${matched?.meaning ?? "rsync reported a failure"}${quoted}`;
+    return `${meaning ?? "rsync reported a failure"}${quoted}`;
 }
 
-/** Append rsync's own reading of stderr to an exit-code row's message, when it has one. */
-function withStderr(message: string, stderrTail: string): string {
-    const explanation = describeRsyncStderr(stderrTail);
-    return explanation === null ? message : `${message} - ${explanation}`;
+/**
+ * One rsync failure worded for a person: the SPECIFIC cause when stderr named
+ * one, the exit-code row's generic reading when it did not, the exit code
+ * itself, and rsync's own line as evidence.
+ *
+ * The specific reading REPLACES the generic one rather than following it.
+ * Appending produced sentences that said the same thing twice and contradicted
+ * themselves in between - "rsync file I/O error (exit 11) - disk full or
+ * destination unwritable - the destination filesystem is FULL", and worse,
+ * "the link to the remote died mid-transfer - a network drop, not your data -
+ * the far side went away before finishing ... or a jail that refused". The
+ * exit code stays, because it is the fact that decided retry vs fail.
+ */
+function transferMessage(generic: string, exitCode: number | null, stderrTail: string): string {
+    const { meaning, quoted } = rsyncStderrParts(stderrTail);
+    if (meaning === null) {
+        return `${generic}${quoted}`;
+    }
+    return `${meaning} (rsync exit ${exitCode ?? "signal"})${quoted}`;
 }
 
 /** Outcome class of one rsync exit, mirroring the spec's exit-code table rows. */
@@ -223,18 +242,24 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
         return row("warning", false, true, "rsync completed with vanished source files (exit 24)");
     }
     if (exitCode === 23) {
-        return row("warning", false, true, withStderr("rsync completed with skipped files (exit 23)", stderrTail));
+        return row("warning", false, true, transferMessage("rsync completed with skipped files (exit 23)", exitCode, stderrTail));
     }
     if (JAIL_REJECTED.test(stderrTail)) {
-        return row("fatal", false, false, withStderr(`the backup server refused the command (rsync exit ${exitCode})`, stderrTail));
+        return row(
+            "fatal",
+            false,
+            false,
+            transferMessage(`the backup server refused the command (rsync exit ${exitCode})`, exitCode, stderrTail),
+        );
     }
     if (TRANSIENT_EXIT_CODES.has(exitCode)) {
         return row(
             "transient",
             true,
             false,
-            withStderr(
+            transferMessage(
                 `the link to the remote died mid-transfer (rsync exit ${exitCode}) - a network drop, not your data`,
+                exitCode,
                 stderrTail,
             ),
         );
@@ -252,7 +277,7 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
             "disk",
             false,
             false,
-            withStderr("rsync file I/O error (exit 11) - disk full or destination unwritable", stderrTail),
+            transferMessage("rsync file I/O error (exit 11) - disk full or destination unwritable", exitCode, stderrTail),
         );
     }
     if (HARD_FAIL_EXIT_CODES.has(exitCode)) {
@@ -260,11 +285,12 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
             "hard",
             false,
             false,
-            withStderr(
+            transferMessage(
                 `rsync hard failure (exit ${exitCode}) - likely a backupkit bug or an unsupported rsync; not retried`,
+                exitCode,
                 stderrTail,
             ),
         );
     }
-    return row("fatal", false, false, withStderr(`rsync failed (exit ${exitCode}) - not retried`, stderrTail));
+    return row("fatal", false, false, transferMessage(`rsync failed (exit ${exitCode}) - not retried`, exitCode, stderrTail));
 }

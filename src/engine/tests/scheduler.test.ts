@@ -91,7 +91,9 @@ describe("BackoffTracker transitions", () => {
     it("logs only the transitions INTO backoff; clearing it is silent", () => {
         const { log, lines } = captureLogger("debug");
         const tracker = new BackoffTracker(log);
-        const backoffLines = (): string[] => lines.filter((line) => line.includes("failure backoff"));
+        // Matched on the FIELD, not the sentence: the wording of these lines is
+        // meant to be improved, the facts they carry are not.
+        const backoffLines = (): string[] => lines.filter((line) => line.includes("nextAttemptAt="));
         const errorLines = (): string[] => lines.filter((line) => line.includes("ERROR"));
 
         // A failure with a retry already scheduled is a WARNING: the run that
@@ -101,20 +103,21 @@ describe("BackoffTracker transitions", () => {
         tracker.record("web", "failed", finished);
         expect(backoffLines()).toHaveLength(1);
         expect(backoffLines()[0]).toContain("WARN");
-        expect(backoffLines()[0]).toContain("entering failure backoff");
+        expect(backoffLines()[0]).toContain("waiting 15m before trying this target again");
         expect(backoffLines()[0]).toContain("failures=1");
         expect(errorLines()).toHaveLength(0);
 
         tracker.record("web", "failed", finished);
         expect(backoffLines()).toHaveLength(2);
         expect(backoffLines()[1]).toContain("WARN");
-        expect(backoffLines()[1]).toContain("extending failure backoff");
+        expect(backoffLines()[1]).toContain("waiting 30m before trying this target again");
         expect(errorLines()).toHaveLength(0);
 
         for (let i = 0; i < 4; i += 1) {
             tracker.record("web", "failed", finished);
         }
-        expect(backoffLines().at(-1)).toContain("at ceiling for failure backoff");
+        expect(backoffLines().at(-1)).toContain("failed 6 times in a row");
+        expect(backoffLines().at(-1)).toContain("maximum 6h");
         expect(backoffLines().at(-1)).toContain("ERROR");
         expect(errorLines()).toHaveLength(1);
 
@@ -336,7 +339,7 @@ describe("Scheduler loop (fake timers)", () => {
         });
         const loop = scheduler.start();
         await vi.advanceTimersByTimeAsync(0);
-        expect(lines.some((line) => line.includes("lock held"))).toBe(true);
+        expect(lines.some((line) => line.includes("already working on this target"))).toBe(true);
         scheduler.stop();
         await loop;
     });

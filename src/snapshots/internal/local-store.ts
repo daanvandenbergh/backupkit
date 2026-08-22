@@ -346,13 +346,19 @@ export class LocalSnapshotStore implements SnapshotStore {
         // gets this from the jail script's `check_no_symlink_prefix`, invariant
         // 15; the local/pull store had no equivalent.)
         if ((await lstat(keepPath)).isSymbolicLink()) {
-            this.log.warn("discarding a resumable partial that is a symlink, not a directory", { partial: keep });
+            this.log.warn(
+                "throwing away an unfinished snapshot that is a symlink instead of a directory - it was not left by backupkit; starting this backup fresh",
+                { unfinished: keep },
+            );
             // No `recursive`: unlink the link itself, never walk into its target.
             await rm(keepPath, { force: true });
             return { resumed: false };
         }
         if (await hasMultiplyLinkedEntry(keepPath)) {
-            this.log.warn("discarding a resumable partial that hardlinks into a promoted snapshot", { partial: keep });
+            this.log.warn(
+                "throwing away an unfinished snapshot that shares files with a completed one - resuming it could corrupt that backup; starting this one fresh",
+                { unfinished: keep },
+            );
             await rm(keepPath, { recursive: true, force: true });
             return { resumed: false };
         }

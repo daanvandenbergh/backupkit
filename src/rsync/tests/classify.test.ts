@@ -146,10 +146,29 @@ describe("describeRsyncStderr", () => {
 
     // The failure that reaches the log is the exit row PLUS the reading: the
     // exit code is what decided retry vs fail, and the reader needs both.
-    it("reaches the classification message so the log line carries the cause", () => {
+    // The SPECIFIC reading replaces the exit-code row's generic guess rather
+    // than following it. Appending produced sentences that said the same thing
+    // twice and contradicted themselves in between - "rsync file I/O error
+    // (exit 11) - disk full or destination unwritable - the destination
+    // filesystem is FULL". The exit code stays, because it decided retry vs
+    // fail, but it is now a parenthetical fact rather than the headline.
+    it("lets the specific cause replace the generic exit-code guess", () => {
         const cls = classifyExit(2, "rsync: --link-dest arg does not exist: /archive/x");
-        expect(cls.message).toContain("rsync hard failure (exit 2)");
         expect(cls.message).toContain("hard-link against is gone");
+        expect(cls.message).toContain("(rsync exit 2)");
+        expect(cls.message).not.toContain("likely a backupkit bug");
+
+        const disk = classifyExit(11, 'rsync: write failed on "/archive/x": No space left on device (28)');
+        expect(disk.message).toContain("the destination filesystem is FULL (rsync exit 11)");
+        expect(disk.message).not.toContain("disk full or destination unwritable");
+    });
+
+    // The generic row is the FALLBACK, kept in full whenever stderr named
+    // nothing this recognises - an unreadable tail must never leave the reader
+    // with less than the exit code already told them.
+    it("keeps the generic reading when stderr names no cause", () => {
+        const cls = classifyExit(12, "");
+        expect(cls.message).toBe("the link to the remote died mid-transfer (rsync exit 12) - a network drop, not your data");
     });
 
     // Regression, found by the line above disagreeing with itself: the jail
@@ -164,8 +183,8 @@ describe("describeRsyncStderr", () => {
             const cls = classifyExit(exitCode, "backupkit-remote: rejected");
             expect(cls.retriable).toBe(false);
             expect(cls.promote).toBe(false);
-            expect(cls.message).toContain("the backup server refused the command");
             expect(cls.message).toContain("jail REFUSED this command");
+            expect(cls.message).toContain(`(rsync exit ${exitCode})`);
             expect(cls.message).not.toContain("network drop");
         }
     });

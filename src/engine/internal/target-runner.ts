@@ -20,7 +20,7 @@ import { join, posix } from "node:path";
 
 import type { ResolvedTarget } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
-import { describeError, isBackupkitError } from "../../shared/errors.js";
+import { describeError, isBackupkitError, isTransientFailure } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
 import { formatDuration, formatEndpoint } from "../../shared/format.js";
@@ -415,9 +415,37 @@ export async function runMirror(
             deps.log.warn("backup stopped before it finished (shutdown requested)");
             return report("aborted", "aborted", message);
         }
-        deps.log.error("backup failed", { error: message });
+        logRunFailure(deps, error, message, start);
         return report("failed", null, message);
     }
+}
+
+/**
+ * The line a person reads when a backup did not finish - the most-read error
+ * in the whole log, and until now the least informative: `backup failed` and
+ * an error field.
+ *
+ * It carries two things that line did not. HOW LONG it ran, because five
+ * seconds means it never got started and two hours means it nearly made it.
+ * And WHAT HAPPENS NEXT, which is the question the reader actually has - the
+ * level answers it on the same rule the scheduler uses: a transient failure
+ * retries itself and is a warning, a permanent one needs a human and is an
+ * error. The cause itself is already spelled out in `error` by the
+ * classifiers, so this never restates it.
+ */
+function logRunFailure(
+    deps: { log: Logger; now: () => Date },
+    error: unknown,
+    message: string,
+    startedAt: Date,
+): void {
+    const transient = isTransientFailure(error);
+    deps.log[transient ? "warn" : "error"](
+        transient
+            ? "backup did not finish - a temporary problem; the next scheduled attempt will try again"
+            : "backup FAILED and will not fix itself - every attempt hits the same problem until it is resolved",
+        { ranFor: formatDuration(deps.now().getTime() - startedAt.getTime()), error: message },
+    );
 }
 
 /**
@@ -497,15 +525,18 @@ export async function runTarget(
             // snapshots on any machine whose clock jumps backwards.
             if (newest !== null && snapName <= newest) {
                 const { future } = splitFutureSnapshots(complete, start);
-                deps.log.error("clock skew: new snapshot name would not sort after the newest complete snapshot", {
-                    newName: snapName,
-                    newest,
-                    hint:
-                        future.length === 0
-                            ? "check this host's clock"
-                            : "check this host's clock; if it is correct these future-dated names are not ours - `backupkit prune` removes them",
-                    futureDated: future.slice(0, 10).map(sanitize).join(", "),
-                });
+                deps.log.error(
+                    "this host's clock is behind the archive, so this backup would be filed BEFORE snapshots that already exist - refusing to run",
+                    {
+                        newName: snapName,
+                        newest,
+                        hint:
+                            future.length === 0
+                                ? "check this host's clock"
+                                : "check this host's clock; if it is correct these future-dated names are not ours - `backupkit prune` removes them",
+                        futureDated: future.slice(0, 10).map(sanitize).join(", "),
+                    },
+                );
                 return report("failed", "clock-skew", `new snapshot ${snapName} would sort <= newest complete ${newest}`);
             }
 
@@ -772,7 +803,7 @@ export async function runTarget(
             deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
             return report("aborted", "aborted", message);
         }
-        deps.log.error("backup failed", { error: message });
+        logRunFailure(deps, error, message, start);
         return report("failed", null, message);
     }
 }

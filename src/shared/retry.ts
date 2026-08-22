@@ -7,6 +7,7 @@
  */
 
 import { describeError, isTransientFailure } from "./errors.js";
+import { formatDuration } from "./format.js";
 import type { Logger } from "./logger.js";
 
 /** Retry policy: total attempts and the capped-exponential delay parameters. */
@@ -136,7 +137,10 @@ export async function withTransientRetry<T>(
             }
             const next = attempt + 1;
             const delayMs = computeRetryDelayMs(next, policy, Math.random());
-            log.warn(`${label} hit a temporary problem - trying again`, {
+            // The message says the wait the way a person reads it ("in 2s");
+            // `delayMs` stays as a field because the exact jittered number is
+            // what makes the backoff ladder checkable.
+            log.warn(`${label} hit a temporary problem - trying again in ${formatDuration(delayMs)}`, {
                 attempt: next,
                 of: policy.attempts,
                 delayMs,
