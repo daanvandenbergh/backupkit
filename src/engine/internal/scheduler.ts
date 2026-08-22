@@ -11,7 +11,7 @@
 import type { ResolvedTarget } from "../../config/types.js";
 import type { ReachResult } from "../../ssh/reach.js";
 import type { Logger } from "../../shared/logger.js";
-import { isBackupkitError, isTransientFailure } from "../../shared/errors.js";
+import { describeError, isBackupkitError, isTransientFailure } from "../../shared/errors.js";
 import { formatUtc } from "../../shared/format.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
@@ -263,7 +263,7 @@ export class Scheduler {
                     // report, so consecutiveFailures stayed 0, backoff never
                     // engaged, and `status` reported the last success forever
                     // while nothing ran for weeks.
-                    const message = String(error);
+                    const message = describeError(error);
                     // Level follows the CAUSE. A dropped link is a warning -
                     // the next tick retries it and no human action exists; a
                     // permanent failure (refused key, changed host key) is an
@@ -279,7 +279,7 @@ export class Scheduler {
                     await this.deps.recordOutcome(target, "failed", "due-check-failed", message).catch((writeError) => {
                         this.deps.log.error("could not persist the due-check failure report", {
                             target: target.name,
-                            error: String(writeError),
+                            error: describeError(writeError),
                         });
                     });
                     continue;
@@ -327,7 +327,7 @@ export class Scheduler {
                 // (uninstalled, downgraded below the 3.2.5 floor, sandboxed away
                 // by ProtectSystem=strict), when the report write inside the
                 // pipeline fails, or on any unexpected throw.
-                const message = String(error);
+                const message = describeError(error);
                 this.deps.log.error("target run threw unexpectedly - recorded as failed", {
                     target: target.name,
                     error: message,
@@ -336,7 +336,7 @@ export class Scheduler {
                 await this.deps.recordOutcome(target, "failed", "run-threw", message).catch((writeError) => {
                     this.deps.log.error("could not persist the unexpected-throw failure report", {
                         target: target.name,
-                        error: String(writeError),
+                        error: describeError(writeError),
                     });
                 });
             }

@@ -20,7 +20,7 @@ import { join, posix } from "node:path";
 
 import type { ResolvedTarget } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
-import { isBackupkitError } from "../../shared/errors.js";
+import { describeError, isBackupkitError } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
 import { formatDuration, formatEndpoint } from "../../shared/format.js";
@@ -410,7 +410,7 @@ export async function runMirror(
         );
         return report(result.status, null, null);
     } catch (error) {
-        const message = sanitize(error instanceof Error ? error.message : String(error));
+        const message = describeError(error);
         if (options.signal?.aborted === true) {
             deps.log.warn("backup stopped before it finished (shutdown requested)");
             return report("aborted", "aborted", message);
@@ -745,7 +745,7 @@ export async function runTarget(
                         deps.log.info("pruned snapshot", { snapshot: name });
                     }
                 } catch (error) {
-                    retentionError = `retention failed: ${sanitize(error instanceof Error ? error.message : String(error))}`;
+                    retentionError = `retention failed: ${describeError(error)}`;
                     deps.log.error(retentionError);
                 }
             }
@@ -767,7 +767,7 @@ export async function runTarget(
         if (isBackupkitError(error) && error.code === "lock-held") {
             throw error;
         }
-        const message = sanitize(error instanceof Error ? error.message : String(error));
+        const message = describeError(error);
         if (options.signal?.aborted === true) {
             deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
             return report("aborted", "aborted", message);

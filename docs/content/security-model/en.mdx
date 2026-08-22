@@ -58,7 +58,7 @@ Both kinds also get `LogLevel=ERROR`. An **explicit** remote gets more on top: `
 
 ## The push jail
 
-> **Upgrading an archive server?** `backupkit-remote` is a copy that lives on the archive host, so it does not update when the npm package does. With backupkit installed there, `sudo backupkit jail install` reinstalls the shipped script atomically, and `backupkit jail status` exits 1 when the installed copy has fallen behind. Run the pair after every upgrade. An out-of-date script rejects every incremental push snapshot with a bare `backupkit-remote: rejected`. Note that `backupkit check` on the client verifies the *connection*, not the script version - that check belongs on the server.
+> **Upgrading an archive server?** `backupkit-remote` is a copy that lives on the archive host, so it does not update when the npm package does. With backupkit installed there, `sudo backupkit jail install` reinstalls the shipped script atomically, and `backupkit jail status` exits 1 when the installed copy has fallen behind. Run the pair after every upgrade. An out-of-date script rejects every incremental push snapshot with a bare `backupkit-remote: rejected` - which backupkit names in the log as a jail refusal pointing back here, and does not retry. Note that `backupkit check` on the client verifies the *connection*, not the script version - that check belongs on the server.
 
 By default a push key is not a normal shell key. It sits in `authorized_keys` behind a **forced command**: an ssh setting that runs one fixed program regardless of what the client asks to run. Backupkit's program is `backupkit-remote`, and `backupkit check` generates the line for you from your config and your real key:
 

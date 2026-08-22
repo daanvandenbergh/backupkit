@@ -202,6 +202,22 @@ A failure that reaches the log picks its level from its **cause**, so that a nig
 
 So `ERROR` in a backupkit log means something is genuinely wrong, and `grep ERROR` is a useful thing to run.
 
+## Errors say what actually happened
+
+An exit code names a *class* of failure; the line that says *which* failure is in the program's own output. Backupkit reads that output and puts the reading in the log next to it, so a message names the cause rather than the symptom:
+
+| What the tool said | What backupkit logs |
+| --- | --- |
+| `rsync error: ... (code 12) at io.c(228)` after `backupkit-remote: rejected` | the backup server's jail refused the command - reinstall it with `backupkit jail` (and it is **not** retried, because a refusal cannot succeed on a second try) |
+| `rsync: change_dir "/srv/data" failed: No such file or directory (2)` | the source directory could not be entered - it does not exist, or this user may not read it |
+| `rsync: --link-dest arg does not exist` | the previous snapshot this run was going to hard-link against is gone; the next run makes a full copy |
+| `EXDEV: cross-device link, rename ...` | source and destination are on different filesystems - an archive root must be one filesystem |
+| `ENOSPC: no space left on device` | the filesystem is full |
+| `mv: ... Invalid cross-device link` on the server | the same, on the backup server |
+| `ssh: Could not resolve hostname ...` | the hostname could not be resolved - DNS on this machine or its network, not the host |
+
+The raw text is always kept alongside the reading, quoted as `[rsync said: ...]`, `[ssh said: ...]` or `[the server said: ...]` - the explanation is a reading, and the original is the evidence. An error backupkit does not recognise is passed through exactly as the tool wrote it rather than padded with a guess.
+
 A failing target's `nextDueAt` in `backupkit status` already includes any active backoff, so you can see exactly when it will retry.
 
 ## Log rotation

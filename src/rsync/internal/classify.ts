@@ -50,6 +50,135 @@ const TRANSIENT_EXIT_CODES = new Set([10, 12, 13, 14, 21, 30, 35]);
 /** rsync exit codes that are a backupkit bug or rsync-version escape: usage, protocol, unsupported action. */
 const HARD_FAIL_EXIT_CODES = new Set([1, 2, 4, 5, 6]);
 
+
+/**
+ * What rsync's OWN stderr says, in the reader's terms.
+ *
+ * The exit code alone names a CLASS of failure - "rsync hard failure (exit
+ * 12)" - while the one line that says WHICH failure sits in stderr and never
+ * reached the log. The worst case was the jail: a `backupkit-remote` that
+ * refuses a command prints `rejected` and dies, rsync reports a protocol
+ * error, and the operator was told to look for "a backupkit bug or an
+ * unsupported rsync" while the backup server was in fact turning the command
+ * away. Every row below is a line rsync actually writes.
+ *
+ * Deliberately excluded: anything auth- or host-key-shaped. Exit 255 is ssh's
+ * failure, `ssh/classify.ts` owns its wording, and rsync writes its own
+ * unrelated `Permission denied (13)` for every unreadable source file - the
+ * two were confused here once already.
+ */
+const STDERR_MEANING: readonly { needle: RegExp; meaning: string }[] = [
+    {
+        needle: /backupkit-remote: rejected/,
+        meaning:
+            "the backup server's backupkit-remote jail REFUSED this command - the jail script there and this client " +
+            'disagree about the command shape; re-run "backupkit jail" on the server to reinstall it',
+    },
+    { needle: /No space left on device/, meaning: "the destination filesystem is FULL" },
+    { needle: /Read-only file system/, meaning: "the destination filesystem is mounted read-only" },
+    { needle: /Disk quota exceeded/, meaning: "the destination account is over its disk quota" },
+    {
+        needle: /Too many links/,
+        meaning: "the destination filesystem's hard-link limit is exhausted - too many snapshots share one file",
+    },
+    {
+        needle: /change_dir "([^"]*)" failed/,
+        meaning: "the SOURCE directory could not be entered - it does not exist, or this user may not read it",
+    },
+    {
+        needle: /link_stat "([^"]*)" failed/,
+        meaning: "a source path could not be read - it vanished mid-run, or this user may not read it",
+    },
+    {
+        needle: /--link-dest arg does not exist/,
+        meaning:
+            "the previous snapshot this run was going to hard-link against is gone - the next run makes a full copy instead",
+    },
+    {
+        needle: /@ERROR: auth failed/,
+        meaning: "the rsync DAEMON on the far side refused the login (this is rsync's own auth, not ssh's)",
+    },
+    { needle: /@ERROR: (chdir|Unknown module)/, meaning: "the rsync daemon has no such module, or cannot enter it" },
+    {
+        needle: /protocol version mismatch/,
+        meaning: "the two rsync versions cannot talk to each other - upgrade the older side",
+    },
+    {
+        needle: /connection unexpectedly closed/,
+        meaning: "the far side went away before finishing - a dropped link, a killed process, or a jail that refused",
+    },
+    {
+        needle: /IO error encountered/,
+        meaning:
+            "rsync hit read errors in the source, so it disabled deletion for this run - files removed at the source stay in the snapshot",
+    },
+    {
+        needle: /failed to set (times|permissions|ownership)/,
+        meaning: "the destination filesystem cannot store the metadata being copied (often exFAT, NTFS, or SMB)",
+    },
+    {
+        needle: /mkdir "?([^"\s]*)"? failed|failed to create directory/,
+        meaning: "a destination directory could not be created - check the path exists and this user may write it",
+    },
+];
+
+/**
+ * The jail's refusal, which is PERMANENT however rsync happens to exit.
+ *
+ * `backupkit-remote` prints this and dies, so rsync sees its peer vanish and
+ * returns a transport code - usually 12. That put the failure on the transient
+ * row: the log said "the link to the remote died mid-transfer - a network drop,
+ * not your data" about a backup server that had just refused the command in
+ * writing, and then retried the identical command up to ten times over the
+ * target's whole backoff budget. A rejection is not ambiguous the way unknown
+ * stderr is, so the retry bias does not apply to it.
+ */
+const JAIL_REJECTED = /backupkit-remote: rejected/;
+
+/** The last non-empty line of a sanitized tail that looks like rsync reporting an error, or null. */
+function rsyncErrorLine(stderrTail: string): string | null {
+    const lines = stderrTail
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "");
+    // Last match, not first: rsync prints the specific failure and THEN its
+    // generic `rsync error: ... at main.c(...)` summary, so scanning forward
+    // for the useful line means walking back past the summary.
+    for (let i = lines.length - 1; i >= 0; i -= 1) {
+        const line = lines[i];
+        if (/^(rsync:|@ERROR|backupkit-remote:)/.test(line) && !/^rsync error: .* at [a-z_]+\.c\(/.test(line)) {
+            return line;
+        }
+    }
+    return null;
+}
+
+/** How much of rsync's own stderr line is carried into the message before it is trimmed. */
+const SAID_MAX_CHARS = 300;
+
+/**
+ * The plain-language reading of an rsync stderr tail plus the one line rsync
+ * actually wrote, or null when the tail says nothing recognisable. `tail` must
+ * already be sanitized. Callers APPEND this to the exit-code row; it never
+ * replaces it, because the exit code is what decided retry vs fail and the
+ * reader needs both.
+ */
+export function describeRsyncStderr(stderrTail: string): string | null {
+    const matched = STDERR_MEANING.find(({ needle }) => needle.test(stderrTail));
+    const said = rsyncErrorLine(stderrTail);
+    if (matched === undefined && said === null) {
+        return null;
+    }
+    const quoted = said === null ? "" : ` [rsync said: ${said.length > SAID_MAX_CHARS ? `${said.slice(0, SAID_MAX_CHARS)}...` : said}]`;
+    return `${matched?.meaning ?? "rsync reported a failure"}${quoted}`;
+}
+
+/** Append rsync's own reading of stderr to an exit-code row's message, when it has one. */
+function withStderr(message: string, stderrTail: string): string {
+    const explanation = describeRsyncStderr(stderrTail);
+    return explanation === null ? message : `${message} - ${explanation}`;
+}
+
 /** Outcome class of one rsync exit, mirroring the spec's exit-code table rows. */
 export type ExitClass =
     | "ok"
@@ -94,14 +223,20 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
         return row("warning", false, true, "rsync completed with vanished source files (exit 24)");
     }
     if (exitCode === 23) {
-        return row("warning", false, true, "rsync completed with skipped files (exit 23)");
+        return row("warning", false, true, withStderr("rsync completed with skipped files (exit 23)", stderrTail));
+    }
+    if (JAIL_REJECTED.test(stderrTail)) {
+        return row("fatal", false, false, withStderr(`the backup server refused the command (rsync exit ${exitCode})`, stderrTail));
     }
     if (TRANSIENT_EXIT_CODES.has(exitCode)) {
         return row(
             "transient",
             true,
             false,
-            `the link to the remote died mid-transfer (rsync exit ${exitCode}) - a network drop, not your data`,
+            withStderr(
+                `the link to the remote died mid-transfer (rsync exit ${exitCode}) - a network drop, not your data`,
+                stderrTail,
+            ),
         );
     }
     if (exitCode === 255) {
@@ -113,15 +248,23 @@ export function classifyExit(exitCode: number | null, stderrTail: string): ExitC
         return row("transient", true, false, `ssh transport error (exit 255)${cause === null ? "" : ` - ${cause}`}`);
     }
     if (exitCode === 11) {
-        return row("disk", false, false, "rsync file I/O error (exit 11) - disk full or destination unwritable");
+        return row(
+            "disk",
+            false,
+            false,
+            withStderr("rsync file I/O error (exit 11) - disk full or destination unwritable", stderrTail),
+        );
     }
     if (HARD_FAIL_EXIT_CODES.has(exitCode)) {
         return row(
             "hard",
             false,
             false,
-            `rsync hard failure (exit ${exitCode}) - likely a backupkit bug or an unsupported rsync; not retried`,
+            withStderr(
+                `rsync hard failure (exit ${exitCode}) - likely a backupkit bug or an unsupported rsync; not retried`,
+                stderrTail,
+            ),
         );
     }
-    return row("fatal", false, false, `rsync failed (exit ${exitCode}) - not retried`);
+    return row("fatal", false, false, withStderr(`rsync failed (exit ${exitCode}) - not retried`, stderrTail));
 }

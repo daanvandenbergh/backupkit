@@ -12,7 +12,7 @@ import { lstat, mkdir, readFile, readdir, rename, rm, stat, statfs, writeFile } 
 import { hostname } from "node:os";
 import { join } from "node:path";
 
-import { SnapshotStoreError } from "../../shared/errors.js";
+import { describeError, SnapshotStoreError } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
 import { isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
@@ -413,7 +413,7 @@ export class LocalSnapshotStore implements SnapshotStore {
             const stats = await statfs(this.root);
             return stats.bavail * stats.bsize;
         } catch (error) {
-            throw new SnapshotStoreError(`statfs failed for ${this.root}: ${sanitize(String(error))}`);
+            throw new SnapshotStoreError(`statfs failed for ${this.root}: ${describeError(error)}`);
         }
     }
 

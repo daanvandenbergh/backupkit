@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { loadConfig } from "../config/config.js";
 import { Backupkit } from "../engine/backupkit.js";
 import { exec } from "../exec/exec.js";
-import { isBackupkitError } from "../shared/errors.js";
+import { describeError, isBackupkitError } from "../shared/errors.js";
 import { checkCommand } from "./internal/commands/check.js";
 import { daemonCommand } from "./internal/commands/daemon.js";
 import { initCommand } from "./internal/commands/init.js";
@@ -142,7 +142,7 @@ function reportError(error: unknown, deps: CliDeps): number {
         }
         return 1;
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     deps.stderr(`Error: ${message}`);
     if (deps.debugEnabled && error instanceof Error && error.stack !== undefined) {
         deps.stderr(error.stack);
@@ -233,7 +233,7 @@ if (isEntryPoint(import.meta.url, process.argv[1])) {
             process.exitCode = code;
         },
         (error) => {
-            process.stderr.write(`Error: ${error instanceof Error ? error.message : String(error)}\n`);
+            process.stderr.write(`Error: ${describeError(error)}\n`);
             process.exitCode = 1;
         },
     );

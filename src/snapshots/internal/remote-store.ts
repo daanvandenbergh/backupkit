@@ -13,6 +13,7 @@ import { posix } from "node:path";
 
 import type { ExecResult } from "../../exec/exec.js";
 import { SnapshotStoreError } from "../../shared/errors.js";
+import { describeRemoteStderr } from "../../ssh/classify.js";
 import { formatUtc } from "../../shared/format.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
@@ -145,9 +146,7 @@ class RemoteLockBackend implements LockBackend {
         const marker = posix.join(this.lockPath, formatSnapshotName(this.now()));
         const result = await this.runner(["mkdir", "-p", "--", marker]);
         if (result.exitCode !== 0) {
-            throw new SnapshotStoreError(
-                `remote lock meta write failed (exit ${result.exitCode ?? "signal"}): ${sanitize(result.stderr).slice(-500)}`,
-            );
+            throw new SnapshotStoreError(remoteFailure("lock meta write", result.exitCode, result.stderr));
         }
     }
 
@@ -203,11 +202,26 @@ class RemoteLockBackend implements LockBackend {
     async remove(): Promise<void> {
         const result = await this.runner(["rm", "-rf", "--", this.lockPath]);
         if (result.exitCode !== 0) {
-            throw new SnapshotStoreError(
-                `remote lock release failed (exit ${result.exitCode ?? "signal"}): ${sanitize(result.stderr).slice(-500)}`,
-            );
+            throw new SnapshotStoreError(remoteFailure("lock release", result.exitCode, result.stderr));
         }
     }
+}
+
+/**
+ * One remote command's failure, worded for a person: the exit code, the plain
+ * reading of what the far side said, and the raw tail as evidence.
+ *
+ * Every one of these used to be `remote <what> failed (exit 1): <tail>`, so a
+ * jail refusal, a full disk and a wrong path all arrived as an exit code and a
+ * fragment of shell output. The reading comes from `ssh/classify.ts`, which
+ * owns every stderr needle in this codebase.
+ */
+function remoteFailure(what: string, exitCode: number | null, stderr: string): string {
+    const tail = sanitize(stderr).slice(-500);
+    const meaning = describeRemoteStderr(tail);
+    const because = meaning === null ? "" : ` - ${meaning}`;
+    const said = tail === "" ? "" : ` [the server said: ${tail}]`;
+    return `remote ${what} failed (exit ${exitCode ?? "signal"})${because}${said}`;
 }
 
 /** The remote `SnapshotStore` implementation over one jailed archive root. */
@@ -276,10 +290,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
     ): Promise<ExecResult> {
         const result = await this.runner(argv, options);
         if (result.exitCode !== 0) {
-            const tail = sanitize(result.stderr).slice(-500);
-            throw new SnapshotStoreError(
-                `remote ${what} failed (exit ${result.exitCode ?? "signal"})${tail === "" ? "" : `: ${tail}`}`,
-            );
+            throw new SnapshotStoreError(remoteFailure(what, result.exitCode, result.stderr));
         }
         if (result.truncated) {
             throw new SnapshotStoreError(

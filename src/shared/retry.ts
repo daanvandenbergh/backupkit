@@ -6,7 +6,7 @@
  * child_process.
  */
 
-import { isTransientFailure } from "./errors.js";
+import { describeError, isTransientFailure } from "./errors.js";
 import type { Logger } from "./logger.js";
 
 /** Retry policy: total attempts and the capped-exponential delay parameters. */
@@ -102,7 +102,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
  * sixteen warn lines.
  */
 function retryCause(error: unknown): string {
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeError(error);
     return message.length > CAUSE_MAX_CHARS ? `${message.slice(0, CAUSE_MAX_CHARS)}...` : message;
 }
 

@@ -14,6 +14,7 @@
  * the first schedule tick to know the config works.
  */
 
+import { describeError } from "../../../shared/errors.js";
 import type { CliDeps } from "../context.js";
 import { count, parseFlags, printRunReport } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -42,7 +43,7 @@ export async function startCommand(argv: string[], deps: CliDeps): Promise<numbe
             deps.stdout("Running every target once now (--force), then scheduling.");
             printRunReport(await engine.run({ force: true }), deps.stdout);
         } catch (error) {
-            deps.stderr(`Initial --force pass failed: ${error instanceof Error ? error.message : String(error)}`);
+            deps.stderr(`Initial --force pass failed: ${describeError(error)}`);
         }
     }
     await engine.start();

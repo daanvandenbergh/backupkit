@@ -6,6 +6,7 @@ import {
     matchTransientSshCause,
     SSH_NO_ANSWER_MESSAGE,
     sshStderrTail,
+    describeRemoteStderr,
 } from "../classify.js";
 
 /**
@@ -143,5 +144,39 @@ describe("transient ssh cause", () => {
         const tail = sshStderrTail(`${"\u0000".repeat(4000)}ssh: connect to host h port 22: Network is unreachable`);
         expect(tail.length).toBeLessThanOrEqual(2048);
         expect(matchTransientSshCause(tail)).toBe("no-network");
+    });
+});
+
+describe("describeRemoteStderr", () => {
+    // The archive host's `mkdir`/`mv`/`rm`/`ls`/`find`/`df` fail with an exit
+    // code and one line of shell output. That line used to be passed through
+    // verbatim, so `remote listing failed (exit 1): backupkit-remote: rejected`
+    // told an operator that something was rejected and nothing more.
+    it.each([
+        ["backupkit-remote: rejected", "jail REFUSED this command"],
+        ["mkdir: cannot create directory '/archive/x': Permission denied", "may not touch that path"],
+        ["ls: cannot access '/archive': No such file or directory", "does not exist on the backup server"],
+        ["mv: cannot move '/a' to '/b': Invalid cross-device link", "an archive root must be ONE filesystem"],
+        ["cp: error writing '/archive/x': No space left on device", "filesystem is FULL"],
+        ["mkdir: cannot create directory '/archive': Read-only file system", "mounted read-only"],
+        ["rm: cannot remove '/archive/x': Directory not empty", "is not empty"],
+        ["df: /archive: Input/output error", "disk may be failing"],
+        ["ls: /archive: Stale file handle", "may need remounting"],
+    ])("reads %s", (tail, expected) => {
+        expect(describeRemoteStderr(tail)).toContain(expected);
+    });
+
+    it("is null when the tail says nothing recognisable", () => {
+        expect(describeRemoteStderr("")).toBeNull();
+        expect(describeRemoteStderr("some unrelated chatter")).toBeNull();
+    });
+
+    // Explanatory ONLY. Every needle here could miss and no run would be lost -
+    // `isPermanentSshStderr` alone decides retriability, and it is deliberately
+    // not consulted by this table.
+    it("never changes what the retry loop does", () => {
+        const tail = "mkdir: cannot create directory '/archive/x': Permission denied";
+        expect(describeRemoteStderr(tail)).not.toBeNull();
+        expect(isPermanentSshStderr(tail)).toBe(false);
     });
 });

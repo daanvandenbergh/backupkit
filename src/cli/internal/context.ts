@@ -18,6 +18,7 @@ import type {
     TargetStatus,
     TargetUnlockReport,
 } from "../../engine/types.js";
+import { describeError } from "../../shared/errors.js";
 import { formatBytes } from "../../shared/format.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
@@ -154,7 +155,7 @@ export function parseFlags(argv: string[], flags: Record<string, FlagSpec>, allo
         const { values, positionals } = parseArgs({ args: argv, options, allowPositionals, strict: true });
         return { values: values as Record<string, string | boolean | undefined>, positionals };
     } catch (error) {
-        const first = String(error instanceof Error ? error.message : error).split(". ")[0];
+        const first = describeError(error).split(". ")[0];
         const valid = Object.keys(options)
             .map((name) => `--${name}`)
             .join(", ");

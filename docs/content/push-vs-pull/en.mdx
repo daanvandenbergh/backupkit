@@ -52,7 +52,7 @@ This is strongly recommended but not required - see [running without the jail](#
 
 `backupkit-remote` lives on the archive server, and the pushing client cannot update it. That is deliberate: a key confined by the jail must never be able to rewrite its own jail.
 
-The script also validates commands against the exact grammar the client sends, so a stale copy on the server rejects pushes from a newer client. The rejection is a bare `backupkit-remote: rejected`, which shows up as a failed run with no obvious cause.
+The script also validates commands against the exact grammar the client sends, so a stale copy on the server rejects pushes from a newer client. The rejection is a bare `backupkit-remote: rejected` on the wire - backupkit recognises it and logs *the backup server's backupkit-remote jail REFUSED this command ... re-run `backupkit jail` on the server to reinstall it*, rather than the transport error rsync reports. It is also treated as permanent: a refusal is not retried, because the identical command can only be refused again.
 
 The easy fix is to install backupkit on the archive server too, and run this after every package update there:
 

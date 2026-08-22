@@ -1,10 +1,15 @@
 /**
- * The ONLY stderr inspection in the codebase (spec section 4): ssh/rsync exit
- * 255 and exec timeouts are transient unless the sanitized stderr tail matches
- * one of exactly three fixed permanent ssh patterns - auth failure, host key
- * verification failure, host key changed. Unknown stderr defaults to
+ * The ONLY stderr inspection that DECIDES anything (spec section 4): ssh/rsync
+ * exit 255 and exec timeouts are transient unless the sanitized stderr tail
+ * matches one of exactly three fixed permanent ssh patterns - auth failure,
+ * host key verification failure, host key changed. Unknown stderr defaults to
  * transient: retrying a permanent failure wastes minutes, misclassifying a
  * transient one loses a run, so the bias goes toward retry.
+ *
+ * The other readings here and in `rsync/internal/classify.ts` are purely
+ * EXPLANATORY - they shape what a person is told and never what the retry loop
+ * does. That separation is the rule: a needle that misses costs the reader a
+ * sentence, never a run.
  */
 
 import { sanitize } from "../shared/sanitize.js";
@@ -135,4 +140,52 @@ export function matchTransientSshCause(stderrTail: string): TransientSshCause | 
 export function describeTransientSshStderr(stderrTail: string): string | null {
     const cause = matchTransientSshCause(stderrTail);
     return cause === null ? null : TRANSIENT_CAUSE_MESSAGE[cause];
+}
+
+/**
+ * What a REMOTE SHELL command's stderr says, in the reader's terms.
+ *
+ * `mkdir`, `mv`, `rm`, `ls`, `find` and `df` on the archive host fail with a
+ * bare exit code and one line of stderr, and that line was passed through
+ * verbatim: `remote listing failed (exit 1): backupkit-remote: rejected` told
+ * an operator that something was rejected and nothing whatever about what to
+ * do. These are the lines those six commands actually produce - plus the
+ * jail's own refusal, which is the one most likely to be seen and the least
+ * self-explanatory.
+ *
+ * Explanatory only: nothing here decides retriability. `tail` must already be
+ * sanitized.
+ */
+const REMOTE_STDERR_MEANING: readonly { needle: RegExp; meaning: string }[] = [
+    {
+        needle: /backupkit-remote: rejected/,
+        meaning:
+            "the backup server's backupkit-remote jail REFUSED this command - the jail script there and this client " +
+            'disagree about the command shape; re-run "backupkit jail" on the server to reinstall it',
+    },
+    {
+        needle: /(command not found|not found|No such file or directory).*\b(rsync|find|df)\b|\b(rsync|find|df)\b.*(command not found|not found)/,
+        meaning: "the backup server does not have that program installed, or its login shell cannot find it",
+    },
+    { needle: /Permission denied|Operation not permitted/, meaning: "the backup account may not touch that path" },
+    { needle: /No such file or directory/, meaning: "that path does not exist on the backup server" },
+    { needle: /Not a directory/, meaning: "a component of that path on the backup server is a file, not a directory" },
+    { needle: /Directory not empty/, meaning: "the directory on the backup server is not empty" },
+    { needle: /File exists/, meaning: "it already exists on the backup server" },
+    { needle: /No space left on device/, meaning: "the backup server's filesystem is FULL" },
+    { needle: /Disk quota exceeded/, meaning: "the backup account is over its disk quota on the server" },
+    { needle: /Read-only file system/, meaning: "the archive filesystem on the backup server is mounted read-only" },
+    { needle: /Input\/output error/, meaning: "the backup server hit a low-level I/O error - its disk may be failing" },
+    { needle: /Too many links/, meaning: "the archive filesystem's hard-link limit is exhausted" },
+    { needle: /Invalid cross-device link/, meaning: "that move crosses filesystems on the backup server - an archive root must be ONE filesystem" },
+    { needle: /Stale file handle/, meaning: "a network filesystem on the backup server went stale - it may need remounting" },
+];
+
+/**
+ * The plain-language reading of a remote command's stderr tail, or null when
+ * it says nothing this recognises. Callers APPEND it to their own message,
+ * next to the raw tail - the tail is the evidence, this is the reading of it.
+ */
+export function describeRemoteStderr(stderrTail: string): string | null {
+    return REMOTE_STDERR_MEANING.find(({ needle }) => needle.test(stderrTail))?.meaning ?? null;
 }

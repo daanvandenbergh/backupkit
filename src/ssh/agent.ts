@@ -11,7 +11,7 @@
 import { rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { exec, minimalEnv, type ExecResult } from "../exec/exec.js";
-import { SshError } from "../shared/errors.js";
+import { describeError, SshError } from "../shared/errors.js";
 import type { Logger } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
 import type { ResolvedRemote } from "../shared/types.js";
@@ -86,7 +86,7 @@ async function runTool(
     try {
         result = await exec(bin, args, { env, timeoutMs });
     } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = describeError(error);
         throw new SshError(`${bin} could not be spawned: ${message}`);
     }
     if (result.timedOut) {
@@ -152,7 +152,7 @@ async function writePubSidecar(pubPath: string, content: string): Promise<void> 
                     `process won); inspect and remove it, then retry`,
             );
         }
-        throw new SshError(`${pubPath} could not be written: ${error instanceof Error ? error.message : String(error)}`);
+        throw new SshError(`${pubPath} could not be written: ${describeError(error)}`);
     }
 }
 
@@ -434,7 +434,7 @@ export async function loadKeys(remotes: readonly ResolvedRemote[], deps: AgentDe
         try {
             await primeKey(group[0], sock, loaded, deps);
         } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
+            const message = describeError(error);
             for (const remote of group) {
                 failures.set(remote.name, message);
             }

@@ -9,7 +9,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ConfigError } from "../shared/errors.js";
+import { ConfigError, describeError } from "../shared/errors.js";
 import { parseJsonc } from "./internal/jsonc.js";
 import { expandHome } from "./internal/home.js";
 import { validateConfig } from "./internal/validate.js";
@@ -152,7 +152,7 @@ export function loadConfig(cliArg?: string, options?: LoadConfigOptions): Resolv
     try {
         text = readFileSync(path, "utf8");
     } catch (error) {
-        throw new ConfigError(`cannot read config file ${path}: ${(error as Error).message}`, { file: path });
+        throw new ConfigError(`cannot read config file ${path}: ${describeError(error)}`, { file: path });
     }
     const root = parseJsonc(text, path);
     const home = options?.homeDir ?? options?.env?.HOME ?? homedir();

@@ -15,7 +15,7 @@ import { dirname, join, posix, resolve, sep } from "node:path";
 import { loadConfig } from "../config/config.js";
 import type { ResolvedConfig, ResolvedTarget } from "../config/types.js";
 import { exec, minimalEnv, type ExecOptions, type ExecResult } from "../exec/exec.js";
-import { ConfigError, isBackupkitError, isTransientFailure, RestoreError } from "../shared/errors.js";
+import { ConfigError, describeError, isBackupkitError, isTransientFailure, RestoreError } from "../shared/errors.js";
 import { formatEndpoint, formatUtc } from "../shared/format.js";
 import { Logger } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
@@ -129,7 +129,7 @@ function fileSinkFor(path: string): (line: string) => void {
             // through Logger would re-enter the sink that just failed.
             process.stderr.write(
                 `backupkit: logging.file ${path} is not writable (${sanitize(
-                    error instanceof Error ? error.message : String(error),
+                    describeError(error),
                 )}) - file logging disabled for this process; stdout/stderr logging continues\n`,
             );
         } finally {
@@ -748,7 +748,7 @@ export class Backupkit {
             await this.remoteRsyncFor(target, remote);
             return null;
         } catch (error) {
-            const message = sanitize(error instanceof Error ? error.message : String(error));
+            const message = describeError(error);
             // Level follows the CAUSE, same rule as the scheduler's due check:
             // an unreachable host is a warning the next attempt may well fix,
             // a refused key or a changed host key is an error that needs a
@@ -1165,7 +1165,7 @@ export class Backupkit {
                     this.log.warn("lock cleared by hand", { target: target.name, detail: outcome.detail });
                 }
             } catch (error) {
-                const message = sanitize(error instanceof Error ? error.message : String(error));
+                const message = describeError(error);
                 this.log.error("could not remove the lock", { target: target.name, error: message });
                 rows.push({ target: target.name, status: "failed", detail: message });
             }
@@ -1216,7 +1216,7 @@ export class Backupkit {
             } catch (error) {
                 throw new RestoreError(
                     `remote rsync check failed for ${target.dst.remote.name} - refusing to restore: ${sanitize(
-                        error instanceof Error ? error.message : String(error),
+                        describeError(error),
                     )}`,
                 );
             }
@@ -1421,7 +1421,7 @@ export class Backupkit {
                         await store.remove(name);
                         this.log.info("pruned snapshot", { target: target.name, snapshot: name });
                     } catch (error) {
-                        errors.push(`${name}: ${sanitize(error instanceof Error ? error.message : String(error))}`);
+                        errors.push(`${name}: ${describeError(error)}`);
                     }
                 }
                 return inner;
@@ -1540,7 +1540,7 @@ export class Backupkit {
                 errors.push(`remote ${remoteName}: ${message}`);
             }
         } catch (error) {
-            errors.push(sanitize(error instanceof Error ? error.message : String(error)));
+            errors.push(describeError(error));
             return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], encryptedKeys: [], errors };
         }
 
@@ -1560,7 +1560,7 @@ export class Backupkit {
         try {
             localRsync = await this.localRsync();
         } catch (error) {
-            errors.push(sanitize(error instanceof Error ? error.message : String(error)));
+            errors.push(describeError(error));
         }
         let sshOk = false;
         try {
@@ -1570,7 +1570,7 @@ export class Backupkit {
                 errors.push(`${this.sshBin()} -V failed (exit ${probe.exitCode ?? "signal"})`);
             }
         } catch (error) {
-            errors.push(`ssh binary not found: ${sanitize(error instanceof Error ? error.message : String(error))}`);
+            errors.push(`ssh binary not found: ${describeError(error)}`);
         }
 
         const remoteChecks: RemoteCheck[] = [];
@@ -1620,7 +1620,7 @@ export class Backupkit {
                     row.rsyncVersion = row.rsyncVersion ?? version;
                     row.reachable = true;
                 } catch (error) {
-                    const message = sanitize(error instanceof Error ? error.message : String(error));
+                    const message = describeError(error);
                     row.error = row.error ?? message;
                     row.reachable = false;
                     errors.push(`remote ${remote.name}: ${message}`);
