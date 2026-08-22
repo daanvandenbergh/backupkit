@@ -15,7 +15,7 @@ import { describeError, isBackupkitError, isTransientFailure } from "../../share
 import { formatDuration, formatUtc } from "../../shared/format.js";
 import { isDue, windowAnchor, windowIndex, type ScheduleSpec } from "../../shared/time.js";
 import type { DerivedBackoff } from "./reports.js";
-import type { RunStatus, TargetRunReport } from "../types.js";
+import type { RunReason, RunStatus, TargetRunReport } from "../types.js";
 
 /** Milliseconds between scheduler ticks. */
 export const TICK_MS = 30_000;
@@ -168,7 +168,7 @@ export interface SchedulerDeps {
      * unreachable, or whose rsync is unusable, would leave no record at all, so
      * `status` would keep reporting the last success forever.
      */
-    recordOutcome: (target: ResolvedTarget, status: RunStatus, reason: string, error: string) => Promise<void>;
+    recordOutcome: (target: ResolvedTarget, status: RunStatus, reason: RunReason, error: string) => Promise<void>;
     /** The shared backoff tracker (rehydrated by the engine before the loop starts). */
     backoff: BackoffTracker;
     /**
@@ -334,10 +334,18 @@ export class Scheduler {
                 // by ProtectSystem=strict), when the report write inside the
                 // pipeline fails, or on any unexpected throw.
                 const message = describeError(error);
-                this.deps.log.error("this target hit an unexpected error inside backupkit - recorded as a failed run", {
-                    target: target.name,
-                    error: message,
-                });
+                // Same cause-based level as every other failure line. Most of
+                // what lands here really is a backupkit bug, but not all: an
+                // SshError can reach it from a path that does not catch, and
+                // calling a dropped link "an unexpected error inside backupkit"
+                // sends the reader hunting a bug that is not there.
+                const transient = isTransientFailure(error);
+                this.deps.log[transient ? "warn" : "error"](
+                    transient
+                        ? "this target's run ended on a temporary problem - recorded as a failed run, the next attempt will try again"
+                        : "this target hit an unexpected error inside backupkit - recorded as a failed run",
+                    { target: target.name, error: message },
+                );
                 // A failing state dir must never end the daemon loop.
                 await this.deps.recordOutcome(target, "failed", "run-threw", message).catch((writeError) => {
                     this.deps.log.error(
@@ -375,8 +383,8 @@ export class Scheduler {
                 this.unreachable.set(target.name, result.detail);
                 this.deps.log.warn("backup server not reachable - skipping this target until it is", {
                     target: target.name,
-                    cause: result.failure ?? "unknown",
-                    detail: result.detail,
+                    kind: result.failure ?? "unknown",
+                    error: result.detail,
                 });
             }
             return false;

@@ -415,7 +415,7 @@ describe("Scheduler loop (fake timers)", () => {
         const warned = lines.filter((line) => line.includes("not reachable"));
         expect(warned).toHaveLength(1);
         expect(warned[0]).toContain("WARN");
-        expect(warned[0]).toContain("cause=no-link");
+        expect(warned[0]).toContain("kind=no-link");
         // The outage is logged on its EDGES: ten more ticks stay silent.
         for (let i = 0; i < 10; i += 1) {
             await vi.advanceTimersByTimeAsync(30_000);

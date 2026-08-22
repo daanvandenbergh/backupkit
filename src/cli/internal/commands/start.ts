@@ -16,7 +16,7 @@
 
 import { describeError } from "../../../shared/errors.js";
 import type { CliDeps } from "../context.js";
-import { count, parseFlags, printRunReport } from "../context.js";
+import { count, parseFlags, printRunReport, schedulePreview } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
 
 /** The `backupkit start` command entry. */
@@ -46,6 +46,21 @@ export async function startCommand(argv: string[], deps: CliDeps): Promise<numbe
             deps.stderr(`Initial --force pass failed: ${describeError(error)}`);
         }
     }
+    // Then say WHEN - after any --force pass, whose runs move the very times
+    // this prints. Without it the next thing a person saw was silence, for up
+    // to six hours on a daily schedule, with no way to tell a working
+    // scheduler from a wedged one short of reading the config and doing the
+    // arithmetic themselves. `status()` is documented read-only and instant,
+    // so this costs nothing, and a failure to produce it must never stop the
+    // scheduler that is the point of the command.
+    try {
+        for (const line of await schedulePreview(engine)) {
+            deps.stdout(line);
+        }
+    } catch (error) {
+        deps.stderr(`(could not read the current schedule: ${describeError(error)})`);
+    }
+
     await engine.start();
     deps.stdout("Scheduler stopped cleanly.");
     return 0;

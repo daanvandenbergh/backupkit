@@ -47,6 +47,9 @@ export class FakeEngine implements EngineLike {
     /** Result of status(). */
     statusRows: TargetStatus[] = [];
 
+    /** When set, status() rejects with this instead of answering - the schedule preview must survive it. */
+    statusThrows: Error | null = null;
+
     /** Result of listSnapshots(). */
     snapshots: SnapshotInfo[] = [];
 
@@ -100,6 +103,10 @@ export class FakeEngine implements EngineLike {
 
     /** Fake status. */
     status(options?: { targets?: string[] }): Promise<TargetStatus[]> {
+        if (this.statusThrows !== null) {
+            this.calls.push({ method: "status", options });
+            return Promise.reject(this.statusThrows);
+        }
         return this.answer("status", options, this.statusRows);
     }
 

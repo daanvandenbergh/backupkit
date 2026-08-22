@@ -137,6 +137,17 @@ Use it when a key has a passphrase, when you want to watch a schedule run before
 
 `--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
 
+Before entering the loop, both `start` and `daemon` print **when each target is next due**, with a note on any target whose time is pushed out by a failure backoff:
+
+```
+Scheduler started - 2 of 3 configured targets scheduled. Backups run while this process stays alive; Ctrl-C stops it.
+TARGET       NEXT DUE
+photos       2026-08-23T03:00:00Z
+persistance  2026-08-22T22:09:15Z  (waiting after 9 failures - see `backupkit status`)
+```
+
+Without it a scheduler with nothing due for six hours prints nothing for six hours, which is indistinguishable from one that is stuck. It comes from the same read-only calculation `status` uses, so it costs nothing, and if it cannot be produced the scheduler starts regardless.
+
 ### daemon
 
 Run the scheduler in the foreground. This is exactly what the installed service unit runs. Use `backupkit service` to install and drive it instead of running this yourself.
@@ -170,6 +181,16 @@ A [mirror target](/configuration/#snapshot-or-mirror) contributes nothing here: 
 One row per target: last snapshot, next due, last result, consecutive failures, and lock state. A mirror target has no snapshot to name, so its `LAST SNAPSHOT` is empty and it never reports a lock (it takes none); everything else on the row works the same, dated from its newest completed run.
 
 The `LOCK` column covers **local** destinations only. A push target's lock lives on the archive server, and probing it would cost an ssh round-trip on a command that promises to be instant, so a push target always reports no lock here - `backupkit unlock` is what reads the real remote state.
+
+Under the table, every target with a failure on record gets a short block saying **why**, taken from the newest failed run - and how to retry it now:
+
+```
+persistance last failed at 2026-08-22T16:09:15Z (9 times in a row):
+  the destination filesystem is FULL (rsync exit 11) [rsync said: ... No space left on device (28)]
+  Waiting until 2026-08-22T22:09:15Z before trying again; `backupkit run --force persistance` retries it now.
+```
+
+It reads the newest **failed** report specifically, not the newest report of any kind, so a skip recorded afterwards cannot hide the failure that is still driving the backoff. A healthy target gets no block.
 
 It is derived from the run reports and the due calculation, so it is instant and needs no root. `service status` prints the same table with a unit-state header on top.
 
@@ -296,7 +317,7 @@ The `authorized_keys` lines that point at the script come from `backupkit check`
 
 `--json` exists on the read-only commands machines actually consume: `status`, `list`, `target`, and `remote`. Each prints one JSON document on stdout, with logs going to stderr only.
 
-`list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, nextDueAt, lastResult, consecutiveFailures, lockHeld }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `consecutiveFailures` is a number, and `lockHeld` is a boolean that is always `false` for a push target.
+`list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, nextDueAt, lastResult, consecutiveFailures, lockHeld, lastError, lastErrorAt }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `consecutiveFailures` is a number, `lockHeld` is a boolean that is always `false` for a push target, and `lastError`/`lastErrorAt` carry the explained message and ISO time of the newest **failed** run (both `null` when the target has no failure on record).
 
 `target --json` and `remote --json` each print one resolved object - the same shape the engine runs on, every default already filled in, and for `target` the derived remote and endpoints the table omits.
 

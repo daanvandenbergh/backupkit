@@ -14,12 +14,13 @@ import type {
     CheckReport,
     PruneReport,
     RestoreReport,
+    RunReason,
     RunReport,
     TargetStatus,
     TargetUnlockReport,
 } from "../../engine/types.js";
 import { describeError } from "../../shared/errors.js";
-import { formatBytes } from "../../shared/format.js";
+import { formatBytes, formatUtc } from "../../shared/format.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
 /** The exec/ spawn function shape used by the service/logs passthroughs. */
@@ -193,13 +194,51 @@ export function count(n: number, singular: string, plural: string = `${singular}
 }
 
 /**
+ * The "here is what happens next" block both scheduler entry points print
+ * under their started line: one row per scheduled target with its next due
+ * time, and - for a target already failing - why that time sits further out
+ * than its schedule says.
+ *
+ * `daemon` already argued the case for its start/stop lines: without them a
+ * healthy daemon is indistinguishable from one that died during preflight.
+ * The same holds one step further in. A scheduler with nothing due for six
+ * hours prints nothing for six hours, and a person watching it has no way to
+ * tell that from a wedged one - short of reading the config and working out
+ * the window arithmetic themselves.
+ */
+export async function schedulePreview(engine: CliContext["engine"]): Promise<string[]> {
+    const rows = await engine.status();
+    const scheduled = rows.filter((row) => row.nextDueAt !== null);
+    if (scheduled.length === 0) {
+        return [];
+    }
+    return alignRows(
+        ["TARGET", "NEXT DUE", ""],
+        scheduled.map((row) => [
+            row.target,
+            formatUtc(new Date(row.nextDueAt as string)),
+            row.consecutiveFailures === 0
+                ? ""
+                : `(waiting after ${count(row.consecutiveFailures, "failure")} - see \`backupkit status\`)`,
+        ]),
+    );
+}
+
+/**
  * Plain English for each machine-readable skip/failure `reason`. A person
  * reading `skipped db - window` learns nothing; the reason codes stay in the
  * persisted reports and in `--json`, and this is the only place they are
- * turned into a sentence for a terminal. A code with no entry here falls back
- * to itself rather than printing "undefined".
+ * turned into a sentence for a terminal.
+ *
+ * Typed `Record<RunReason, string>` so the two cannot drift: adding a reason
+ * without a sentence for it fails `npm run typecheck`. It drifted while it was
+ * keyed by `string` - the engine emitted `due-check-failed` and `run-threw`
+ * and this map knew neither, so a person was shown the raw code. Reports
+ * PERSISTED before a rename are still older than this map, which is why the
+ * lookup keeps its fallback to the code itself rather than printing
+ * "undefined".
  */
-const REASON_TEXT: Record<string, string> = {
+const REASON_TEXT: Record<RunReason, string> = {
     window: "already backed up in this schedule window, run again now with --force",
     "disk-low": "not enough free disk space",
     "clock-skew": "this host's clock is behind the newest snapshot",
@@ -209,6 +248,8 @@ const REASON_TEXT: Record<string, string> = {
     "remote-unavailable": "could not reach the backup server",
     "content-collapse": "the source holds far fewer files than last time",
     "lock-held": "another backupkit run is already working on this target",
+    "due-check-failed": "could not read the archive to see whether a backup was due",
+    "run-threw": "an unexpected error inside backupkit",
 };
 
 /** The unreadable-paths clause, or "" when nothing was skipped. */

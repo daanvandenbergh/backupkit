@@ -155,6 +155,40 @@ describe("deriveBackoff", () => {
         expect(derived.lastResult).toBe(lastResult);
     });
 
+    // `status` shows this, which is the difference between "failed 9" and
+    // knowing what to go and fix. It must come from the newest FAILED report,
+    // not the newest report of any kind: a skip recorded after a failure must
+    // not hide the failure that is still driving the backoff.
+    it("carries the newest FAILED report's error, past newer skips and aborts", () => {
+        const derived = deriveBackoff([
+            makeReport({ status: "skipped", reason: "window", error: null, finishedAt: "2026-08-10T15:00:00.000Z" }),
+            makeReport({ status: "aborted", reason: "aborted", error: "stopped", finishedAt: "2026-08-10T14:00:00.000Z" }),
+            makeReport({ status: "failed", error: "the destination filesystem is FULL", finishedAt: "2026-08-10T13:00:00.000Z" }),
+            makeReport({ status: "failed", error: "an older, less relevant failure", finishedAt: "2026-08-10T12:00:00.000Z" }),
+        ]);
+        expect(derived.lastError).toBe("the destination filesystem is FULL");
+        expect(derived.lastErrorAt?.toISOString()).toBe("2026-08-10T13:00:00.000Z");
+    });
+
+    it("falls back to the reason code when a failed report carries no message", () => {
+        const derived = deriveBackoff([makeReport({ status: "failed", reason: "due-check-failed", error: null })]);
+        expect(derived.lastError).toBe("due-check-failed");
+    });
+
+    it("is null when nothing ever failed", () => {
+        const derived = deriveBackoff([seq("success"), seq("skipped")]);
+        expect(derived.lastError).toBeNull();
+        expect(derived.lastErrorAt).toBeNull();
+    });
+
+    // A success after a failure clears the count, and the scan stops there - so
+    // the stale error must not survive into a healthy target's status row.
+    it("stops at the newest completed run, so a fixed target reports no error", () => {
+        const derived = deriveBackoff([seq("success"), makeReport({ status: "failed", error: "old news" })]);
+        expect(derived.consecutiveFailures).toBe(0);
+        expect(derived.lastError).toBeNull();
+    });
+
     it("anchors the timer at the NEWEST failed report's finishedAt", () => {
         const derived = deriveBackoff([
             seq("failed", "2026-08-10T12:00:00.000Z"),

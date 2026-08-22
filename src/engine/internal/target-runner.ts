@@ -33,7 +33,7 @@ import type { SnapshotStore } from "../../snapshots/store.js";
 import { splitFutureSnapshots } from "../../snapshots/types.js";
 import { evaluateDiskGuard } from "./disk-guard.js";
 import { detectHistoryInsertion, type HistoryMark, runIdFor } from "./reports.js";
-import type { RunStats, TargetRunReport } from "../types.js";
+import type { RunReason, RunStats, TargetRunReport } from "../types.js";
 
 /** The exec/ spawn function shape (re-declared to avoid importing the value module). */
 type ExecFn = (bin: string, args: readonly string[], options?: ExecOptions) => Promise<ExecResult>;
@@ -272,7 +272,7 @@ export async function runMirror(
     let contentCollapse: TargetRunReport["contentCollapse"] = null;
 
     /** Assemble the final report. A mirror has no snapshot and no archive listing, so those fields stay null. */
-    const report = (status: TargetRunReport["status"], reason: string | null, error: string | null): TargetRunReport => ({
+    const report = (status: TargetRunReport["status"], reason: RunReason | null, error: string | null): TargetRunReport => ({
         runId: runIdFor(start, target.name),
         target: target.name,
         direction: target.direction,
@@ -470,7 +470,7 @@ export async function runTarget(
     let completeCount: number | null = null;
 
     /** Assemble the final report from the pipeline outcome. */
-    const report = (status: TargetRunReport["status"], reason: string | null, error: string | null): TargetRunReport => ({
+    const report = (status: TargetRunReport["status"], reason: RunReason | null, error: string | null): TargetRunReport => ({
         runId: runIdFor(start, target.name),
         target: target.name,
         direction: target.direction,

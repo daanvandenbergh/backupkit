@@ -475,3 +475,22 @@ partial fix, it is a false sense of security plus a test that reads as green.
     `src/engine/tests/scheduler.test.ts` ("a reachable probe never suppresses a real failure") -
     expect: at least two passing-on-inconclusive rows alongside the dns/unreachable rejects, so
     the probe cannot be satisfied by passing everything either.*
+44. `TargetRunReport.reason` is a CLOSED union (`RunReason`), and the CLI's plain-English map is
+    `Record<RunReason, string>` - not `Record<string, string>`. This is a legibility invariant,
+    and it fails exactly the way security invariants do: silently, in a direction nobody notices.
+    While `reason` was a bare `string` the engine emitted `due-check-failed` and `run-threw`, the
+    CLI map knew neither, and `backupkit status` printed the raw code at a person; the docstring
+    listing the codes named seven of the eleven. Nothing went red - the `?? reason` fallback made
+    every miss look like a design choice. Typing both sides against one union turns the next
+    addition into a `npm run typecheck` failure. Keep the runtime fallback anyway: reports
+    PERSISTED under an older name are still on disk, and printing an unrecognised code beats
+    printing "undefined".
+    ✗ `const REASON_TEXT: Record<string, string> = { ... }`   // a new code is silently unexplained
+    ✓ `const REASON_TEXT: Record<RunReason, string> = { ... }` // a new code fails typecheck
+    ```hunt
+    rg -n "RunReason|REASON_TEXT|reason:" src/engine/types.ts src/cli/internal/context.ts src/engine/internal
+    expect: >= 6
+    witness: src/cli/internal/context.ts
+    ```
+    *graduated: `npm run typecheck` itself is the guard - `REASON_TEXT` cannot compile with a
+    member missing. Verify by deleting one key from the map and confirming typecheck fails.*

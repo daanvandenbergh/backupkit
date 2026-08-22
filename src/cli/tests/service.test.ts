@@ -242,7 +242,7 @@ describe("Linux lifecycle", () => {
             ],
         });
         h.engine.statusRows = [
-            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false },
+            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false, lastError: null, lastErrorAt: null },
         ];
         expect(await main(["service", "status"], h.deps)).toBe(0);
         expect(h.out[0]).toBe("Service: running (pid 1234)");

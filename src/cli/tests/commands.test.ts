@@ -69,11 +69,80 @@ describe("run", () => {
     });
 });
 
+describe("schedule preview", () => {
+    // Regression in kind: `daemon` already argued that without its start/stop
+    // lines a healthy daemon is indistinguishable from one that died during
+    // preflight. The same holds one step in - a scheduler with nothing due for
+    // six hours printed nothing for six hours, and a person watching it could
+    // not tell that from a wedged one.
+    it.each(["start", "daemon"])("%s prints when each target is next due", async (command) => {
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            {
+                target: "web",
+                lastSnapshot: null,
+                nextDueAt: "2026-08-23T03:00:00.000Z",
+                lastResult: "success",
+                consecutiveFailures: 0,
+                lockHeld: false,
+                lastError: null,
+                lastErrorAt: null,
+            },
+            {
+                target: "db",
+                lastSnapshot: null,
+                nextDueAt: "2026-08-22T22:09:15.000Z",
+                lastResult: "failed",
+                consecutiveFailures: 9,
+                lockHeld: false,
+                lastError: "boom",
+                lastErrorAt: "2026-08-22T16:09:15.000Z",
+            },
+        ];
+        expect(await main([command], h.deps)).toBe(0);
+        const out = h.out.join("\n");
+        expect(out).toContain("2026-08-23T03:00:00Z");
+        // A time further out than the schedule says needs its reason, or it
+        // reads as a wrong schedule.
+        expect(out).toContain("waiting after 9 failures");
+    });
+
+    // A disabled target has no next due time, and inventing one for it would
+    // be worse than leaving it out.
+    it("lists only targets that are actually scheduled", async () => {
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            {
+                target: "off",
+                lastSnapshot: null,
+                nextDueAt: null,
+                lastResult: null,
+                consecutiveFailures: 0,
+                lockHeld: false,
+                lastError: null,
+                lastErrorAt: null,
+            },
+        ];
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.out.join("\n")).not.toContain("off");
+    });
+
+    // The preview is a convenience; the loop is the command. A status() that
+    // throws must not stop the scheduler from starting.
+    it("still starts the scheduler when the preview cannot be produced", async () => {
+        const h = fakeDeps();
+        h.engine.statusThrows = new Error("state dir unreadable");
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.engine.calls.map((call) => call.method)).toContain("start");
+        expect(h.err.join("\n")).toContain("could not read the current schedule");
+    });
+});
+
 describe("daemon", () => {
     it("preflights, starts, and wires signals", async () => {
         const h = fakeDeps();
         expect(await main(["daemon"], h.deps)).toBe(0);
-        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "start"]);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "status", "start"]);
         expect(h.stops).toHaveLength(1);
     });
 
@@ -99,7 +168,7 @@ describe("start", () => {
         const h = fakeDeps();
         expect(await main(["start"], h.deps)).toBe(0);
         expect(h.engine.calls[0]).toEqual({ method: "preflight", options: undefined });
-        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "start"]);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "status", "start"]);
         expect(h.stops).toHaveLength(1);
     });
 
@@ -114,7 +183,7 @@ describe("start", () => {
         const h = fakeDeps();
         h.engine.runReport = { startedAt: "s", finishedAt: "f", targets: [makeRunReport()] };
         expect(await main(["start", "--force"], h.deps)).toBe(0);
-        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "start"]);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "status", "start"]);
         expect(h.engine.calls[1]).toEqual({ method: "run", options: { force: true } });
         expect(h.out).toEqual([
             h.out[0],
@@ -131,7 +200,7 @@ describe("start", () => {
         const h = fakeDeps();
         h.engine.runFailure = new Error("destination lock held");
         expect(await main(["start", "--force"], h.deps)).toBe(0);
-        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "start"]);
+        expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "status", "start"]);
         expect(h.err).toEqual(["Initial --force pass failed: destination lock held"]);
     });
 
@@ -164,6 +233,62 @@ describe("list", () => {
         expect(h.out).toEqual(["No snapshots yet. Create the first one with: backupkit run"]);
     });
 
+    // The table answers everything except the question a person opens `status`
+    // to ask. `failed 9` and a next-due six hours out said something was wrong,
+    // how badly, and nothing about WHAT - so the only way to find out was to go
+    // and read the log.
+    it("explains WHY a target is failing, under the table", async () => {
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            {
+                target: "web",
+                lastSnapshot: null,
+                nextDueAt: "2026-08-22T22:09:15.000Z",
+                lastResult: "failed",
+                consecutiveFailures: 9,
+                lockHeld: false,
+                lastError: "the destination filesystem is FULL (rsync exit 11)",
+                lastErrorAt: "2026-08-22T16:09:15.000Z",
+            },
+            {
+                target: "db",
+                lastSnapshot: "2026-08-22T030000Z",
+                nextDueAt: "2026-08-23T03:00:00.000Z",
+                lastResult: "success",
+                consecutiveFailures: 0,
+                lockHeld: false,
+                lastError: null,
+                lastErrorAt: null,
+            },
+        ];
+        expect(await main(["status"], h.deps)).toBe(0);
+        const out = h.out.join("\n");
+        expect(out).toContain("web last failed at 2026-08-22T16:09:15Z (9 times in a row):");
+        expect(out).toContain("the destination filesystem is FULL (rsync exit 11)");
+        // The way out is in the message, not in the docs.
+        expect(out).toContain("backupkit run --force web");
+        // A healthy target gets no block - the section is for what needs doing.
+        expect(out).not.toContain("db last failed");
+    });
+
+    it("says nothing extra when every target is healthy", async () => {
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            {
+                target: "web",
+                lastSnapshot: "2026-08-22T030000Z",
+                nextDueAt: "2026-08-23T03:00:00.000Z",
+                lastResult: "success",
+                consecutiveFailures: 0,
+                lockHeld: false,
+                lastError: null,
+                lastErrorAt: null,
+            },
+        ];
+        expect(await main(["status"], h.deps)).toBe(0);
+        expect(h.out.filter((line) => line.trim() !== "")).toHaveLength(2);
+    });
+
     it("emits one JSON document with --json", async () => {
         const h = fakeDeps();
         h.engine.snapshots = [{ target: "web", name: "2026-08-10T031500Z", createdAt: new Date("2026-08-10T03:15:00Z") }];
@@ -185,8 +310,10 @@ describe("status", () => {
                 lastResult: "success",
                 consecutiveFailures: 0,
                 lockHeld: false,
+                lastError: null,
+                lastErrorAt: null,
             },
-            { target: "db", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 3, lockHeld: true },
+            { target: "db", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 3, lockHeld: true, lastError: null, lastErrorAt: null },
         ];
         expect(await main(["status"], h.deps)).toBe(0);
         expect(h.out[0]).toMatch(/^TARGET\s+LAST SNAPSHOT\s+NEXT DUE\s+LAST RESULT\s+FAILS\s+LOCK$/);
@@ -199,7 +326,7 @@ describe("status", () => {
     it("emits one JSON document with --json", async () => {
         const h = fakeDeps();
         h.engine.statusRows = [
-            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false },
+            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false, lastError: null, lastErrorAt: null },
         ];
         expect(await main(["status", "--json"], h.deps)).toBe(0);
         expect(JSON.parse(h.out.join("\n"))).toEqual(h.engine.statusRows);

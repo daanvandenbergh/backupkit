@@ -49,7 +49,9 @@ import type {
     PruneReport,
     RemoteCheck,
     RestoreReport,
+    RunReason,
     RunReport,
+    RunStatus,
     TargetPruneReport,
     TargetRunReport,
     TargetStatus,
@@ -646,6 +648,61 @@ export class Backupkit {
         return this.config.targets.filter((t) => wanted.has(t.name));
     }
 
+    /**
+     * Persist a report for a run that produced none of its own and feed the
+     * backoff tracker - the ONE owner of that write, called by the scheduler
+     * tick (its due-check and unexpected-throw paths) and by `runPass`'s due
+     * check. Every path that decides "this target did not run, and that is the
+     * target's fault" routes through here, because a target that silently never
+     * runs is the failure mode `status()` exists to make impossible.
+     *
+     * A failing state dir is logged and swallowed rather than thrown: it must
+     * never end the daemon loop, and it must never turn one target's bad due
+     * check into an aborted one-shot pass. The backoff is left untouched when
+     * the write fails - the two must agree, and the report is the record.
+     */
+    private async recordOutcome(
+        target: ResolvedTarget,
+        status: RunStatus,
+        reason: RunReason,
+        error: string,
+    ): Promise<void> {
+        const report = this.syntheticReport(target, status, reason, sanitize(error));
+        try {
+            await this.ensureBackoffState(target);
+            await writeTargetReport(this.config.stateDir, report);
+        } catch (writeError) {
+            this.log.error(
+                "the failure above could not be written to the state directory, so backupkit status will not show it",
+                { target: target.name, error: describeError(writeError) },
+            );
+            return;
+        }
+        this.backoff.record(target.name, report.status, new Date(report.finishedAt));
+    }
+
+    /**
+     * Record a due check that threw as a FAILED RUN - the `lastFulfilledAt`
+     * listing is an ssh round-trip for a push target, so a revoked key, a
+     * changed host key or a renamed jail script all land here rather than in
+     * the pipeline.
+     *
+     * The level follows the CAUSE, the same rule every other failure site in
+     * this package uses: a dropped link is a warning the next attempt may fix,
+     * a permanent failure is an error that will still be there tomorrow.
+     */
+    private async recordDueCheckFailure(target: ResolvedTarget, error: unknown): Promise<void> {
+        const message = describeError(error);
+        const transient = isTransientFailure(error);
+        this.log[transient ? "warn" : "error"](
+            transient
+                ? "could not reach the backup server for the due check - recorded as failed, carrying on with the other targets"
+                : "could not list snapshots for the due check - target run recorded as failed",
+            { target: target.name, error: message },
+        );
+        await this.recordOutcome(target, "failed", "due-check-failed", message);
+    }
+
     /** Rehydrate one target's backoff state from its persisted reports (once per instance). */
     private async ensureBackoffState(target: ResolvedTarget): Promise<void> {
         if (this.rehydrated.has(target.name)) {
@@ -666,7 +723,7 @@ export class Backupkit {
     private syntheticReport(
         target: ResolvedTarget,
         status: TargetRunReport["status"],
-        reason: string,
+        reason: RunReason,
         error: string,
     ): TargetRunReport {
         const start = this.deps.now();
@@ -960,7 +1017,23 @@ export class Backupkit {
                     });
                     continue;
                 }
-                if (!isDue(target.schedule, await this.lastFulfilledAt(target), now)) {
+                // A failed due check is a FAILED RUN, not a quiet skip, and it
+                // must not unwind the pass - exactly the contract the scheduler
+                // tick already keeps on this same sink. For a push target this
+                // listing is an ssh round-trip, so every persistent condition
+                // (archive host down, key revoked, jail script renamed) lands
+                // here; letting it escape wrote NO report for this target OR ANY
+                // LATER ONE, so `status` reported the last success forever with 0
+                // failures and no backoff while nothing ran - the same silent
+                // failure the `lock-held` catch below was already fixed for.
+                let newest: Date | null;
+                try {
+                    newest = await this.lastFulfilledAt(target);
+                } catch (error) {
+                    await this.recordDueCheckFailure(target, error);
+                    continue;
+                }
+                if (!isDue(target.schedule, newest, now)) {
                     continue;
                 }
             }
@@ -1019,12 +1092,7 @@ export class Backupkit {
             lastFulfilledAt: (target) => this.lastFulfilledAt(target),
             runTarget: (target) => this.runOne(target, { signal }),
             reachable: (target) => this.reachTarget(target),
-            recordOutcome: async (target, status, reason, error) => {
-                const report = this.syntheticReport(target, status, reason, sanitize(error));
-                await this.ensureBackoffState(target);
-                await writeTargetReport(this.config.stateDir, report);
-                this.backoff.record(target.name, report.status, new Date(report.finishedAt));
-            },
+            recordOutcome: (target, status, reason, error) => this.recordOutcome(target, status, reason, error),
         });
         this.startPromise = this.scheduler.start().finally(() => {
             this.scheduler = null;
@@ -1091,6 +1159,8 @@ export class Backupkit {
                 lastResult: derived.lastResult,
                 consecutiveFailures: derived.consecutiveFailures,
                 lockHeld,
+                lastError: derived.lastError,
+                lastErrorAt: derived.lastErrorAt === null ? null : derived.lastErrorAt.toISOString(),
             });
         }
         return rows;

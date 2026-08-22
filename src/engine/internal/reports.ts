@@ -252,6 +252,18 @@ export interface DerivedBackoff {
      * also sees snapshots this host did not create), so this is unused there.
      */
     lastSuccessAt: Date | null;
+    /**
+     * The `error` of the newest FAILED report, or null when there is none.
+     *
+     * The newest FAILED one specifically, not the newest of any kind: a
+     * `skipped` run recorded after a failure must not hide the failure that is
+     * still driving the backoff and still the reason nothing is being backed
+     * up. `status` shows this, which is the difference between "failed 9" and
+     * knowing what to go and fix.
+     */
+    lastError: string | null;
+    /** `finishedAt` of that failed report, or null. */
+    lastErrorAt: Date | null;
 }
 
 /**
@@ -262,14 +274,19 @@ export interface DerivedBackoff {
 export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBackoff {
     let consecutiveFailures = 0;
     let lastFailedAt: Date | null = null;
+    let lastError: string | null = null;
     let lastSnapshot: string | null = null;
     let lastSuccessAt: Date | null = null;
     for (const report of reports) {
         if (report.status === "failed") {
             consecutiveFailures += 1;
-            if (lastFailedAt === null) {
+            if (lastError === null) {
                 const finished = new Date(report.finishedAt);
                 lastFailedAt = Number.isNaN(finished.getTime()) ? null : finished;
+                // A failed report with no message still marks the newest
+                // failure, so the reason code stands in - never leave the
+                // scan looking for an older, less relevant failure.
+                lastError = report.error ?? report.reason ?? "no reason recorded";
             }
             continue;
         }
@@ -294,5 +311,7 @@ export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBacko
         lastResult: reports[0]?.status ?? null,
         lastSnapshot,
         lastSuccessAt,
+        lastError,
+        lastErrorAt: lastError === null ? null : lastFailedAt,
     };
 }

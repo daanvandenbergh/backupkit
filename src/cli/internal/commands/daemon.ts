@@ -9,8 +9,9 @@
  * human's own session, where a key CAN be unlocked.
  */
 
+import { describeError } from "../../../shared/errors.js";
 import type { CliDeps } from "../context.js";
-import { count, parseFlags } from "../context.js";
+import { count, parseFlags, schedulePreview } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
 
 /** The `backupkit daemon` command entry. */
@@ -29,6 +30,16 @@ export async function daemonCommand(argv: string[], deps: CliDeps): Promise<numb
     // silently during preflight.
     const enabled = config.targets.filter((target) => target.enabled).length;
     deps.stdout(`Daemon started - scheduling ${enabled} of ${count(config.targets.length, "configured target")}.`);
+    // And what it will actually do, for the same reason: a journal that goes
+    // quiet for six hours should say up front that six hours of quiet is the
+    // plan. Never fatal - the loop is the point of this command.
+    try {
+        for (const line of await schedulePreview(engine)) {
+            deps.stdout(line);
+        }
+    } catch (error) {
+        deps.stderr(`(could not read the current schedule: ${describeError(error)})`);
+    }
     await engine.start();
     deps.stdout("Daemon stopped cleanly.");
     return 0;

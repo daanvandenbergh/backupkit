@@ -43,8 +43,8 @@ export interface TargetRunReport {
     snapshot: string | null;
     /** Outcome status. */
     status: RunStatus;
-    /** Machine-readable skip/failure reason ("window", "disk-low", "clock-skew", "verify-failed", "aborted", "dry-run", "remote-unavailable"), or null. */
-    reason: string | null;
+    /** Machine-readable skip/failure reason, or null when the run needs none. */
+    reason: RunReason | null;
     /** ISO start time of the run. */
     startedAt: string;
     /** ISO finish time of the run. */
@@ -116,6 +116,44 @@ export interface RunReport {
     /** One report per target that entered the pipeline, in run order. */
     targets: TargetRunReport[];
 }
+
+/**
+ * Every machine-readable skip/failure reason a run report can carry - CLOSED,
+ * so a new one cannot be invented without also being explained.
+ *
+ * The list drifted three ways at once while it was a bare `string`: the code
+ * emitted `due-check-failed` and `run-threw`, the CLI's plain-English map knew
+ * neither (so `backupkit status` printed the raw code at a person), and the
+ * docstring here listed seven of the eleven. `REASON_TEXT` in the CLI is typed
+ * `Record<RunReason, string>`, which makes the same drift a `npm run
+ * typecheck` failure instead of a bad line in someone's terminal.
+ *
+ * Reports on disk are older than this union, so the CLI still falls back to
+ * printing an unrecognised code verbatim rather than dropping it.
+ */
+export type RunReason =
+    /** Already backed up in this schedule window. */
+    | "window"
+    /** The free-space guard refused the run. */
+    | "disk-low"
+    /** This host's clock is behind the newest snapshot. */
+    | "clock-skew"
+    /** The verify pass found differences. */
+    | "verify-failed"
+    /** Stopped by a shutdown signal. */
+    | "aborted"
+    /** A dry run - nothing was written. */
+    | "dry-run"
+    /** The backup server's key could not be loaded, or its rsync could not be checked. */
+    | "remote-unavailable"
+    /** The source holds far fewer files than at the last run. */
+    | "content-collapse"
+    /** Another backupkit run holds this target's destination lock. */
+    | "lock-held"
+    /** The due check could not list the archive, so the run never started. */
+    | "due-check-failed"
+    /** An unexpected error inside backupkit ended the run. */
+    | "run-threw";
 
 /** One target's prune outcome. */
 export interface TargetPruneReport {
@@ -235,4 +273,17 @@ export interface TargetStatus {
     consecutiveFailures: number;
     /** True when the destination-root lock is currently held (local stores only; remote locks report false). */
     lockHeld: boolean;
+    /**
+     * The explained error from the newest FAILED run report, or null when the
+     * target has no failure on record.
+     *
+     * Without it the status table said `failed 9` and stopped - the one thing
+     * a person checking on their backups needs is WHY, and they had to go and
+     * find the log for it. Taken from the newest failed report specifically,
+     * not the newest report: a `skipped` run after a failure must not hide the
+     * failure that is still driving the backoff.
+     */
+    lastError: string | null;
+    /** ISO time that failure finished, or null when there is none. */
+    lastErrorAt: string | null;
 }
