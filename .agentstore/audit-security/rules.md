@@ -191,9 +191,22 @@ even when nothing visibly fails.
     death rather than by a 60 s ssh timeout times its attempts, or by a backoff of up to the
     300 s transfer cap. Without this a `systemctl stop` against an unresponsive archive host
     overruns `TimeoutStopSec=30` and is SIGKILLed mid-lock, leaving a remote lock only the 24 h
-    TTL clears. *graduated: `src/shared/tests/retry.test.ts` ("an abort mid-backoff wakes the
+    TTL clears.
+    "EVERY child" is the whole rule, and the two that escaped it were the engine's OWN remote
+    commands - `totalBytesFor`'s `df` and `remoteRsyncFor`'s version probe - which called
+    `runRemote` directly instead of going through the store, and so inherited neither the signal
+    nor invariant 33's truncation refusal. The `df` one ran INSIDE the lock with `minFree` at its
+    "5%" default, i.e. on every snapshot run: ~186 s (60 s timeout x 3 control attempts) of
+    unkillable child against `TimeoutStopSec=30`, SIGKILL mid-lock, target dead for 24 h while
+    `status` reports `lockHeld: false`. The fix is structural rather than another threaded
+    argument: an archive-filesystem fact belongs on `SnapshotStore` (`totalBytes()` beside
+    `freeBytes()`), because a query that lives outside the interface is a query the chokepoint
+    cannot guard. A NEW engine-side `runRemote` call site re-opens this.
+    *graduated: `src/shared/tests/retry.test.ts` ("an abort mid-backoff wakes the
     sleep immediately"), `src/snapshots/tests/remote-store.test.ts` ("aborts an in-flight store
-    command when the shutdown signal fires").*
+    command when the shutdown signal fires"), `src/engine/tests/target-runner.test.ts` ("the disk
+    guard reads the archive's total size THROUGH the store, not around it") - expect: the store
+    call log carries `totalBytes` and it sits after `lock`.*
 23. The jail's `rm -rf` branch uses a NARROWER path policy than every other verb. `mkdir`, `find`
     and `df` legitimately name the archive ROOT itself (the store's `ensureRoot`, listing and
     `df` all target it) and `mv`/`find` legitimately name a complete snapshot, so
@@ -258,16 +271,25 @@ even when nothing visibly fails.
     missed trip is permanent. `backupkit prune` is the operator's override once a human has
     confirmed the shrink is real. *graduated: `src/engine/tests/target-runner.test.ts` (collapse
     -> no removes + an error log; a shrink inside the threshold still prunes).*
-**THE SIBLING-PATH RULE (read this before adding any guard).** Four separate Critical/High bugs in
+**THE SIBLING-PATH RULE (read this before adding any guard).** Seven separate Critical/High bugs in
 this repo have had the identical shape: a guard was added to the path where the bug was noticed, and
 its sibling - a second call site reaching the same sink - was left unguarded. `listSnapshots`/`prune`
 skipped the permission preflight that `run`/`restore` had (invariant 8); the scheduler's generic
 `runTarget` catch wrote no run report while the due-check catch 30 lines above did (invariant 19);
 the run path's retention had no future-snapshot split while `prune`'s had one (invariant 32); and
 `rm -rf` was narrowed while `mv` and `rsync --server` still reached the same deletion (invariant 30).
+Three more, found together by a cross-module seam audit and fixed in one pass: the scheduler tick
+recorded a failed run when the due check threw while `runPass` let it unwind the WHOLE one-shot pass,
+writing no report for that target or any later one (invariant 19's shape, on the CLI path); `prune`
+listed the archive twice - once to count, once to plan - while the run pipeline pinned one listing
+(invariant 41); and the engine's own `df`/version-probe reached `runRemote` outside the store, so the
+shutdown signal and the truncation refusal stopped at the store boundary (invariants 22, 33).
 So: **when you add a guard, enumerate every caller of the sink and assert the guard on ALL of them in
 the same change** - the enumeration, not the fix, is the work. A guard on one of N paths is not a
 partial fix, it is a false sense of security plus a test that reads as green.
+Two of those three were invisible to any single-file read: the defect was an ABSENCE across a set of
+call sites, so the file you are looking at is correct and the bug is in the one you are not. Census
+the sink, not the file.
 
 29. The jail's rsync option handling is an ALLOWLIST, and its path operand is pinned to the ONE
     shape the client writes. A deny list with a `--*` "benign flag" catch-all cannot be complete
@@ -352,8 +374,12 @@ partial fix, it is a false sense of security plus a test that reads as green.
     stale name), points `--link-dest` at a months-old base, and makes invariant 7's newest-snapshot
     floor protect the WRONG snapshot. A jailed client can force it with ~15 000 legal `mkdir`s.
     Adding a cap without a reader converts a crash into silent data corruption, which is worse.
+    The guard sits in the store's single `run()` chokepoint, which is exactly why the engine's own
+    `df` (invariant 22) read no flag at all: it never passed through it. A capped answer keeps the
+    HEAD, so a crafted head still parses - a remote padding df past the cap chose the percent
+    `minFree` floor's filesystem size. Both df columns are read by ONE parser now.
     *graduated: `src/snapshots/tests/remote-store.test.ts` ("refuses a truncated listing", "refuses
-    truncated df output too") - the guard sits in the store's single `run()` chokepoint.*
+    truncated df output too", "refuses truncated df output for totalBytes as well").*
 34. A parse of child output takes the LAST match, not the first. rsync relays messages generated by
     the REMOTE onto the local client's stdout, ahead of the client's own `--info=stats2` block, so
     `RegExp.exec` (first match) let a hostile source dictate `totalFiles` and
@@ -457,6 +483,16 @@ partial fix, it is a false sense of security plus a test that reads as green.
     snapshot older than the report window is unattested exactly like a plant. `unattestedBelow` is
     therefore offered as best-effort context and labelled as such - nothing in the code acts on it,
     because acting on it would delete real history on any archive older than 50 runs.
+    The two callers must also each plan over the listing they COUNTED. `prune` did not: it listed
+    once before the lock for the guard and again inside it for the plan, and `ensureRoot` plus the
+    lock mkdir sit in that gap - two ssh round-trips on a push target, chosen by the planter. Names
+    appearing there were never counted and were still planned over, which is the whole attack. The
+    read-only `--dry-run` preview, meanwhile, planned over the counted listing and showed a clean
+    plan - so the review step exonerated the very run that would delete. One listing, inside the
+    lock, feeding both.
+    *graduated: `src/engine/tests/backupkit.test.ts` ("plans over the listing it COUNTED: a name
+    planted while the lock is taken still trips the guard") - expect: `executed` false and every
+    genuine snapshot still on disk.*
     *graduated: `src/engine/tests/target-runner.test.ts` ("PAST-dated planted names trip the
     insertion guard...", plus the shrink/own-snapshot/no-baseline controls) and
     `src/engine/tests/backupkit.test.ts` ("prune: the past-dated insertion guard", 6 rows incl.
