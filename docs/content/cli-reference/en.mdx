@@ -380,7 +380,7 @@ The rest of that ladder repeats the same sentence with a different number, so it
 
 ## Timestamps
 
-Every timestamp you read is `YYYY-MM-DDTHH:mm:ssZ` in **UTC**, whole seconds - the `CREATED (UTC)` and `NEXT DUE` columns, the lock details. The trailing `Z` is the ISO-8601 designator for UTC, not decoration: without it the same string would mean *local* time, so a reader in another timezone would misread every backup by their offset. backupkit never prints a host-local time, on purpose - an archive is often read from a different machine than it was written on.
+Every timestamp you read is `YYYY-MM-DDTHH:mm:ssZ` in **UTC**, whole seconds - the failure block under `backupkit status`, the lock details, the snapshot names. Where a table would only be restating one of those, it shows the elapsed time instead: `backupkit list` has an `AGE` column rather than a second copy of the creation time already spelled out in the snapshot's name, and `status` reads `2d 23h ago` / `in 5h 59m` for the same reason. The trailing `Z` is the ISO-8601 designator for UTC, not decoration: without it the same string would mean *local* time, so a reader in another timezone would misread every backup by their offset. backupkit never prints a host-local time, on purpose - an archive is often read from a different machine than it was written on.
 
 Three deliberate exceptions:
 

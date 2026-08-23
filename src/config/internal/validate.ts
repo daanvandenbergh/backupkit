@@ -721,11 +721,10 @@ class Validator {
             this.fail(
                 jailNode ?? obj,
                 `${path}.jail`,
-                'a "mirror" push cannot be jailed: the forced command pins every transfer to ' +
-                    "<destination>/<snapshot>.partial, which is what keeps its permitted --delete " +
-                    "confined - a mirror writes the destination itself. Set \"jail\": false to accept " +
-                    "that this key has whatever access the server grants it, or use \"mode\": \"snapshot\", " +
-                    "or mirror in the other direction with \"direction\": \"pull\"",
+                'a "mirror" push cannot be jailed - the jail pins every transfer under ' +
+                    "<destination>/<snapshot>.partial, and a mirror writes the destination itself. " +
+                    'Fix: use "mode": "snapshot", or mirror the other way with "direction": "pull", or ' +
+                    'set "jail": false to accept that this key has whatever access the server grants it',
             );
         }
         const enabledNode = obj.entries.get("enabled");

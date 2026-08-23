@@ -18,7 +18,7 @@
 import { readFile } from "node:fs/promises";
 
 import { exec } from "../../exec/exec.js";
-import { LockHeldError } from "../../shared/errors.js";
+import { describeError, LockHeldError } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 
 /** Meta recorded inside the lock directory by the holder. */
@@ -218,7 +218,7 @@ export async function withLockScope<T>(backend: LockBackend, log: Logger, fn: ()
                 throw releaseError;
             }
             log.error(`failed to release lock ${backend.displayPath ?? backend.lockPath} after an error`, {
-                error: String(releaseError),
+                error: describeError(releaseError),
             });
         }
     }

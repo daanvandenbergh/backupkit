@@ -247,8 +247,10 @@ describe("list", () => {
             { target: "database-long-name", name: "2026-08-09T031500Z", createdAt: new Date("2026-08-09T03:15:00Z") },
         ];
         expect(await main(["list"], h.deps)).toBe(0);
-        expect(h.out[0]).toMatch(/^TARGET\s+SNAPSHOT\s+CREATED \(UTC\)$/);
+        expect(h.out[0]).toMatch(/^TARGET\s+SNAPSHOT\s+AGE$/);
         expect(h.out[1]).toContain("web");
+        // AGE, not a second rendering of the timestamp already in the name.
+        expect(h.out.join("\n")).not.toContain("2026-08-10T03:15:00Z");
         // Columns align: the snapshot column starts at the same index in every row.
         const start = h.out[1].indexOf("2026-08-10T031500Z");
         expect(h.out[2].indexOf("2026-08-09T031500Z")).toBe(start);
@@ -516,10 +518,11 @@ describe("prune", () => {
             options: { targets: undefined, dryRun: true, force: false },
         });
         expect(h.out).toEqual([
-            "Target web:",
+            "web:",
             "    keep   2026-08-10T031500Z  (newest, last)",
             "    prune  2026-08-01T031500Z",
-            "Dry run - nothing was deleted. Drop --dry-run to apply this plan.",
+            // A closing line, like every other verb - the per-target rows scroll.
+            "Dry run - nothing was deleted. 1 snapshot would be removed; drop --dry-run to apply this plan.",
         ]);
     });
 

@@ -88,9 +88,9 @@ function normalizeConfigPath(value: string, home: string): string {
     }
     if (/[\s'"]/.test(value)) {
         throw new ConfigError(
-            "config file path may not contain whitespace or quote characters - its directory becomes the " +
-                "default known_hosts location, which rsync word-splits out of its -e command string; " +
-                "move the config to a path without spaces or quotes",
+            "config file path may not contain whitespace or quote characters. " +
+                "Fix: move the config to a path without spaces or quotes - its directory becomes the default " +
+                "known_hosts location, which rsync word-splits out of its -e command string",
         );
     }
     return resolve(value);

@@ -294,8 +294,9 @@ export class RemoteSnapshotStore implements SnapshotStore {
         }
         if (result.truncated) {
             throw new SnapshotStoreError(
-                `remote ${what} output was truncated at the capture cap - refusing to act on a partial result for ${this.root}; ` +
-                    "reduce the number of entries in the archive root (a snapshot count this high is not normal - check for planted directories)",
+                `remote ${what} output was truncated at the capture cap, so ${this.root} would be judged on a ` +
+                    "partial result. Fix: reduce the number of entries in the archive root - a snapshot count this " +
+                    "high is not normal, so check for planted directories first",
             );
         }
         return result;

@@ -194,11 +194,15 @@ export function parseFlags(argv: string[], flags: Record<string, FlagSpec>, allo
         const { values, positionals } = parseArgs({ args: argv, options, allowPositionals, strict: true });
         return { values: values as Record<string, string | boolean | undefined>, positionals };
     } catch (error) {
+        // parseArgs capitalizes ("Unknown option '--nope'"), which reads as a
+        // second sentence start right after this CLI's own `Error: ` prefix.
+        // Every other message backupkit prints begins lower-case.
         const first = describeError(error).split(". ")[0];
+        const lowered = first.charAt(0).toLowerCase() + first.slice(1);
         const valid = Object.keys(options)
             .map((name) => `--${name}`)
             .join(", ");
-        throw new UsageError(`${first} (valid flags: ${valid})`);
+        throw new UsageError(`${lowered} (valid flags: ${valid})`);
     }
 }
 

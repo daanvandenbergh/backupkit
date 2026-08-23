@@ -1265,8 +1265,8 @@ export class Backupkit {
         }
         if (target.mode === "mirror") {
             throw new RestoreError(
-                `target ${target.name} is a mirror, not a snapshot archive - it holds one live copy and no history, ` +
-                    `so there is nothing to restore FROM a point in time. Copy from ${sanitize(target.destination)} directly.`,
+                `target ${target.name} is a mirror, so it has no point in time to restore from - it holds one ` +
+                    `live copy and no history. Fix: copy from ${sanitize(target.destination)} directly.`,
             );
         }
         await this.preflight();
@@ -1623,10 +1623,10 @@ export class Backupkit {
                 continue;
             }
             errors.push(
-                `target ${target.name}: snapshots found at ${legacy}, one level below its destination ${target.dst.path}. ` +
-                    "backupkit 2.0 no longer appends the target name - a destination IS the archive root - so this target " +
-                    `would start a second, empty archive at ${target.dst.path} and leave that history orphaned. ` +
-                    `Fix the config, not the disk: set "destination": "${legacy}".`,
+                `target ${target.name}: snapshots found one level below its destination, at ${legacy}, so this ` +
+                    `target would start a second empty archive at ${target.dst.path} and orphan that history ` +
+                    "(backupkit 2.0 no longer appends the target name - a destination IS the archive root). " +
+                    `Fix the config, not the disk: set "destination": "${legacy}"`,
             );
         }
         return errors;

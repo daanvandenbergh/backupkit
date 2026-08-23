@@ -846,7 +846,7 @@ describe("Backupkit", () => {
             const report = await fixture.kit.check();
 
             expect(report.ok).toBe(false);
-            const found = report.errors.find((error) => error.includes("snapshots found at"));
+            const found = report.errors.find((error) => error.includes("snapshots found one level below"));
             expect(found).toContain(join(fixture.destination, "web"));
             expect(found).toContain(`"destination": "${join(fixture.destination, "web")}"`);
         });
