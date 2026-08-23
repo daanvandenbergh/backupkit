@@ -382,7 +382,7 @@ describe("runTarget pipeline", () => {
             // Promoted (the data is already transferred), but nothing pruned.
             expect(store.names).toContain(SNAP);
             expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
-            expect(lines.some((line) => line.includes("ERROR") && line.includes("content collapse"))).toBe(true);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("where the previous run had"))).toBe(true);
         });
 
         it("a shrink inside the threshold prunes normally and reports no collapse", async () => {
@@ -428,7 +428,7 @@ describe("runTarget pipeline", () => {
 
             expect(report.contentCollapse).toEqual({ previousFiles: 1000, files: null });
             expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
-            expect(lines.some((line) => line.includes("ERROR") && line.includes("could not be measured"))).toBe(true);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("could not measure"))).toBe(true);
         });
 
         it("PAST-dated planted names trip the insertion guard, so retention never runs on a poisoned listing", async () => {
@@ -464,7 +464,7 @@ describe("runTarget pipeline", () => {
             // Promoted, but nothing pruned - the real history survives.
             expect(store.names).toContain(SNAP);
             expect(store.calls.filter((call) => call.startsWith("remove:"))).toEqual([]);
-            expect(lines.some((line) => line.includes("ERROR") && line.includes("appeared BELOW"))).toBe(true);
+            expect(lines.some((line) => line.includes("ERROR") && line.includes("appeared below"))).toBe(true);
         });
 
         it("records how much history existed, so the next run has a baseline to count against", async () => {
@@ -666,6 +666,6 @@ describe("runTarget pipeline", () => {
         const { log, lines } = captureLogger();
         const report = await runTarget(makeTarget(), makeDeps(store, { log }));
         expect(report.status).toBe("success");
-        expect(lines.some((line) => line.includes("picking up where the last, unfinished run left off"))).toBe(true);
+        expect(lines.some((line) => line.includes("resuming the last unfinished run"))).toBe(true);
     });
 });

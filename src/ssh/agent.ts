@@ -117,7 +117,7 @@ export async function ensureAgent(deps: AgentDeps): Promise<string> {
     if (spawned.exitCode !== 0) {
         throw new SshError(`ssh-agent -a ${sock} failed (exit ${spawned.exitCode}): ${toolTail(spawned.stderr)}`);
     }
-    deps.log.info("started persistent ssh-agent", { socket: sock });
+    deps.log.info(`started an ssh-agent at ${sanitize(sock)}`, { socket: sock });
     return sock;
 }
 
@@ -272,7 +272,7 @@ async function sshAdd(key: string, env: Record<string, string>, deps: AgentDeps)
     if (result.exitCode !== 0) {
         throw new SshError(`ssh-add ${key} failed (exit ${result.exitCode}): ${toolTail(result.stderr)}`);
     }
-    deps.log.info("loaded key into agent", { key });
+    deps.log.info(`loaded key ${sanitize(key)} into the agent`, { key });
 }
 
 /**

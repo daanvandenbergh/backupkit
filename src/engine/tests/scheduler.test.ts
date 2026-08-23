@@ -339,7 +339,7 @@ describe("Scheduler loop (fake timers)", () => {
         });
         const loop = scheduler.start();
         await vi.advanceTimersByTimeAsync(0);
-        expect(lines.some((line) => line.includes("already working on this target"))).toBe(true);
+        expect(lines.some((line) => line.includes("another backupkit run has this target"))).toBe(true);
         scheduler.stop();
         await loop;
     });
@@ -453,7 +453,7 @@ describe("Scheduler loop (fake timers)", () => {
         expect(recorded[0].status).toBe("failed");
         // A permanent cause keeps its ERROR level - this is the line that must
         // still stand out once the network noise is gone.
-        const failure = lines.filter((line) => line.includes("due check"));
+        const failure = lines.filter((line) => line.includes("could not list snapshots"));
         expect(failure).toHaveLength(1);
         expect(failure[0]).toContain("ERROR");
         scheduler.stop();

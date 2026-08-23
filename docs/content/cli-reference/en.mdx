@@ -337,14 +337,28 @@ Everything else is plain text, aligned with padding - no table library and no AN
 
 The same log event is written twice, in two shapes, for the two people who read it.
 
-**On your terminal** it is one short sentence, and a failure that has a known fix ends with the command:
+**On your terminal** every line has one shape:
+
+```
+<target>: [Warning: |Error: ]<what happened>[ - <why>][. Fix: <what to do>]
+```
+
+The **target leads**, so several targets running at once stay readable as a flush-left column. The level appears only when it is a warning or an error, so a healthy run is a plain list of sentences. The cause follows the problem, and any advice ends the line after `Fix:` - the one place to look when you want the command:
+
+```
+photos: backing up /srv/data -> snapshot 2026-08-23T083000Z
+photos: backup finished in 3s - saved as snapshot 2026-08-23T083000Z
+photos: pruned snapshot 2026-08-01T000000Z
+docs: Warning: backup server not reachable, skipping until it is - no answer - the host is offline, or this machine cannot reach it
+docs: Error: this snapshot has 3 files where the previous run had 40000 - retention skipped. Fix: verify the source, then run `backupkit prune` once you are satisfied the shrink is real
+```
+
+No timestamp - you are watching it happen. **And no `key=value` tail, ever.** A fact you need is a fact the sentence says, in words and in units you read: `pruned snapshot 2026-08-01T000000Z`, not `pruned snapshot` followed by `snapshot=`; `needs 12 GiB plus a 2 GiB floor, only 3.1 GiB free`, not five raw byte counts. `backupkit run` prints its own `FAILED` line per target, so the engine's matching error line is kept off the console entirely - one event, one line:
 
 ```
 persistance@archive: FAILED - the SSH key needs a passphrase and the ssh-agent is empty. Fix: ssh-add /keys/archive_ed25519
 Done. 1 of 1 target failed - see above, or run: backupkit logs
 ```
-
-No timestamp (you are watching it happen), no target name repeated in a `target=` field (it is already the first word of the line), no `error="..."` field whose quoting you would have to unescape by eye. `backupkit run` prints its own `FAILED` line per target, so the engine's matching error line is kept off the console entirely - one event, one line.
 
 **In `logging.file` and in journald** the same event keeps the full machine format, unchanged and complete:
 
@@ -352,7 +366,7 @@ No timestamp (you are watching it happen), no target name repeated in a `target=
 2026-08-10T03:15:00.123Z ERROR [target=persistance@archive] cannot use this backup server remote=archive error="the SSH key needs a passphrase and the ssh-agent is empty. Fix: ssh-add /keys/archive_ed25519"
 ```
 
-Timestamped, leveled, greppable, with every field intact - including the lines the console suppressed. `backupkit logs` reads this shape, and so does anything you point at the log file. `backupkit daemon` (the installed service) writes the machine format to its console too, because its console *is* the journal.
+Timestamped, leveled, greppable, with every field intact - `target=`, `remote=`, `snapshot=`, the raw byte counts, all of them, including on the lines the console suppressed. Nothing the terminal leaves out is lost; it is one event rendered for two readers. `backupkit logs` reads this shape, and so does anything you point at the log file. `backupkit daemon` (the installed service) writes the machine format to its console too, because its console *is* the journal.
 
 **Retries say it once.** When a remote operation hits a temporary problem, the first retry is a warning naming what is stalling, how far into the ladder it is, and why:
 

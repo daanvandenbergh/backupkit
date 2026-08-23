@@ -657,7 +657,7 @@ export class Backupkit {
             await writeTargetReport(this.config.stateDir, report);
         } catch (writeError) {
             this.log.error(
-                "the failure above could not be written to the state directory, so backupkit status will not show it",
+                "could not record this failure - backupkit status will not show it",
                 { target: target.name, error: describeError(writeError) },
             );
             return;
@@ -786,7 +786,7 @@ export class Backupkit {
         }
         const keyFailure = this.keyFailures.get(remote.name);
         if (keyFailure !== undefined) {
-            this.log.error("SSH key not loaded", {
+            this.log.error("cannot use this backup server", {
                 target: target.name,
                 remote: remote.name,
                 error: keyFailure,
@@ -1004,7 +1004,7 @@ export class Backupkit {
                 const until = this.backoff.untilFor(target.name);
                 const now = this.deps.now();
                 if (until !== null && now.getTime() < until.getTime()) {
-                    this.log.info("skipping for now - the last run failed, so backupkit is waiting before it tries again", {
+                    this.log.info(`skipped - waiting after the last failure, next try ${formatUtc(until)}`, {
                         target: target.name,
                         nextAttemptAt: formatUtc(until),
                     });
@@ -1039,7 +1039,7 @@ export class Backupkit {
                 // runOne has already persisted this target's skipped report, so
                 // `status` and the backoff history see it; nothing is pushed into
                 // `reports` because the rethrow below discards them anyway.
-                this.log.warn("another backupkit run is already working on this target - skipped it, carrying on with the rest", {
+                this.log.warn("skipped, another backupkit run has this target", {
                     target: target.name,
                     error: sanitize(error.message),
                 });
@@ -1071,7 +1071,7 @@ export class Backupkit {
             // Consumed here so a later start() is unaffected - the request
             // applies to the one startup it interrupted, nothing more.
             this.stopRequested = false;
-            this.log.info("stop requested during startup - not starting the scheduler");
+            this.log.info("stopped before the scheduler started");
             return;
         }
         this.abortController = new AbortController();
@@ -1465,7 +1465,7 @@ export class Backupkit {
                 for (const name of [...inner.prune].reverse()) {
                     try {
                         await store.remove(name);
-                        this.log.info("pruned snapshot", { target: target.name, snapshot: name });
+                        this.log.info(`pruned snapshot ${sanitize(name)}`, { target: target.name, snapshot: name });
                     } catch (error) {
                         errors.push(`${name}: ${describeError(error)}`);
                     }
@@ -1512,7 +1512,7 @@ export class Backupkit {
             return null;
         }
         const suspects = unattestedBelow(complete, reports, mark);
-        this.log.error("refusing to prune: snapshots appeared below the previous run's newest", {
+        this.log.error("not pruning - snapshots appeared below the previous run's newest", {
             target: target.name,
             previousNewest: sanitize(insertion.previousNewest),
             previousCount: insertion.previousCount,
@@ -1549,7 +1549,7 @@ export class Backupkit {
             // Nothing genuine to fall back on: the future-dated names may hold the
             // only copy of the data (a snapshot this host wrote while its clock was
             // wrong), so they are kept and shown as such, never pruned.
-            this.log.error("every snapshot of this target is dated in the future - keeping them; check this host's clock", {
+            this.log.error("every snapshot is dated in the future - keeping them all; check this host's clock", {
                 target: target.name,
                 snapshots: future.slice(0, 10).join(", "),
             });

@@ -277,14 +277,14 @@ export class Scheduler {
                     const transient = isTransientFailure(error);
                     this.deps.log[transient ? "warn" : "error"](
                         transient
-                            ? "could not reach the backup server for the due check - recorded as failed, will retry"
-                            : "could not list snapshots for the due check - target run recorded as failed",
+                            ? "could not reach the backup server - recorded as a failed run, will retry"
+                            : "could not list snapshots - recorded as a failed run",
                         { target: target.name, error: message },
                     );
                     // A failing state dir must never end the daemon loop.
                     await this.deps.recordOutcome(target, "failed", "due-check-failed", message).catch((writeError) => {
                         this.deps.log.error(
-                            "the failure above could not be written to the state directory, so backupkit status will not show it",
+                            "could not record this failure - backupkit status will not show it",
                             { target: target.name, error: describeError(writeError) },
                         );
                     });
@@ -319,7 +319,7 @@ export class Scheduler {
                 }
             } catch (error) {
                 if (isBackupkitError(error) && error.code === "lock-held") {
-                    this.deps.log.warn("another backupkit run is already working on this target - skipping it for now", {
+                    this.deps.log.warn("skipped, another backupkit run has this target", {
                         target: target.name,
                         error: error.message,
                     });
@@ -342,14 +342,14 @@ export class Scheduler {
                 const transient = isTransientFailure(error);
                 this.deps.log[transient ? "warn" : "error"](
                     transient
-                        ? "this target's run ended on a temporary problem - recorded as a failed run, the next attempt will try again"
-                        : "this target hit an unexpected error inside backupkit - recorded as a failed run",
+                        ? "run ended on a temporary problem - recorded as failed, will retry"
+                        : "unexpected error inside backupkit - recorded as a failed run",
                     { target: target.name, error: message },
                 );
                 // A failing state dir must never end the daemon loop.
                 await this.deps.recordOutcome(target, "failed", "run-threw", message).catch((writeError) => {
                     this.deps.log.error(
-                        "the failure above could not be written to the state directory, so backupkit status will not show it",
+                        "could not record this failure - backupkit status will not show it",
                         { target: target.name, error: describeError(writeError) },
                     );
                 });
@@ -381,7 +381,7 @@ export class Scheduler {
         if (!result.ok) {
             if (this.unreachable.get(target.name) !== result.detail) {
                 this.unreachable.set(target.name, result.detail);
-                this.deps.log.warn("backup server not reachable - skipping this target until it is", {
+                this.deps.log.warn("backup server not reachable, skipping until it is", {
                     target: target.name,
                     kind: result.failure ?? "unknown",
                     error: result.detail,
@@ -390,7 +390,7 @@ export class Scheduler {
             return false;
         }
         if (this.unreachable.delete(target.name)) {
-            this.deps.log.info("backup server is reachable again - resuming scheduled backups", {
+            this.deps.log.info("backup server is reachable again - resuming", {
                 target: target.name,
             });
         }

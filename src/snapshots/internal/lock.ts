@@ -144,7 +144,7 @@ async function acquire(backend: LockBackend, log: Logger): Promise<void> {
                 { pid: null, hostname: null },
             );
         }
-        log.warn(`removed stale lock ${where}`, { detail: inspection.detail });
+        log.warn(`removed the stale lock at ${where}`, { detail: inspection.detail });
     }
 }
 
@@ -218,7 +218,7 @@ export async function withLockScope<T>(backend: LockBackend, log: Logger, fn: ()
                 throw releaseError;
             }
             log.error(`failed to release lock ${backend.displayPath ?? backend.lockPath} after an error`, {
-                releaseError: String(releaseError),
+                error: String(releaseError),
             });
         }
     }

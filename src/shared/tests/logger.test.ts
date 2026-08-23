@@ -227,10 +227,24 @@ describe("Logger file sink", () => {
 });
 
 describe("Logger human console mode", () => {
-    it("drops the timestamp, the level noise, and the context bracket", () => {
+    it("leads with the TARGET and drops the timestamp, the level noise, and the context bracket", () => {
         const { logger, stdout } = testLogger({ human: true });
         logger.with({ target: "web1", run: "r1" }).info("backing up /srv");
-        expect(stdout.chunks).toEqual(["backing up /srv\n"]);
+        // The target is the one thing that makes a line findable when four
+        // targets are running - it leads, flush left, like the CLI's own rows.
+        expect(stdout.chunks).toEqual(["web1: backing up /srv\n"]);
+    });
+
+    it("no target in scope: no prefix, no empty colon", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.info("started persistent ssh-agent");
+        expect(stdout.chunks).toEqual(["started persistent ssh-agent\n"]);
+    });
+
+    it("a target FIELD wins over the sticky context - a scoped logger can log about another target", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.with({ target: "web1" }).info("pruned snapshot", { target: "db1" });
+        expect(stdout.chunks).toEqual(["db1: pruned snapshot\n"]);
     });
 
     it("prefixes warn and error so severity is visible at a glance", () => {
@@ -251,14 +265,26 @@ describe("Logger human console mode", () => {
         // passphrase. Fix: ssh-add /k/id_ed25519" - every embedded quote escaped
         // and the sentence buried behind two field tokens the reader already knows.
         expect(stderr.chunks).toEqual([
-            "Error: cannot use this backup server - the SSH key needs a passphrase. Fix: ssh-add /k/id_ed25519\n",
+            "web1: Error: cannot use this backup server - the SSH key needs a passphrase. Fix: ssh-add /k/id_ed25519\n",
         ]);
     });
 
-    it("`detail` is a cause too, and keeps any field the sentence does NOT already carry", () => {
+    it("`detail` is a cause too, and NO field ever reaches the line", () => {
         const { logger, stdout } = testLogger({ human: true });
-        logger.info("pruned snapshot", { target: "web1", snapshot: "2026-08-10T03-00-00Z", detail: "past keepDaily" });
-        expect(stdout.chunks).toEqual(["pruned snapshot - past keepDaily snapshot=2026-08-10T03-00-00Z\n"]);
+        logger.info("pruned snapshot 2026-08-10T03-00-00Z", {
+            target: "web1",
+            snapshot: "2026-08-10T03-00-00Z",
+            detail: "past keepDaily",
+        });
+        // The snapshot name is in the SENTENCE, because a person needs it. It
+        // is also still a field - for the log file, which keeps every one.
+        expect(stdout.chunks).toEqual(["web1: pruned snapshot 2026-08-10T03-00-00Z - past keepDaily\n"]);
+    });
+
+    it("a fact left ONLY in a field never reaches a human line - the message has to say it", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.info("pruned snapshot", { snapshot: "2026-08-10T03-00-00Z", count: 4, freeBytes: 3328599654 });
+        expect(stdout.chunks).toEqual(["pruned snapshot\n"]);
     });
 
     it("the FILE sink still gets the full machine line - the record is unchanged", () => {
@@ -270,10 +296,29 @@ describe("Logger human console mode", () => {
         ]);
     });
 
+    it("cause then Fix, in that order, on a line that carries both", () => {
+        const { logger, stderr } = testLogger({ human: true });
+        logger.error("cannot use this backup server", { error: "key refused", hint: "backupkit check" });
+        expect(stderr.chunks).toEqual(["Error: cannot use this backup server - key refused. Fix: backupkit check\n"]);
+    });
+
     it("children inherit human mode", () => {
         const { logger, stdout } = testLogger({ human: true });
         logger.with({ target: "web1" }).info("hello");
-        expect(stdout.chunks).toEqual(["hello\n"]);
+        expect(stdout.chunks).toEqual(["web1: hello\n"]);
+    });
+
+    it("`hint` renders as a trailing `Fix:` - advice never chains onto the cause's dash", () => {
+        const { logger, stderr } = testLogger({ human: true });
+        logger.error("this snapshot has 3 files where the previous run had 40000 - retention skipped", {
+            previousFiles: 40_000,
+            files: 3,
+            hint: "verify the source, then run `backupkit prune` once you are satisfied the shrink is real",
+        });
+        expect(stderr.chunks).toEqual([
+            "Error: this snapshot has 3 files where the previous run had 40000 - retention skipped" +
+                ". Fix: verify the source, then run `backupkit prune` once you are satisfied the shrink is real\n",
+        ]);
     });
 });
 

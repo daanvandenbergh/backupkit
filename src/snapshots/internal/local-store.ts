@@ -347,7 +347,7 @@ export class LocalSnapshotStore implements SnapshotStore {
         // 15; the local/pull store had no equivalent.)
         if ((await lstat(keepPath)).isSymbolicLink()) {
             this.log.warn(
-                "throwing away an unfinished snapshot that is a symlink instead of a directory - it was not left by backupkit; starting this backup fresh",
+                `discarding the unfinished snapshot ${sanitize(keep)} - it is a symlink, not a directory, so it is not ours; starting fresh`,
                 { unfinished: keep },
             );
             // No `recursive`: unlink the link itself, never walk into its target.
@@ -356,7 +356,7 @@ export class LocalSnapshotStore implements SnapshotStore {
         }
         if (await hasMultiplyLinkedEntry(keepPath)) {
             this.log.warn(
-                "throwing away an unfinished snapshot that shares files with a completed one - resuming it could corrupt that backup; starting this one fresh",
+                `discarding the unfinished snapshot ${sanitize(keep)} - it shares files with a completed one, and resuming it could corrupt that backup; starting fresh`,
                 { unfinished: keep },
             );
             await rm(keepPath, { recursive: true, force: true });

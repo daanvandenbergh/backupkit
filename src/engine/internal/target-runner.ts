@@ -23,7 +23,7 @@ import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import { describeError, isBackupkitError, isTransientFailure } from "../../shared/errors.js";
 import type { Logger } from "../../shared/logger.js";
 import { sanitize } from "../../shared/sanitize.js";
-import { formatDuration, formatEndpoint } from "../../shared/format.js";
+import { formatBytes, formatDuration, formatEndpoint } from "../../shared/format.js";
 import { formatSnapshotName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import { windowIndex } from "../../shared/time.js";
 import type { Endpoint } from "../../shared/types.js";
@@ -295,7 +295,7 @@ export async function runMirror(
         if (options.force !== true) {
             const last = await deps.lastRunAt();
             if (last !== null && windowIndex(target.schedule, last) === windowIndex(target.schedule, start)) {
-                deps.log.info("this target was already backed up in this schedule window - nothing to do", {
+                deps.log.info("already backed up in this window - nothing to do", {
                     lastRunAt: last.toISOString(),
                 });
                 return report("skipped", "window", null);
@@ -329,13 +329,16 @@ export async function runMirror(
             contentCollapse = collapseAgainst(await deps.previousStats(), stats);
         }
         if (contentCollapse !== null) {
-            deps.log.error("content collapse: the source holds far fewer files than at the last run - refusing to mirror", {
+            deps.log.error(
+                `the source has ${contentCollapse.files ?? "an unmeasurable number of"} files where the last run saw ` +
+                    `${contentCollapse.previousFiles} - refusing to mirror`,
+                {
                 previousFiles: contentCollapse.previousFiles,
                 files: contentCollapse.files ?? "unmeasured",
                 destination: sanitize(target.destination),
                 hint:
-                    "a mirror deletes whatever the source no longer has, and cannot undo it - check that the source is " +
-                    "fully mounted and intact, then run `backupkit run --force " +
+                    "check that the source is fully mounted and intact (a mirror deletes whatever the source no " +
+                    "longer has, and cannot undo it), then run `backupkit run --force " +
                     `${target.name}\` to mirror it anyway`,
             });
             // A dry run reports the refusal rather than becoming one: it wrote
@@ -381,7 +384,7 @@ export async function runMirror(
         if (target.rsync.verify) {
             const verifyResult = await execWithSignal(deps.rsyncBin, buildArgs(spec, "verify"), { env: deps.env });
             if (options.signal?.aborted === true) {
-                deps.log.warn("backup stopped before it finished (shutdown requested)");
+                deps.log.warn("stopped before finishing - shutdown requested");
                 return report("aborted", "aborted", "aborted during verify pass");
             }
             const changed = verifyResult.stdout
@@ -390,10 +393,10 @@ export async function runMirror(
                 .filter((line) => line !== "" && isContentChangeLine(line));
             if ((verifyResult.exitCode !== 0 && verifyResult.exitCode !== 24) || changed.length > 0) {
                 const sample = changed.slice(0, 20).map(sanitize).join(", ");
-                deps.log.error("verification failed - the copy does not match the source", {
-                    exitCode: verifyResult.exitCode ?? "signal",
-                    changedLines: changed.length,
-                });
+                deps.log.error(
+                    `verification failed - ${changed.length} file${changed.length === 1 ? "" : "s"} in the copy do not match the source`,
+                    { exitCode: verifyResult.exitCode ?? "signal", changedLines: changed.length },
+                );
                 return report(
                     "failed",
                     "verify-failed",
@@ -410,7 +413,7 @@ export async function runMirror(
     } catch (error) {
         const message = describeError(error);
         if (options.signal?.aborted === true) {
-            deps.log.warn("backup stopped before it finished (shutdown requested)");
+            deps.log.warn("stopped before finishing - shutdown requested");
             return report("aborted", "aborted", message);
         }
         logRunFailure(deps, error, message, start);
@@ -440,8 +443,8 @@ function logRunFailure(
     const transient = isTransientFailure(error);
     deps.log[transient ? "warn" : "error"](
         transient
-            ? "backup did not finish - a temporary problem; the next scheduled attempt will try again"
-            : "backup FAILED and will not fix itself - every attempt hits the same problem until it is resolved",
+            ? "backup did not finish (a temporary problem), will retry"
+            : "backup FAILED and will not fix itself",
         { ranFor: formatDuration(deps.now().getTime() - startedAt.getTime()), error: message },
     );
 }
@@ -495,7 +498,7 @@ export async function runTarget(
             if (options.dryRun !== true) {
                 resumed = (await deps.store.claimPartial(snapName)).resumed;
                 if (resumed) {
-                    deps.log.info("picking up where the last, unfinished run left off", { snapshot: snapName });
+                    deps.log.info(`resuming the last unfinished run (${snapName})`, { snapshot: snapName });
                 }
             }
 
@@ -506,7 +509,7 @@ export async function runTarget(
             if (options.force !== true && newest !== null) {
                 const newestDate = parseSnapshotName(newest);
                 if (newestDate !== null && windowIndex(target.schedule, newestDate) === windowIndex(target.schedule, start)) {
-                    deps.log.info("this target was already backed up in this schedule window - nothing to do", { newest });
+                    deps.log.info("already backed up in this window - nothing to do", { newest });
                     return report("skipped", "window", null);
                 }
             }
@@ -524,7 +527,7 @@ export async function runTarget(
             if (newest !== null && snapName <= newest) {
                 const { future } = splitFutureSnapshots(complete, start);
                 deps.log.error(
-                    "this host's clock is behind the archive, so this backup would be filed BEFORE snapshots that already exist - refusing to run",
+                    "this host's clock is behind the archive - refusing to file this backup before snapshots that already exist",
                     {
                         newName: snapName,
                         newest,
@@ -559,7 +562,9 @@ export async function runTarget(
                 };
                 if (target.retention !== null) {
                     const plan = planRetention(complete, target.retention, start);
-                    deps.log.info("dry run: retention would prune", { count: plan.prune.length });
+                    deps.log.info(`dry run: retention would prune ${plan.prune.length} snapshot${plan.prune.length === 1 ? "" : "s"}`, {
+                        count: plan.prune.length,
+                    });
                 }
                 return report("success", "dry-run", null);
             }
@@ -576,7 +581,7 @@ export async function runTarget(
                 // was the one child a `systemctl stop` could not kill.
                 const totalBytes = await deps.store.totalBytes();
                 if (target.minFree.kind === "percent" && totalBytes === null) {
-                    deps.log.warn("cannot read this filesystem's total size, so the minFree percentage is ignored for this run");
+                    deps.log.warn("cannot read the filesystem size - ignoring the minFree percentage this run");
                 }
                 const decision = evaluateDiskGuard({
                     deltaBytes: estimatedDelta,
@@ -592,13 +597,22 @@ export async function runTarget(
                 if (!decision.ok) {
                     if (!deps.diskLowTargets.has(target.name)) {
                         deps.diskLowTargets.add(target.name);
-                        deps.log.error("not enough free disk space for this backup - skipping this run", {
-                            requiredBytes: decision.requiredBytes,
-                            freeBytes: decision.freeBytes,
-                            floorBytes: decision.floorBytes,
-                            requiredInodes: decision.requiredInodes ?? "unknown",
-                            freeInodes: decision.freeInodes ?? "unknown",
-                        });
+                        // The SENTENCE carries the numbers, in the units a
+                        // person thinks in: `requiredBytes=12884901888` is a
+                        // figure the reader has to divide by 1024 three times
+                        // before it means "12 GiB". The raw counts stay as
+                        // fields for the log file, where a machine reads them.
+                        deps.log.error(
+                            `not enough free disk space - needs ${formatBytes(decision.requiredBytes)} plus a ` +
+                                `${formatBytes(decision.floorBytes)} floor, only ${formatBytes(decision.freeBytes)} free; skipping this run`,
+                            {
+                                requiredBytes: decision.requiredBytes,
+                                freeBytes: decision.freeBytes,
+                                floorBytes: decision.floorBytes,
+                                requiredInodes: decision.requiredInodes ?? "unknown",
+                                freeInodes: decision.freeInodes ?? "unknown",
+                            },
+                        );
                     }
                     const inodeShortfall =
                         decision.freeInodes !== null &&
@@ -648,7 +662,7 @@ export async function runTarget(
                 // verify failure: "aborted" does not enter failure backoff and the
                 // partial stays for resume (spec section 6).
                 if (options.signal?.aborted === true) {
-                    deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
+                    deps.log.warn("stopped before finishing - shutdown requested", { snapshot: snapName });
                     return report("aborted", "aborted", "aborted during verify pass");
                 }
                 const changed = verifyResult.stdout
@@ -687,8 +701,9 @@ export async function runTarget(
             if (contentCollapse !== null) {
                 deps.log.error(
                     contentCollapse.files === null
-                        ? "content collapse guard: this run's file count could not be measured - retention skipped"
-                        : "content collapse: this snapshot holds far fewer files than the previous run - retention skipped",
+                        ? "could not measure this run's file count - retention skipped"
+                        : `this snapshot has ${contentCollapse.files} files where the previous run had ` +
+                          `${contentCollapse.previousFiles} - retention skipped`,
                     {
                         previousFiles: contentCollapse.previousFiles,
                         files: contentCollapse.files ?? "unmeasured",
@@ -719,11 +734,11 @@ export async function runTarget(
             completeCount = completeNow.length;
             historyInsertion = detectHistoryInsertion(completeNow, await deps.previousHistory());
             if (historyInsertion !== null) {
-                deps.log.error("snapshots appeared BELOW the previous run's newest - this client never back-dates; retention skipped", {
+                deps.log.error("snapshots appeared below the previous run's newest - not ours; retention skipped", {
                     previousNewest: sanitize(historyInsertion.previousNewest),
                     previousCount: historyInsertion.previousCount,
                     count: historyInsertion.count,
-                    hint: "the source may have planted snapshot-shaped directories; review with `backupkit prune --dry-run`",
+                    hint: "review with `backupkit prune --dry-run` - the source may have planted snapshot-shaped directories",
                 });
             }
 
@@ -762,13 +777,13 @@ export async function runTarget(
                     const { genuine, future } = splitFutureSnapshots(completeNow, at);
                     const plan = planRetention(genuine, target.retention, at);
                     if (future.length > 0) {
-                        deps.log.error("future-dated snapshot names appeared during this run - they are not ours; pruning them", {
+                        deps.log.error(`${future.length} future-dated snapshot name${future.length === 1 ? "" : "s"} appeared - not ours; pruning them`, {
                             count: future.length,
                             futureDated: future.slice(0, 10).map(sanitize).join(", "),
                             hint:
                                 genuine.length === 0
-                                    ? "every name is future-dated: keeping all of them - check this host's clock"
-                                    : "check this host's clock; if it is correct the source planted these",
+                                    ? "check this host's clock - every name is future-dated, so all of them are being kept"
+                                    : "check this host's clock; if it is correct, the source planted these",
                         });
                     }
                     // Newest first, like every RetentionPlan: the future-dated
@@ -776,7 +791,7 @@ export async function runTarget(
                     const prune = genuine.length === 0 ? [] : [...[...future].reverse(), ...plan.prune];
                     for (const name of [...prune].reverse()) {
                         await deps.store.remove(name);
-                        deps.log.info("pruned snapshot", { snapshot: name });
+                        deps.log.info(`pruned snapshot ${sanitize(name)}`, { snapshot: name });
                     }
                 } catch (error) {
                     retentionError = `retention failed: ${describeError(error)}`;
@@ -803,7 +818,7 @@ export async function runTarget(
         }
         const message = describeError(error);
         if (options.signal?.aborted === true) {
-            deps.log.warn("backup stopped before it finished (shutdown requested)", { snapshot: snapName });
+            deps.log.warn("stopped before finishing - shutdown requested", { snapshot: snapName });
             return report("aborted", "aborted", message);
         }
         logRunFailure(deps, error, message, start);

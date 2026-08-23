@@ -13,6 +13,7 @@ import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promise
 import { join } from "node:path";
 
 import type { Logger } from "../../shared/logger.js";
+import { sanitize } from "../../shared/sanitize.js";
 import { formatSnapshotName } from "../../shared/snapshot-name.js";
 import type { RunStats, RunStatus, TargetRunReport } from "../types.js";
 
@@ -101,7 +102,7 @@ export async function readTargetReports(stateDir: string, target: string, log: L
             text = await readFile(path, "utf8");
         } catch (error) {
             if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-                log.warn("could not read run report - left in place, not treated as corrupt", { file: path });
+                log.warn(`could not read run report ${sanitize(path)} - left in place, not treated as corrupt`, { file: path });
             }
             continue;
         }
@@ -112,7 +113,7 @@ export async function readTargetReports(stateDir: string, target: string, log: L
             parsed = null;
         }
         if (!isReportShaped(parsed)) {
-            log.warn("skipping corrupt run report", { file: path });
+            log.warn(`skipping corrupt run report ${sanitize(path)}`, { file: path });
             await rename(path, `${path}.corrupt`).catch(() => undefined);
             continue;
         }

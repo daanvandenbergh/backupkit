@@ -123,31 +123,59 @@ function renderField(key: string, value: string | number | boolean): string {
 
 /**
  * Fields carrying the CAUSE a message points at. On a human line the cause is
- * the payload, so it is appended to the sentence (` - <cause>`) rather than
- * hung off the end as a quoted `error="..."` token that the reader has to
- * unescape by eye.
+ * the payload, so it is appended as a clause (` - <cause>`) rather than hung
+ * off the end as a quoted `error="..."` token the reader has to unescape by
+ * eye.
  */
 const CAUSE_FIELDS = ["error", "detail", "cause"];
 
 /**
- * Fields that only repeat what a human line already shows. `target`/`remote`
- * are the name the reader typed and the name in the target's own line; `run`
- * is an id that means nothing until you go looking in the log file; `delayMs`
- * is the exact jittered wait whose readable form ("in 2s") is already in the
- * sentence. The machine line still carries all four.
+ * The field carrying WHAT TO DO about it. Rendered `. Fix: <hint>` - last, and
+ * deliberately not as another ` - ` clause: message, cause and hint chained on
+ * dashes produced lines like "the source has 3 files where the last run saw
+ * 40000 - refusing to mirror - a mirror deletes whatever the source no longer
+ * has - check the source is fully mounted", where the reader cannot tell which
+ * dash separates the problem from the advice. `Fix:` is already this project's
+ * word for the command that ends the problem (see ssh/'s failure messages), so
+ * the eye can jump straight to it.
  */
-const HUMAN_MUTED_FIELDS = new Set(["target", "remote", "run", "delayMs"]);
+const HINT_FIELD = "hint";
 
 /**
- * The console line for a person: an optional `Error:`/`Warning:` prefix, the
- * message, its cause appended as a clause, and whatever fields are left -
- * bare, in the machine `key=value` shape, because a field that survives this
- * filter is one the sentence does NOT already contain (`snapshot=`, `file=`)
- * and dropping it would lose the fact. No timestamp (the terminal is now), no
- * context bracket (the CLI's own lines name the target).
+ * The console line for a person: `<target>: [Error: |Warning: ]<message>[ -
+ * <cause>][. Fix: <hint>]`. A SENTENCE, and nothing else.
+ *
+ * The TARGET LEADS, because it is the one thing that makes a line findable when
+ * several targets are running: the eye follows a flush-left column, and
+ * "backup finished in 3s" with no name in front of it is unreadable in a pass
+ * over four targets. It matches the CLI's own `<target>: FAILED - ...` rows for
+ * the same reason.
+ *
+ * NO `key=value` TAIL, ever. Not a filtered one - none. Every line that kept
+ * "just the useful fields" ended the same way: the reader got to the end of the
+ * sentence and then hit `previousFiles=40000 files=3 destination=/srv/mirror`,
+ * or five raw byte counts they had to divide by 1024 three times. The rule is
+ * total because a filtered version is a judgement call at 30 call sites, and it
+ * loses every time somebody adds the 31st.
+ *
+ * What that BUYS is the discipline: a fact a person needs is a fact the message
+ * has to say, in words - "pruned snapshot 2026-08-01T000000Z", not "pruned
+ * snapshot" plus `snapshot=`. Fields are then unambiguously the machine's copy,
+ * and the log file still carries every one of them.
  */
-function humanLine(level: LogLevel, message: string, fields: LogFields | undefined): string {
+function humanLine(
+    level: LogLevel,
+    message: string,
+    fields: LogFields | undefined,
+    context: Readonly<Record<string, string | number | boolean>>,
+): string {
     const parts: string[] = [];
+    // A field beats the sticky context: a logger scoped to one target can still
+    // log ABOUT another, and the field is the specific one.
+    const target = fields?.target ?? context.target;
+    if (target !== undefined) {
+        parts.push(`${sanitize(String(target))}:`);
+    }
     if (level === "error") {
         parts.push("Error:");
     } else if (level === "warn") {
@@ -160,12 +188,9 @@ function humanLine(level: LogLevel, message: string, fields: LogFields | undefin
             parts.push(`- ${sanitize(String(value))}`);
         }
     }
-    for (const key of Object.keys(fields ?? {})) {
-        if (!CAUSE_FIELDS.includes(key) && !HUMAN_MUTED_FIELDS.has(key)) {
-            parts.push(renderField(key, (fields as LogFields)[key]));
-        }
-    }
-    return parts.join(" ");
+    const line = parts.join(" ");
+    const hint = fields?.[HINT_FIELD];
+    return hint === undefined ? line : `${line}. Fix: ${sanitize(String(hint))}`;
 }
 
 /**
@@ -252,6 +277,6 @@ export class Logger {
             return;
         }
         const stream = level === "error" || level === "warn" ? this.options.stderr : this.options.stdout;
-        stream.write((this.options.human ? humanLine(level, message, fields) : line) + "\n");
+        stream.write((this.options.human ? humanLine(level, message, fields, this.context) : line) + "\n");
     }
 }
