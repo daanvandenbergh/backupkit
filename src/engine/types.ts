@@ -269,6 +269,17 @@ export interface TargetStatus {
     nextDueAt: string | null;
     /** Status of the newest run report, or null when the target never ran. */
     lastResult: RunStatus | null;
+    /**
+     * ISO start time of the newest run that actually backed the source up - a
+     * success, or a warning (skipped or vanished files still made a backup) -
+     * or null when the target has never completed one.
+     *
+     * The question `status` exists to answer is "are my backups current", and
+     * nothing in the table answered it. `lastSnapshot` came closest and only
+     * half counted: it is a NAME, so the reader does the date arithmetic, and a
+     * mirror target writes no snapshot at all, so its column was always empty.
+     */
+    lastSuccessAt: string | null;
     /** Consecutive failed runs, derived from the run reports. */
     consecutiveFailures: number;
     /** True when the destination-root lock is currently held (local stores only; remote locks report false). */

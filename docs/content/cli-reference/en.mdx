@@ -178,7 +178,11 @@ A [mirror target](/configuration/#snapshot-or-mirror) contributes nothing here: 
 
 ### status
 
-One row per target: last snapshot, next due, last result, consecutive failures, and lock state. A mirror target has no snapshot to name, so its `LAST SNAPSHOT` is empty and it never reports a lock (it takes none); everything else on the row works the same, dated from its newest completed run.
+One row per target: last snapshot, how long ago it last succeeded, next due, last result, consecutive failures, and lock state. A mirror target has no snapshot to name, so its `LAST SNAPSHOT` is empty and it never reports a lock (it takes none); everything else on the row works the same, dated from its newest completed run.
+
+`LAST SUCCESS` is **relative** - `20h ago`, `3d 4h ago`, or `never` - where every other time column is absolute. That is deliberate: the column exists to answer "are my backups current", and an absolute timestamp makes you do the arithmetic that *is* the question. It counts the newest run that actually backed the source up, which includes a run that finished with warnings (skipped or vanished files still made a backup), and it is the only currency signal a mirror target has, since it writes no snapshot. The exact instant is in `--json` as `lastSuccessAt`.
+
+A stale `LAST SUCCESS` next to `0` failures is worth a look: it means runs are being *skipped* rather than failing - a window already fulfilled, a disk-low guard, or a target that is disabled.
 
 The `LOCK` column covers **local** destinations only. A push target's lock lives on the archive server, and probing it would cost an ssh round-trip on a command that promises to be instant, so a push target always reports no lock here - `backupkit unlock` is what reads the real remote state.
 
@@ -317,7 +321,7 @@ The `authorized_keys` lines that point at the script come from `backupkit check`
 
 `--json` exists on the read-only commands machines actually consume: `status`, `list`, `target`, and `remote`. Each prints one JSON document on stdout, with logs going to stderr only.
 
-`list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, nextDueAt, lastResult, consecutiveFailures, lockHeld, lastError, lastErrorAt }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `consecutiveFailures` is a number, `lockHeld` is a boolean that is always `false` for a push target, and `lastError`/`lastErrorAt` carry the explained message and ISO time of the newest **failed** run (both `null` when the target has no failure on record).
+`list --json` is an array of `{ target, name, createdAt }` - `createdAt` a full-precision ISO-8601 string. `status --json` is an array of `{ target, lastSnapshot, lastSuccessAt, nextDueAt, lastResult, consecutiveFailures, lockHeld, lastError, lastErrorAt }`, where `lastSnapshot`, `nextDueAt`, and `lastResult` are `null` for a target that has never run (and `nextDueAt` is `null` for a disabled one), `lastSuccessAt` is the full-precision ISO start time of the newest run that backed the source up (`null` when there has never been one), `consecutiveFailures` is a number, `lockHeld` is a boolean that is always `false` for a push target, and `lastError`/`lastErrorAt` carry the explained message and ISO time of the newest **failed** run (both `null` when the target has no failure on record).
 
 `target --json` and `remote --json` each print one resolved object - the same shape the engine runs on, every default already filled in, and for `target` the derived remote and endpoints the table omits.
 

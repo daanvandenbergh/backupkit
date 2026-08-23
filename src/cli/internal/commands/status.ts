@@ -5,10 +5,36 @@
  */
 
 import type { TargetStatus } from "../../../engine/types.js";
-import { formatUtc } from "../../../shared/format.js";
+import { formatDuration, formatUtc } from "../../../shared/format.js";
 import type { CliDeps } from "../context.js";
 import { alignRows, parseFlags, selectTargets } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
+
+/**
+ * How long ago the newest successful run started, as a person reads it -
+ * "20h ago", "3d 4h ago", or "never".
+ *
+ * RELATIVE, where every other time column is absolute, and deliberately so:
+ * this column exists to answer "are my backups current", and an absolute
+ * timestamp makes the reader do the arithmetic that IS the question. The exact
+ * instant is still in `--json` as `lastSuccessAt` for anything that needs to
+ * compute on it.
+ *
+ * A future timestamp (a clock that moved backwards, a report written by a host
+ * whose clock is ahead) reads "just now" rather than a negative age - the
+ * clock-skew guard is what reports that condition, and it says so properly.
+ */
+function successAge(lastSuccessAt: string | null, now: Date): string {
+    if (lastSuccessAt === null) {
+        return "never";
+    }
+    const at = new Date(lastSuccessAt);
+    if (Number.isNaN(at.getTime())) {
+        return "-";
+    }
+    const elapsed = now.getTime() - at.getTime();
+    return elapsed <= 0 ? "just now" : `${formatDuration(elapsed)} ago`;
+}
 
 /** How much of a failure explanation one status line carries before it is trimmed. */
 const ERROR_MAX_CHARS = 300;
@@ -43,17 +69,19 @@ function failureNotes(rows: TargetStatus[]): string[] {
 
 /**
  * Render status rows as aligned plain-text lines: the table, then a short
- * explanation under it for every target with a failure on record.
+ * explanation under it for every target with a failure on record. `now` is
+ * injectable so the relative LAST SUCCESS column is testable.
  */
-export function formatStatusRows(rows: TargetStatus[]): string[] {
+export function formatStatusRows(rows: TargetStatus[], now: Date = new Date()): string[] {
     if (rows.length === 0) {
         return ["no targets configured"];
     }
     const table = alignRows(
-        ["TARGET", "LAST SNAPSHOT", "NEXT DUE", "LAST RESULT", "FAILS", "LOCK"],
+        ["TARGET", "LAST SNAPSHOT", "LAST SUCCESS", "NEXT DUE", "LAST RESULT", "FAILS", "LOCK"],
         rows.map((row) => [
             row.target,
             row.lastSnapshot ?? "-",
+            successAge(row.lastSuccessAt, now),
             // The struct carries strict ISO-8601 for --json; humans get formatUtc.
             row.nextDueAt === null ? "-" : formatUtc(new Date(row.nextDueAt)),
             row.lastResult ?? "-",

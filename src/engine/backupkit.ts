@@ -1157,6 +1157,7 @@ export class Backupkit {
                 lastSnapshot: derived.lastSnapshot,
                 nextDueAt: target.enabled ? nextDueAt(target.schedule, newestDate, backoffUntil, now).toISOString() : null,
                 lastResult: derived.lastResult,
+                lastSuccessAt: derived.lastSuccessAt === null ? null : derived.lastSuccessAt.toISOString(),
                 consecutiveFailures: derived.consecutiveFailures,
                 lockHeld,
                 lastError: derived.lastError,

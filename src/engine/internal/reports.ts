@@ -246,10 +246,16 @@ export interface DerivedBackoff {
     lastSnapshot: string | null;
     /**
      * `startedAt` of the newest success/warning report, or null when the target
-     * never completed a run. This is a MIRROR target's only record that its
-     * schedule window was fulfilled - it writes no snapshot, so there is no
-     * archive listing to ask. A snapshot target uses its listing instead (which
-     * also sees snapshots this host did not create), so this is unused there.
+     * never completed a run. A warning counts: a run that finished with skipped
+     * or vanished files still backed the source up.
+     *
+     * Two callers, for two different reasons. Scheduling asks it only for a
+     * MIRROR target, whose window-fulfilled record this is - it writes no
+     * snapshot, so there is no archive listing to ask, where a snapshot target
+     * uses its listing instead (which also sees snapshots this host did not
+     * create). `status` asks it for EVERY target, because "when did this last
+     * actually work" is a question a snapshot name only half answers and a
+     * mirror could not answer at all.
      */
     lastSuccessAt: Date | null;
     /**

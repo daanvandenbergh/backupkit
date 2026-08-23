@@ -6,8 +6,9 @@
  * jail lines + install instruction, failure exit).
  */
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TargetStatus } from "../../engine/types.js";
 import { main } from "../main.js";
 import { fakeDeps, makeConfig, makeRunReport, makeTarget } from "./fakes.js";
 
@@ -69,6 +70,21 @@ describe("run", () => {
     });
 });
 
+/** A complete `TargetStatus` row with healthy defaults; override only what the case is about. */
+function statusRow(overrides: Partial<TargetStatus> & { target: string }): TargetStatus {
+    return {
+        lastSnapshot: "2026-08-22T030000Z",
+        lastSuccessAt: "2026-08-22T03:00:00.000Z",
+        nextDueAt: "2026-08-23T03:00:00.000Z",
+        lastResult: "success",
+        consecutiveFailures: 0,
+        lockHeld: false,
+        lastError: null,
+        lastErrorAt: null,
+        ...overrides,
+    };
+}
+
 describe("schedule preview", () => {
     // Regression in kind: `daemon` already argued that without its start/stop
     // lines a healthy daemon is indistinguishable from one that died during
@@ -83,6 +99,7 @@ describe("schedule preview", () => {
                 lastSnapshot: null,
                 nextDueAt: "2026-08-23T03:00:00.000Z",
                 lastResult: "success",
+                lastSuccessAt: null,
                 consecutiveFailures: 0,
                 lockHeld: false,
                 lastError: null,
@@ -93,6 +110,7 @@ describe("schedule preview", () => {
                 lastSnapshot: null,
                 nextDueAt: "2026-08-22T22:09:15.000Z",
                 lastResult: "failed",
+                lastSuccessAt: null,
                 consecutiveFailures: 9,
                 lockHeld: false,
                 lastError: "boom",
@@ -117,6 +135,7 @@ describe("schedule preview", () => {
                 lastSnapshot: null,
                 nextDueAt: null,
                 lastResult: null,
+                lastSuccessAt: null,
                 consecutiveFailures: 0,
                 lockHeld: false,
                 lastError: null,
@@ -233,6 +252,60 @@ describe("list", () => {
         expect(h.out).toEqual(["No snapshots yet. Create the first one with: backupkit run"]);
     });
 
+    it("emits one JSON document with --json", async () => {
+        const h = fakeDeps();
+        h.engine.snapshots = [{ target: "web", name: "2026-08-10T031500Z", createdAt: new Date("2026-08-10T03:15:00Z") }];
+        expect(await main(["list", "--json"], h.deps)).toBe(0);
+        const parsed = JSON.parse(h.out.join("\n")) as { target: string; name: string }[];
+        expect(parsed).toHaveLength(1);
+        expect(parsed[0].name).toBe("2026-08-10T031500Z");
+    });
+});
+
+describe("status", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
+    // The question `status` exists to answer is "are my backups current", and
+    // nothing in the table answered it. `lastSnapshot` came closest and only
+    // half counted: it is a NAME, so the reader does the date arithmetic, and a
+    // MIRROR target writes no snapshot at all, so its column was always empty.
+    it("shows how long ago each target last actually backed up", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            statusRow({ target: "fresh", lastSuccessAt: "2026-08-22T20:00:00.000Z" }),
+            statusRow({ target: "stale", lastSuccessAt: "2026-08-19T04:00:00.000Z" }),
+            // A mirror: no snapshot to name, and this column is its only signal.
+            statusRow({ target: "mirror", lastSnapshot: null, lastSuccessAt: "2026-08-22T00:00:00.000Z" }),
+            statusRow({ target: "virgin", lastSuccessAt: null }),
+        ];
+        expect(await main(["status"], h.deps)).toBe(0);
+        const row = (name: string): string => h.out.find((line) => line.startsWith(name)) as string;
+        expect(row("fresh")).toContain("4h ago");
+        expect(row("stale")).toContain("3d 20h ago");
+        expect(row("mirror")).toContain("1d ago");
+        // Not "-" and not an empty cell: a target that has never once succeeded
+        // is the single most important thing this column can say.
+        expect(row("virgin")).toContain("never");
+    });
+
+    // A report written by a host whose clock is ahead, or one that moved
+    // backwards, must not render a negative age. The clock-skew guard is what
+    // reports that condition, and it says so properly.
+    it("reads a future success as \"just now\" rather than a negative age", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+        const h = fakeDeps();
+        h.engine.statusRows = [statusRow({ target: "ahead", lastSuccessAt: "2026-09-01T00:00:00.000Z" })];
+        expect(await main(["status"], h.deps)).toBe(0);
+        expect(h.out.join("\n")).toContain("just now");
+        // A negative duration would render as "-<something> ago".
+        expect(h.out.join("\n")).not.toContain(" ago");
+    });
+
     // The table answers everything except the question a person opens `status`
     // to ask. `failed 9` and a next-due six hours out said something was wrong,
     // how badly, and nothing about WHAT - so the only way to find out was to go
@@ -245,6 +318,7 @@ describe("list", () => {
                 lastSnapshot: null,
                 nextDueAt: "2026-08-22T22:09:15.000Z",
                 lastResult: "failed",
+                lastSuccessAt: null,
                 consecutiveFailures: 9,
                 lockHeld: false,
                 lastError: "the destination filesystem is FULL (rsync exit 11)",
@@ -255,6 +329,7 @@ describe("list", () => {
                 lastSnapshot: "2026-08-22T030000Z",
                 nextDueAt: "2026-08-23T03:00:00.000Z",
                 lastResult: "success",
+                lastSuccessAt: null,
                 consecutiveFailures: 0,
                 lockHeld: false,
                 lastError: null,
@@ -279,6 +354,7 @@ describe("list", () => {
                 lastSnapshot: "2026-08-22T030000Z",
                 nextDueAt: "2026-08-23T03:00:00.000Z",
                 lastResult: "success",
+                lastSuccessAt: null,
                 consecutiveFailures: 0,
                 lockHeld: false,
                 lastError: null,
@@ -288,18 +364,6 @@ describe("list", () => {
         expect(await main(["status"], h.deps)).toBe(0);
         expect(h.out.filter((line) => line.trim() !== "")).toHaveLength(2);
     });
-
-    it("emits one JSON document with --json", async () => {
-        const h = fakeDeps();
-        h.engine.snapshots = [{ target: "web", name: "2026-08-10T031500Z", createdAt: new Date("2026-08-10T03:15:00Z") }];
-        expect(await main(["list", "--json"], h.deps)).toBe(0);
-        const parsed = JSON.parse(h.out.join("\n")) as { target: string; name: string }[];
-        expect(parsed).toHaveLength(1);
-        expect(parsed[0].name).toBe("2026-08-10T031500Z");
-    });
-});
-
-describe("status", () => {
     it("prints aligned rows with placeholder dashes", async () => {
         const h = fakeDeps();
         h.engine.statusRows = [
@@ -308,15 +372,16 @@ describe("status", () => {
                 lastSnapshot: "2026-08-10T031500Z",
                 nextDueAt: "2026-08-11T00:00:00.000Z",
                 lastResult: "success",
+                lastSuccessAt: null,
                 consecutiveFailures: 0,
                 lockHeld: false,
                 lastError: null,
                 lastErrorAt: null,
             },
-            { target: "db", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 3, lockHeld: true, lastError: null, lastErrorAt: null },
+            { target: "db", lastSnapshot: null, nextDueAt: null, lastResult: null, lastSuccessAt: null, consecutiveFailures: 3, lockHeld: true, lastError: null, lastErrorAt: null },
         ];
         expect(await main(["status"], h.deps)).toBe(0);
-        expect(h.out[0]).toMatch(/^TARGET\s+LAST SNAPSHOT\s+NEXT DUE\s+LAST RESULT\s+FAILS\s+LOCK$/);
+        expect(h.out[0]).toMatch(/^TARGET\s+LAST SNAPSHOT\s+LAST SUCCESS\s+NEXT DUE\s+LAST RESULT\s+FAILS\s+LOCK$/);
         expect(h.out[2]).toContain("db");
         expect(h.out[2]).toContain("held");
         expect(h.out[2]).toContain("-");
@@ -326,7 +391,7 @@ describe("status", () => {
     it("emits one JSON document with --json", async () => {
         const h = fakeDeps();
         h.engine.statusRows = [
-            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, consecutiveFailures: 0, lockHeld: false, lastError: null, lastErrorAt: null },
+            { target: "web", lastSnapshot: null, nextDueAt: null, lastResult: null, lastSuccessAt: null, consecutiveFailures: 0, lockHeld: false, lastError: null, lastErrorAt: null },
         ];
         expect(await main(["status", "--json"], h.deps)).toBe(0);
         expect(JSON.parse(h.out.join("\n"))).toEqual(h.engine.statusRows);
