@@ -20,6 +20,7 @@ import {
     SSH_NO_ANSWER_MESSAGE,
     sshStderrTail,
 } from "./classify.js";
+import { diagnoseAliasAuth } from "./internal/keydiag.js";
 import { bareShellArg, quoteShellArg } from "./internal/quote.js";
 
 /** An alias-kind resolved remote. */
@@ -127,13 +128,28 @@ export interface RunRemoteOptions {
  * The actionable failure message for an ssh transport error, shaped by the
  * matched permanent pattern (spec section 4's messages) or the transient
  * default. `tail` must already be sanitized.
+ *
+ * An alias auth-failure additionally asks `diagnoseAliasAuth` for the CAUSE -
+ * "authentication failed under BatchMode" is a symptom, and the usual cause is
+ * a passphrase-protected ssh_config key that no reachable agent holds, which
+ * is exactly the state in which `ssh <alias>` succeeds for a human and every
+ * unattended run fails. The diagnosis is best-effort and never throws; when it
+ * cannot establish a cause the generic message stands.
  */
-function sshFailureMessage(remote: ResolvedRemote, tail: string): string {
+async function sshFailureMessage(
+    remote: ResolvedRemote,
+    tail: string,
+    options: { sshBin: string; env: Record<string, string> },
+): Promise<string> {
     const dest = sshDestination(remote);
     const pattern = matchPermanentSshPattern(tail);
     if (pattern === "auth-failure") {
         if (remote.kind === "alias") {
             const euid = process.geteuid?.() ?? process.getuid?.() ?? -1;
+            const cause = await diagnoseAliasAuth(remote.alias, { sshBin: options.sshBin, env: options.env });
+            if (cause !== null) {
+                return `ssh alias "${remote.alias}": authentication failed under BatchMode - ${cause}`;
+            }
             return (
                 `ssh alias "${remote.alias}": authentication failed under BatchMode - verify that ` +
                 `"ssh ${remote.alias}" works non-interactively for this user (uid ${euid}); ` +
@@ -209,7 +225,7 @@ export async function runRemote(
             }
             if (result.exitCode === 255) {
                 const tail = sshStderrTail(result.stderr);
-                throw new SshError(sshFailureMessage(remote, tail), {
+                throw new SshError(await sshFailureMessage(remote, tail, { sshBin: options.sshBin, env }), {
                     retriable: !isPermanentSshStderr(tail),
                 });
             }

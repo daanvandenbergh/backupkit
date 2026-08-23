@@ -151,7 +151,14 @@ describe("runRemote (fake ssh)", () => {
                 /ssh alias "myserver": authentication failed under BatchMode/.test(error.message) &&
                 /does not manage keys for alias remotes/.test(error.message),
         );
-        expect(await fake.calls()).toHaveLength(1);
+        // One CONNECT attempt (auth failure is permanent - never retried), plus
+        // the local `ssh -G myserver` the key diagnosis runs to look for a
+        // passphrase-protected ssh_config key. The fake resolves no
+        // identityfile, so the diagnosis finds no cause and the generic message
+        // stands - which is the required behaviour: never guess.
+        const calls = await fake.calls();
+        expect(calls).toHaveLength(2);
+        expect(calls[1].argv).toEqual(["-G", "myserver"]);
     });
 
     it("host key mismatch is permanent and never auto-healed", async () => {
