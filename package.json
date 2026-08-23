@@ -1,6 +1,6 @@
 {
     "name": "@daanvandenbergh/backupkit",
-    "version": "2.2.1",
+    "version": "2.3.0",
     "description": "Backup toolkit for Node.js/TypeScript projects.",
     "license": "UNLICENSED",
     "type": "module",
