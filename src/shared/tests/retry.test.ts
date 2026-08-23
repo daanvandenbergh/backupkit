@@ -3,19 +3,30 @@ import { Logger } from "../logger.js";
 import { SshError, TransferError } from "../errors.js";
 import { CONTROL_RETRY_POLICY, computeRetryDelayMs, transferRetryPolicy, withTransientRetry } from "../retry.js";
 
-/** Build a logger capturing warn lines. */
-function warnCapture(): { logger: Logger; warns: string[] } {
+/**
+ * Build a logger capturing retry lines. `warns` holds only the warn-level ones
+ * (what a terminal sees); `all` holds every level down to debug (what the log
+ * file keeps). The split is the point: only the FIRST retry of a call is a
+ * warning, the rest of the ladder is debug.
+ */
+function warnCapture(): { logger: Logger; warns: string[]; all: string[] } {
     const warns: string[] = [];
+    const all: string[] = [];
     const logger = new Logger({
-        level: "warn",
-        stdout: { write() {} },
+        level: "debug",
+        stdout: {
+            write(chunk: string) {
+                all.push(chunk);
+            },
+        },
         stderr: {
             write(chunk: string) {
                 warns.push(chunk);
+                all.push(chunk);
             },
         },
     });
-    return { logger, warns };
+    return { logger, warns, all };
 }
 
 /** An op failing `failures` times with retriable errors, then succeeding. */
@@ -97,8 +108,8 @@ describe("withTransientRetry", () => {
         expect(warns[0]).toContain("blip 1");
     });
 
-    it("carries the failure cause on every warn, trimmed so a 2 KiB stderr tail cannot flood the log", async () => {
-        const { logger, warns } = warnCapture();
+    it("carries the failure cause on every retry line, trimmed so a 2 KiB stderr tail cannot flood the log", async () => {
+        const { logger, warns, all } = warnCapture();
         const head = "no answer from the host";
         const long = `${head} [ssh said: ${"x".repeat(4000)}]`;
         const op = async (): Promise<never> => {
@@ -109,12 +120,17 @@ describe("withTransientRetry", () => {
         await vi.advanceTimersByTimeAsync(2000);
         await vi.advanceTimersByTimeAsync(4000);
         await expect(promise).rejects.toThrow(head);
-        expect(warns).toHaveLength(2);
-        for (const warn of warns) {
-            expect(warn).toContain(head);
-            expect(warn).toContain("...");
-            expect(warn.length).toBeLessThan(220);
+        // Both rungs carry the cause, trimmed...
+        expect(all).toHaveLength(2);
+        for (const line of all) {
+            expect(line).toContain(head);
+            expect(line).toContain("...");
+            expect(line.length).toBeLessThan(220);
         }
+        // ...but only the first one is a WARNING. The second says the same
+        // sentence with a different number, so it belongs in the log file, not
+        // stacked on a terminal.
+        expect(warns).toHaveLength(1);
     });
 
     it("renders a non-Error throw as its string form rather than [object Object]", async () => {
@@ -135,7 +151,7 @@ describe("withTransientRetry", () => {
     });
 
     it("control policy exhausts after 3 attempts with delays 2s then 4s", async () => {
-        const { logger, warns } = warnCapture();
+        const { logger, warns, all } = warnCapture();
         const { op, calls } = flaky(Infinity);
         const promise = withTransientRetry(op, CONTROL_RETRY_POLICY, logger, "df");
         promise.catch(() => {});
@@ -144,13 +160,14 @@ describe("withTransientRetry", () => {
         await vi.advanceTimersByTimeAsync(4000);
         await expect(promise).rejects.toThrow("blip 3");
         expect(calls()).toBe(3);
-        expect(warns).toHaveLength(2);
-        expect(warns[0]).toContain("delayMs=2000");
-        expect(warns[1]).toContain("delayMs=4000");
+        expect(all).toHaveLength(2);
+        expect(all[0]).toContain("delayMs=2000");
+        expect(all[1]).toContain("delayMs=4000");
+        expect(warns).toHaveLength(1);
     });
 
     it("transfer policy runs 5 attempts with the 15/30/60/120 delay ladder", async () => {
-        const { logger, warns } = warnCapture();
+        const { logger, warns, all } = warnCapture();
         const { op, calls } = flaky(Infinity);
         const promise = withTransientRetry(op, transferRetryPolicy(5), logger, "transfer");
         promise.catch(() => {});
@@ -159,7 +176,9 @@ describe("withTransientRetry", () => {
         }
         await expect(promise).rejects.toThrow("blip 5");
         expect(calls()).toBe(5);
-        expect(warns.map((line) => /delayMs=(\d+)/.exec(line)![1])).toEqual(["15000", "30000", "60000", "120000"]);
+        expect(all.map((line) => /delayMs=(\d+)/.exec(line)![1])).toEqual(["15000", "30000", "60000", "120000"]);
+        // Four rungs in the record, ONE line on the terminal.
+        expect(warns).toHaveLength(1);
     });
 
     it("does not fire the next attempt before its delay elapses", async () => {

@@ -118,10 +118,12 @@ function retryCause(error: unknown): string {
  * Run `op` with capped-exponential retries on transient failures. Delay
  * before attempt k = min(baseDelayMs * 2^(k-2), capMs), ±20% jitter. Retries
  * only errors whose `retriable` flag is true (set by the classifiers);
- * everything else rethrows immediately. Each retried attempt logs one warn
- * naming the label, attempt number, delay, and the trimmed failure cause -
- * without that last field a retry storm says nothing about what is failing. Pure timers - no fs, no
- * child_process.
+ * everything else rethrows immediately. The FIRST retry logs one warn naming
+ * the label, its position in the ladder, the delay, and the trimmed failure
+ * cause - without that last field a retry storm says nothing about what is
+ * failing. Later retries of the same call repeat that sentence, so they log at
+ * DEBUG instead: the log file keeps the whole ladder, a terminal is told once.
+ * Pure timers - no fs, no child_process.
  *
  * `signal` is the graceful-shutdown signal: once aborted, no further attempt
  * starts and any pending backoff wakes immediately. Without it a stop could be
@@ -149,10 +151,17 @@ export async function withTransientRetry<T>(
             // a field (the log file's copy needs the exact jittered number to
             // make the ladder checkable) but never reaches a human line, where
             // the sentence already says "in 2s".
-            log.warn(`${label}: retrying (${next}/${policy.attempts}) in ${formatDuration(delayMs)}`, {
-                delayMs,
-                cause: retryCause(error),
-            });
+            //
+            // Only the FIRST retry is news. It tells the reader that this is
+            // stalling and why, which is the whole reason the line is a warning
+            // - a run that goes quiet for a minute with no explanation is worse
+            // than a noisy one. Every retry after it repeats that same sentence
+            // with a different number, so it drops to debug: still in the log
+            // file at debug level, off a terminal that has already been told.
+            log[next === 2 ? "warn" : "debug"](
+                `${label}: retrying (${next}/${policy.attempts}) in ${formatDuration(delayMs)}`,
+                { delayMs, cause: retryCause(error) },
+            );
             await sleep(delayMs, signal);
             // Aborted while waiting: the backoff woke early precisely so this
             // check happens now rather than after the full delay. Rethrow the

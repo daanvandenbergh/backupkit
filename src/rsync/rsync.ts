@@ -131,11 +131,18 @@ export function clearRemoteVersionCache(): void {
 
 /**
  * Probe the remote rsync version over one connection identity (`user@host:port`
- * for explicit remotes, the alias string for alias remotes). Wrapped in the
- * control-path transient retry so a momentary blip never marks a healthy host
- * bad; a version below the floor (or openrsync) is a permanent refusal, never
- * retried. Successful probes are cached per identity for the process lifetime;
- * failures are not cached, so the next run re-probes a host that got fixed.
+ * for explicit remotes, the alias string for alias remotes). A version below
+ * the floor (or openrsync) is a permanent refusal. Successful probes are cached
+ * per identity for the process lifetime; failures are not cached, so the next
+ * run re-probes a host that got fixed.
+ *
+ * TRANSIENT RETRIES BELONG TO THE RUNNER, not to this function. `runRemote` is
+ * already wrapped in the control-path retry, so a second ladder here MULTIPLIED
+ * with it: 3 outer attempts x 3 inner ones was 9 ssh connects for one probe.
+ * Against a host that is simply down, at ConnectTimeout=15 that is over two
+ * minutes of `backupkit check` sitting silent, and eight near-identical
+ * "retrying" lines for one dead host. The runner's own ladder is the control
+ * policy - the exact thing the outer wrapper was there to provide.
  */
 export function probeRemoteRsync(params: {
     /** Cache key: the connection identity this probe travels over. */
@@ -144,8 +151,6 @@ export function probeRemoteRsync(params: {
     runRemote: RemoteRunner;
     /** The target's remoteRsyncBin override, or null for the remote default "rsync". */
     remoteRsyncBin: string | null;
-    /** Logger for the retry helper's per-attempt warns. */
-    log: Logger;
 }): Promise<string> {
     const key = probeCacheKey(params.identity, params.remoteRsyncBin);
     const cached = remoteVersionCache.get(key);
@@ -154,30 +159,25 @@ export function probeRemoteRsync(params: {
     }
     const bin = params.remoteRsyncBin ?? "rsync";
     const fix = `install rsync >= ${RSYNC_VERSION_FLOOR} on the remote, or point rsync.remoteRsyncBin at one`;
-    const probe = withTransientRetry(
-        async () => {
-            const result = await params.runRemote([bin, "--version"]);
-            const tail = sshStderrTail(result.stderr);
-            if (result.exitCode === 255 || result.exitCode === null || result.timedOut) {
-                const why = describeTransientSshStderr(tail) ?? "the ssh transport failed before rsync could answer";
-                throw new SshError(
-                    `could not ask ${params.identity} for its rsync version: ${why}` +
-                        (tail === "" ? "" : ` [ssh said: ${tail}]`),
-                    { retriable: classifyExit(255, tail).retriable },
-                );
-            }
-            if (result.exitCode === 127) {
-                refuse(`${bin} not found on ${params.identity} - ${fix}`);
-            }
-            if (result.exitCode !== 0) {
-                refuse(`${bin} --version failed on ${params.identity} (exit ${result.exitCode}) - ${fix}`);
-            }
-            return judgeVersionBanner(`${bin} on ${params.identity}`, result.stdout, fix);
-        },
-        CONTROL_RETRY_POLICY,
-        params.log,
-        `rsync version probe ${params.identity}`,
-    );
+    const probe = (async (): Promise<string> => {
+        const result = await params.runRemote([bin, "--version"]);
+        const tail = sshStderrTail(result.stderr);
+        if (result.exitCode === 255 || result.exitCode === null || result.timedOut) {
+            const why = describeTransientSshStderr(tail) ?? "the ssh transport failed before rsync could answer";
+            throw new SshError(
+                `could not ask ${params.identity} for its rsync version: ${why}` +
+                    (tail === "" ? "" : ` [ssh said: ${tail}]`),
+                { retriable: classifyExit(255, tail).retriable },
+            );
+        }
+        if (result.exitCode === 127) {
+            refuse(`${bin} not found on ${params.identity} - ${fix}`);
+        }
+        if (result.exitCode !== 0) {
+            refuse(`${bin} --version failed on ${params.identity} (exit ${result.exitCode}) - ${fix}`);
+        }
+        return judgeVersionBanner(`${bin} on ${params.identity}`, result.stdout, fix);
+    })();
     remoteVersionCache.set(key, probe);
     probe.catch(() => remoteVersionCache.delete(key));
     return probe;

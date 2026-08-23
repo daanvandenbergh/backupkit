@@ -138,7 +138,7 @@ describe("probeRemoteRsync", () => {
     it("parses a good remote banner and probes with the default bin", async () => {
         const runner = fakeRunner([res({ stdout: GOOD_BANNER })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "backup@h:22", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "backup@h:22", runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(outcome.ok).toBe("3.2.7");
         expect(runner.calls).toEqual([["rsync", "--version"]]);
@@ -147,7 +147,7 @@ describe("probeRemoteRsync", () => {
     it("uses remoteRsyncBin when set", async () => {
         const runner = fakeRunner([res({ stdout: GOOD_BANNER })]);
         await settle(
-            probeRemoteRsync({ identity: "a", runRemote: runner.run, remoteRsyncBin: "/opt/bin/rsync", log: silentLog }),
+            probeRemoteRsync({ identity: "a", runRemote: runner.run, remoteRsyncBin: "/opt/bin/rsync" }),
         );
         expect(runner.calls).toEqual([["/opt/bin/rsync", "--version"]]);
     });
@@ -169,7 +169,7 @@ describe("probeRemoteRsync", () => {
         const runner = fakeRunner([res({ stdout: GOOD_BANNER }), res({ stdout: OLD_BANNER })]);
         const identity = "backup@h:22";
         const modern = await settle(
-            probeRemoteRsync({ identity, runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity, runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(modern.ok).toBe("3.2.7");
         const legacy = await settle(
@@ -177,7 +177,6 @@ describe("probeRemoteRsync", () => {
                 identity,
                 runRemote: runner.run,
                 remoteRsyncBin: "/opt/legacy/bin/rsync",
-                log: silentLog,
             }),
         );
         expect(runner.calls).toHaveLength(2);
@@ -195,33 +194,41 @@ describe("probeRemoteRsync", () => {
 
     it("probes distinct identities separately", async () => {
         const runner = fakeRunner([res({ stdout: GOOD_BANNER })]);
-        await settle(probeRemoteRsync({ identity: "a", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }));
-        await settle(probeRemoteRsync({ identity: "b", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }));
+        await settle(probeRemoteRsync({ identity: "a", runRemote: runner.run, remoteRsyncBin: null }));
+        await settle(probeRemoteRsync({ identity: "b", runRemote: runner.run, remoteRsyncBin: null }));
         expect(runner.calls).toHaveLength(2);
     });
 
-    it("retries a transient 255 blip and succeeds without failing the host", async () => {
+    // The probe adds NO retry ladder of its own: the runner it is handed
+    // (production: ssh/'s `runRemote`) is already wrapped in the control
+    // policy, and a second ladder here MULTIPLIED with it - 3 x 3 = 9 ssh
+    // connects for one probe, which against a host that is simply down is over
+    // two minutes of `backupkit check` sitting silent. These two tests are the
+    // guard: one call in, one call out, whatever the transient failure.
+    it("does NOT re-run the runner on a transient blip - retries belong to the runner", async () => {
         const runner = fakeRunner([res({ exitCode: 255, stderr: "Connection reset by peer" }), res({ stdout: GOOD_BANNER })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "flaky", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "flaky", runRemote: runner.run, remoteRsyncBin: null }),
         );
-        expect(outcome.ok).toBe("3.2.7");
-        expect(runner.calls).toHaveLength(2);
+        // The blip is surfaced as a RETRIABLE failure - the caller's own ladder
+        // (or the next scheduler tick) is what tries again, not this function.
+        expect(outcome.err).toMatchObject({ code: "ssh", retriable: true });
+        expect(runner.calls).toHaveLength(1);
     });
 
-    it("gives up after the 3 control attempts when the blip persists", async () => {
+    it("a persistent transient failure is one call, reported retriable", async () => {
         const runner = fakeRunner([res({ exitCode: 255, stderr: "Connection timed out" })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "down", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "down", runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(outcome.err).toMatchObject({ code: "ssh", retriable: true });
-        expect(runner.calls).toHaveLength(3);
+        expect(runner.calls).toHaveLength(1);
     });
 
     it("a permanent ssh pattern is never retried", async () => {
         const runner = fakeRunner([res({ exitCode: 255, stderr: "backup@h: Permission denied (publickey)." })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "authfail", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "authfail", runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(outcome.err).toMatchObject({ code: "ssh", retriable: false });
         expect(runner.calls).toHaveLength(1);
@@ -230,7 +237,7 @@ describe("probeRemoteRsync", () => {
     it("exit 127 (rsync missing on remote) is a permanent, actionable refusal", async () => {
         const runner = fakeRunner([res({ exitCode: 127, stderr: "rsync: command not found" })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "norsync", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "norsync", runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(String((outcome.err as Error).message)).toMatch(/not found on norsync.*remoteRsyncBin/s);
         expect(runner.calls).toHaveLength(1);
@@ -250,7 +257,7 @@ describe("probeRemoteRsync", () => {
     it("remote openrsync is refused", async () => {
         const runner = fakeRunner([res({ stdout: OPENRSYNC_BANNER })]);
         const outcome = await settle(
-            probeRemoteRsync({ identity: "mac", runRemote: runner.run, remoteRsyncBin: null, log: silentLog }),
+            probeRemoteRsync({ identity: "mac", runRemote: runner.run, remoteRsyncBin: null }),
         );
         expect(String((outcome.err as Error).message)).toContain("openrsync");
     });

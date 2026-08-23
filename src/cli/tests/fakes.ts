@@ -9,6 +9,7 @@
 import type { ResolvedConfig } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import type {
+    CheckOptions,
     CheckReport,
     PruneReport,
     RestoreReport,
@@ -136,9 +137,27 @@ export class FakeEngine implements EngineLike {
         return this.answer("unlock", options, this.unlockRows);
     }
 
-    /** Fake check. */
-    check(): Promise<CheckReport> {
-        return this.answer("check", undefined, this.checkReport);
+    /**
+     * When true, `check()` streams `checkReport`'s local section and each
+     * remote row through `onProgress` before it resolves - what the real engine
+     * does. Off by default, so the default fake exercises the CLI's fallback
+     * path (an engine that ignores the callback must still print everything).
+     */
+    streamCheckProgress = false;
+
+    /** Fake check. Emits progress first when `streamCheckProgress` is set. */
+    check(options?: CheckOptions): Promise<CheckReport> {
+        if (this.streamCheckProgress && options?.onProgress !== undefined) {
+            options.onProgress({
+                kind: "local",
+                localRsync: this.checkReport.localRsync,
+                sshOk: this.checkReport.sshOk,
+            });
+            for (const remote of this.checkReport.remotes) {
+                options.onProgress({ kind: "remote", remote });
+            }
+        }
+        return this.answer("check", options, this.checkReport);
     }
 }
 

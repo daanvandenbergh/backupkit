@@ -354,6 +354,16 @@ No timestamp (you are watching it happen), no target name repeated in a `target=
 
 Timestamped, leveled, greppable, with every field intact - including the lines the console suppressed. `backupkit logs` reads this shape, and so does anything you point at the log file. `backupkit daemon` (the installed service) writes the machine format to its console too, because its console *is* the journal.
 
+**Retries say it once.** When a remote operation hits a temporary problem, the first retry is a warning naming what is stalling, how far into the ladder it is, and why:
+
+```
+Warning: ssh archive: retrying (2/3) in 2s - no answer - the host is offline, or this machine cannot reach it
+```
+
+The rest of that ladder repeats the same sentence with a different number, so it logs at `debug` - in the file, off your screen. Set `logging.level` to `debug` to see every rung.
+
+`backupkit check` prints each line the moment it is decided, rather than holding the whole report until the last remote answers. An unreachable host costs a full ssh connect timeout, so a config with several remotes used to sit blank for the sum of them; now the local rows appear immediately and each remote fills in as it resolves.
+
 ## Timestamps
 
 Every timestamp you read is `YYYY-MM-DDTHH:mm:ssZ` in **UTC**, whole seconds - the `CREATED (UTC)` and `NEXT DUE` columns, the lock details. The trailing `Z` is the ISO-8601 designator for UTC, not decoration: without it the same string would mean *local* time, so a reader in another timezone would misread every backup by their offset. backupkit never prints a host-local time, on purpose - an archive is often read from a different machine than it was written on.

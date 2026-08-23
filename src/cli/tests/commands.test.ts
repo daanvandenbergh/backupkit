@@ -11,7 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { TargetStatus } from "../../engine/types.js";
 import { logStyleFor } from "../internal/context.js";
 import { main } from "../main.js";
-import { fakeDeps, makeConfig, makeRunReport, makeTarget } from "./fakes.js";
+import { fakeDeps, makeConfig, makeRunReport, makeTarget, type FakeEngine } from "./fakes.js";
 
 describe("run", () => {
     it("passes force/dry-run/targets to the engine and reports per-target lines", async () => {
@@ -710,6 +710,56 @@ describe("check", () => {
         // the error no row showed. Saying it twice is what made the output a wall.
         expect(h.out.join("\n")).toContain("Remote example (explicit): NOT REACHABLE - host unreachable");
         expect(h.err).toEqual(["Error: rsync too old"]);
+    });
+});
+
+describe("check streams its report instead of printing it all at the end", () => {
+    /** A report with two remotes, one of them unreachable. */
+    function twoRemotes(): FakeEngine["checkReport"] {
+        return {
+            ok: false,
+            localRsync: { bin: "/usr/bin/rsync", version: "3.2.7" },
+            sshOk: true,
+            remotes: [
+                { remote: "fast", kind: "explicit", reachable: true, rsyncVersion: "3.2.7", resolved: null, error: null },
+                { remote: "down", kind: "alias", reachable: false, rsyncVersion: null, resolved: null, error: "no answer" },
+            ],
+            jailLines: [],
+            encryptedKeys: [],
+            errors: ["remote down: no answer"],
+        };
+    }
+
+    it("prints each row from onProgress, and the end-of-report replay adds no duplicates", async () => {
+        const h = fakeDeps();
+        h.engine.checkReport = twoRemotes();
+        h.engine.streamCheckProgress = true;
+        expect(await main(["check"], h.deps)).toBe(1);
+        const out = h.out.join("\n");
+        expect(out).toContain("Local rsync: /usr/bin/rsync 3.2.7");
+        expect(out).toContain("Remote fast (explicit): reachable, rsync 3.2.7");
+        expect(out).toContain("Remote down (alias): NOT REACHABLE - no answer");
+        // Idempotence is the whole safety of streaming + replaying: every line
+        // appears exactly once.
+        expect(h.out.filter((line) => line.startsWith("Local rsync:"))).toHaveLength(1);
+        expect(h.out.filter((line) => line.startsWith("Local ssh:"))).toHaveLength(1);
+        expect(h.out.filter((line) => line.startsWith("Remote "))).toHaveLength(2);
+    });
+
+    it("an engine that IGNORES onProgress prints byte-identical output", async () => {
+        const streamed = fakeDeps();
+        streamed.engine.checkReport = twoRemotes();
+        streamed.engine.streamCheckProgress = true;
+        await main(["check"], streamed.deps);
+
+        const silent = fakeDeps();
+        silent.engine.checkReport = twoRemotes();
+        silent.engine.streamCheckProgress = false;
+        await main(["check"], silent.deps);
+
+        // The callback is a LATENCY optimization, never the source of truth.
+        expect(streamed.out).toEqual(silent.out);
+        expect(streamed.err).toEqual(silent.err);
     });
 });
 

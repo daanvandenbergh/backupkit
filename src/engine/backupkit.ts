@@ -44,6 +44,8 @@ import {
 import { backoffDelayMs, BackoffTracker, nextDueAt, Scheduler } from "./internal/scheduler.js";
 import { runMirror, runTarget, type MirrorRunnerDeps, type TargetRunnerDeps } from "./internal/target-runner.js";
 import type {
+    CheckOptions,
+    CheckProgress,
     CheckReport,
     JailLine,
     PruneReport,
@@ -761,7 +763,6 @@ export class Backupkit {
                         signal,
                     }),
                 remoteRsyncBin: target.rsync.remoteRsyncBin,
-                log: this.log.with({ remote: remote.name }),
             });
             this.remoteProbes.set(key, probe);
             probe.catch(() => this.remoteProbes.delete(key));
@@ -1631,8 +1632,17 @@ export class Backupkit {
         return errors;
     }
 
-    async check(): Promise<CheckReport> {
+    /**
+     * The readiness report. `options.onProgress` receives each part the moment
+     * it settles - the local probes first, then one event per remote as its
+     * row is finalized - so a caller can render a report that fills in rather
+     * than a minute of silence while an unreachable host burns its connect
+     * timeout. The returned report is complete either way.
+     */
+    async check(options?: CheckOptions): Promise<CheckReport> {
         const errors: string[] = [];
+        /** Emit one progress event, if anyone is listening. */
+        const emit = (event: CheckProgress): void => options?.onProgress?.(event);
         try {
             await this.preflight();
             // Per-remote priming failures do not fail preflight (fault isolation),
@@ -1642,6 +1652,10 @@ export class Backupkit {
             }
         } catch (error) {
             errors.push(describeError(error));
+            // The "local" event is emitted on THIS path too - it is the caller's
+            // signal that the local section is settled (at nothing), so a
+            // streaming printer never waits for an event that will not come.
+            emit({ kind: "local", localRsync: null, sshOk: false });
             return { ok: false, localRsync: null, sshOk: false, remotes: [], jailLines: [], encryptedKeys: [], errors };
         }
 
@@ -1673,6 +1687,7 @@ export class Backupkit {
         } catch (error) {
             errors.push(`ssh binary not found: ${describeError(error)}`);
         }
+        emit({ kind: "local", localRsync, sshOk });
 
         const remoteChecks: RemoteCheck[] = [];
         for (const remote of Object.values(this.config.remotes)) {
@@ -1716,7 +1731,6 @@ export class Backupkit {
                                 log: this.log.with({ remote: remote.name }),
                             }),
                         remoteRsyncBin,
-                        log: this.log.with({ remote: remote.name }),
                     });
                     row.rsyncVersion = row.rsyncVersion ?? version;
                     row.reachable = true;
@@ -1728,6 +1742,7 @@ export class Backupkit {
                 }
             }
             remoteChecks.push(row);
+            emit({ kind: "remote", remote: row });
         }
 
         const jailLines: JailLine[] = [];

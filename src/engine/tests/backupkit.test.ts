@@ -749,6 +749,43 @@ describe("Backupkit", () => {
         expect(await readdir(join(fixture.root, "run"))).toEqual([]);
     });
 
+    // Probing every remote in sequence costs an ssh connect timeout apiece, so
+    // a report that only arrives complete leaves the terminal blank for the sum
+    // of them. These events are what let `backupkit check` fill in as it goes.
+    it("check: streams the local section then one event per remote, before it resolves", async () => {
+        const fixture = track(
+            await makeKit({
+                target: {
+                    direction: "push",
+                    dst: { kind: "remote", remote: { kind: "alias", restrictedShell: false, name: "srv", alias: "myserver" }, path: "/srv/backups" },
+                    destination: "/srv/backups",
+                },
+            }),
+        );
+        const events: string[] = [];
+        const report = await fixture.kit.check({
+            onProgress: (event) => {
+                events.push(event.kind === "local" ? "local" : `remote:${event.remote.remote}`);
+            },
+        });
+        // The local section settles FIRST - a streaming printer relies on that
+        // order to print its two local lines above every remote row.
+        expect(events[0]).toBe("local");
+        // ...then exactly one event per remote, matching the final report.
+        expect(events.slice(1)).toEqual(report.remotes.map((remote) => `remote:${remote.remote}`));
+        expect(events.slice(1)).toHaveLength(report.remotes.length);
+    });
+
+    it("check: emits the local event even when preflight fails, so a streaming caller never waits forever", async () => {
+        const fixture = track(await makeKit());
+        await chmod(join(fixture.root, "config.jsonc"), 0o666);
+        const events: string[] = [];
+        const report = await fixture.kit.check({ onProgress: (event) => events.push(event.kind) });
+        expect(report.ok).toBe(false);
+        // The section is settled - at nothing - and said so.
+        expect(events).toEqual(["local"]);
+    });
+
     it("check: local probes ok, no remotes, no jail lines", async () => {
         const { kit } = track(await makeKit());
         const report = await kit.check();

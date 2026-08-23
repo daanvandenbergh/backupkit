@@ -11,6 +11,7 @@ import { parseArgs } from "node:util";
 import type { ResolvedConfig } from "../../config/types.js";
 import type { ExecOptions, ExecResult } from "../../exec/exec.js";
 import type {
+    CheckOptions,
     CheckReport,
     PruneReport,
     RestoreReport,
@@ -56,8 +57,8 @@ export interface EngineLike {
     prune(options?: { targets?: string[]; dryRun?: boolean; force?: boolean }): Promise<PruneReport>;
     /** Clear a leaked destination lock; a live lock needs `force`. */
     unlock(options?: { targets?: string[]; force?: boolean }): Promise<TargetUnlockReport[]>;
-    /** Validate config, probe binaries and hosts, produce jail-line data. */
-    check(): Promise<CheckReport>;
+    /** Validate config, probe binaries and hosts, produce jail-line data; `onProgress` streams each part as it settles. */
+    check(options?: CheckOptions): Promise<CheckReport>;
 }
 
 /** The loaded config plus the engine constructed over it. */

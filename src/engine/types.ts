@@ -241,6 +241,39 @@ export interface CheckReport {
     errors: string[];
 }
 
+/**
+ * A part of the readiness report, emitted the moment it settles.
+ *
+ * `check()` probes every remote in sequence, and one unreachable host costs a
+ * full ssh connect timeout - so the complete report can be a minute or more
+ * away while the terminal shows nothing at all. Streaming each part as it is
+ * decided turns that silence into a report that fills in as it goes. The
+ * returned `CheckReport` still carries everything: these events are for
+ * LATENCY, never the source of truth, so a caller that ignores them prints
+ * exactly the same output, only later.
+ */
+export type CheckProgress =
+    | {
+          /** The local binary probes are done. Always emitted exactly once, before any remote. */
+          kind: "local";
+          /** The accepted local rsync binary + version, or null when refused/missing. */
+          localRsync: { bin: string; version: string } | null;
+          /** True when the local ssh binary answered `-V`. */
+          sshOk: boolean;
+      }
+    | {
+          /** One remote's probe row is final. */
+          kind: "remote";
+          /** The completed row, identical to its entry in `CheckReport.remotes`. */
+          remote: RemoteCheck;
+      };
+
+/** Options for one `check()` call. */
+export interface CheckOptions {
+    /** Called as each part of the report settles; see {@link CheckProgress}. */
+    onProgress?: (event: CheckProgress) => void;
+}
+
 /** The report `restore()` returns. */
 export interface RestoreReport {
     /** Target the snapshot belongs to. */

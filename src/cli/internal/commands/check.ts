@@ -21,6 +21,7 @@ import { dirname } from "node:path";
 
 import { SYSTEM_CONFIG_DIR } from "../../../config/config.js";
 import { remoteCheckError } from "../../../engine/backupkit.js";
+import type { CheckReport, RemoteCheck } from "../../../engine/types.js";
 import type { CliDeps } from "../context.js";
 import { count, parseFlags } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -34,16 +35,34 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
     }
     const { config, engine } = deps.loadContext(values.config as string | undefined);
     deps.stdout(`Config:      ${config.configPath} (valid)`);
-    const report = await engine.check();
 
-    deps.stdout(
-        report.localRsync === null
-            ? "Local rsync: NOT USABLE (see the errors below)"
-            : `Local rsync: ${report.localRsync.bin} ${report.localRsync.version}`,
-    );
-    deps.stdout(`Local ssh:   ${report.sshOk ? "ok" : "NOT USABLE (see the errors below)"}`);
-
-    for (const remote of report.remotes) {
+    // Printed AS THEY SETTLE, not after the whole report is built: probing an
+    // unreachable remote costs a full ssh connect timeout, and check used to
+    // show nothing at all for the length of every remote in the config added
+    // together. Each printer is idempotent and the report is replayed through
+    // them at the end, so an engine that ignores onProgress (a fake, an older
+    // one) prints exactly the same lines - just all at once, as before.
+    let localsPrinted = false;
+    /** Print the two local-binary lines once. */
+    const printLocals = (localRsync: CheckReport["localRsync"], sshOk: boolean): void => {
+        if (localsPrinted) {
+            return;
+        }
+        localsPrinted = true;
+        deps.stdout(
+            localRsync === null
+                ? "Local rsync: NOT USABLE (see the errors below)"
+                : `Local rsync: ${localRsync.bin} ${localRsync.version}`,
+        );
+        deps.stdout(`Local ssh:   ${sshOk ? "ok" : "NOT USABLE (see the errors below)"}`);
+    };
+    const remotesPrinted = new Set<string>();
+    /** Print one remote's row once. */
+    const printRemote = (remote: RemoteCheck): void => {
+        if (remotesPrinted.has(remote.remote)) {
+            return;
+        }
+        remotesPrinted.add(remote.remote);
         const resolved =
             remote.resolved === null
                 ? ""
@@ -52,6 +71,20 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
             ? `reachable, rsync ${remote.rsyncVersion ?? "version unknown"}`
             : `NOT REACHABLE${remote.error === null ? "" : ` - ${remote.error}`}`;
         deps.stdout(`Remote ${remote.remote} (${remote.kind}${resolved}): ${state}`);
+    };
+
+    const report = await engine.check({
+        onProgress: (event) => {
+            if (event.kind === "local") {
+                printLocals(event.localRsync, event.sshOk);
+            } else {
+                printRemote(event.remote);
+            }
+        },
+    });
+    printLocals(report.localRsync, report.sshOk);
+    for (const remote of report.remotes) {
+        printRemote(remote);
     }
 
     if (report.jailLines.length > 0) {
