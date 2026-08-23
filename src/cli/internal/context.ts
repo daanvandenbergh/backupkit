@@ -289,6 +289,22 @@ export function timeUntil(iso: string | null, now: Date, never = "-"): string {
  * time, and - for a target already failing - why that time sits further out
  * than its schedule says.
  *
+ * A TABLE only when there is a table's worth of information. Targets sharing
+ * one schedule - the ordinary config - all come due at the same instant, so
+ * the block was a header plus a column of one value repeated:
+ *
+ * ```
+ * TARGET                                       NEXT DUE
+ * persistance@personal-backup-server           in 11h 10m
+ * persistance-snapshot@personal-backup-server  in 11h 10m
+ * ```
+ *
+ * Three lines and two columns to say one thing, in a CLI whose every other
+ * line is a sentence. When the times agree and nothing is failing, it is a
+ * sentence; the moment they diverge - staggered schedules, a target pushed
+ * out by backoff - the difference IS the information and the table comes
+ * back.
+ *
  * `daemon` already argued the case for its start/stop lines: without them a
  * healthy daemon is indistinguishable from one that died during preflight.
  * The same holds one step further in. A scheduler with nothing due for six
@@ -302,11 +318,24 @@ export async function schedulePreview(engine: CliContext["engine"], now: Date = 
     if (scheduled.length === 0) {
         return [];
     }
+    const whens = scheduled.map((row) => timeUntil(row.nextDueAt, now));
+    // "-" is the unparseable-timestamp case: it reads as a column, never as a
+    // sentence, so it keeps the table.
+    const agree = whens[0] !== "-" && whens.every((when) => when === whens[0]);
+    if (agree && scheduled.every((row) => row.consecutiveFailures === 0)) {
+        // `timeUntil` yields "in 11h 10m" or "due now", both of which finish
+        // the sentence on their own.
+        return [
+            scheduled.length === 1
+                ? `Next backup ${whens[0]}.`
+                : `Next backup ${whens[0]} - all ${count(scheduled.length, "target")}.`,
+        ];
+    }
     return alignRows(
         ["TARGET", "NEXT DUE", ""],
-        scheduled.map((row) => [
+        scheduled.map((row, index) => [
             row.target,
-            timeUntil(row.nextDueAt, now),
+            whens[index],
             // Why this one is due so far out - not a second pointer. The line
             // above it already ends with "run: backupkit logs", and two
             // different places to go, one under the other, is how a reader
