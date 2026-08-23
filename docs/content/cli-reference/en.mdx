@@ -135,7 +135,7 @@ This is the supported home for **passphrase-protected keys**. On startup it laun
 
 Use it when a key has a passphrase, when you want to watch a schedule run before installing it, or on a machine where you would rather not install a root service. Its schedule dies with the process: nothing runs while you are logged out, and nothing comes back after a reboot. See [Run It Yourself](/run-it-yourself/) for the whole mode - which config it reads, where its state lives, and how to survive a logout.
 
-`--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
+`--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way, down to the per-target `FAILED - <reason>` row standing in for the engine's own error line rather than repeating it - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
 
 Before entering the loop, both `start` and `daemon` print **when each target is next due**, with a note on any target whose time is pushed out by a failure backoff:
 
@@ -143,7 +143,7 @@ Before entering the loop, both `start` and `daemon` print **when each target is 
 Scheduler started - 2 of 3 configured targets scheduled. Backups run while this process stays alive; Ctrl-C stops it.
 TARGET       NEXT DUE
 photos       in 17h
-persistance  in 12h    (waiting after 9 failures - see `backupkit status`)
+persistance  in 12h    (after 9 failures in a row)
 ```
 
 Without it a scheduler with nothing due for six hours prints nothing for six hours, which is indistinguishable from one that is stuck. It comes from the same read-only calculation `status` uses, so it costs nothing, and if it cannot be produced the scheduler starts regardless.
@@ -359,6 +359,8 @@ No timestamp - you are watching it happen. **And no `key=value` tail, ever.** A 
 persistance@archive: FAILED - the SSH key needs a passphrase and the ssh-agent is empty. Fix: ssh-add /keys/archive_ed25519
 Done. 1 of 1 target failed - see above, or run: backupkit logs
 ```
+
+`backupkit start --force` does the same for its opening pass, and only for that pass: the scheduler loop it enters afterwards is the only thing that will report a failure at 3am, so its error lines come straight back the moment the pass ends.
 
 **In `logging.file` and in journald** the same event keeps the full machine format, unchanged and complete:
 

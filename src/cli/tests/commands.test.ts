@@ -131,7 +131,7 @@ describe("schedule preview", () => {
         expect(out).toContain("in 3h");
         // A time further out than the schedule says needs its reason, or it
         // reads as a wrong schedule.
-        expect(out).toContain("waiting after 9 failures");
+        expect(out).toContain("after 9 failures in a row");
     });
 
     // A disabled target has no next due time, and inventing one for it would
@@ -212,7 +212,7 @@ describe("start", () => {
         h.engine.runReport = { startedAt: "s", finishedAt: "f", targets: [makeRunReport()] };
         expect(await main(["start", "--force"], h.deps)).toBe(0);
         expect(h.engine.calls.map((call) => call.method)).toEqual(["preflight", "run", "status", "start"]);
-        expect(h.engine.calls[1]).toEqual({ method: "run", options: { force: true } });
+        expect(h.engine.calls[1]).toEqual({ method: "run", options: { force: true, quietFailures: true } });
         expect(h.out).toEqual([
             h.out[0],
             "Running every target once now (--force), then scheduling.",

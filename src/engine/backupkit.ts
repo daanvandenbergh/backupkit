@@ -951,8 +951,16 @@ export class Backupkit {
      * the rsync child gets SIGTERM) and no further target starts - the same
      * graceful-shutdown contract the daemon loop has (spec section 6).
      */
-    async run(options: { targets?: string[]; force?: boolean; dryRun?: boolean } = {}): Promise<RunReport> {
+    async run(
+        options: { targets?: string[]; force?: boolean; dryRun?: boolean; quietFailures?: boolean } = {},
+    ): Promise<RunReport> {
         const startedAt = this.deps.now().toISOString();
+        // `quietFailures`: the caller prints `<target>: FAILED - <reason>` off
+        // the returned report, so the ERROR console lines for this pass would
+        // be the same sentence a second time. Only the CONSOLE and only for
+        // the duration - the log file still gets every line, and the scheduler
+        // loop that `backupkit start` enters afterwards gets its errors back.
+        const unmute = options.quietFailures === true ? this.log.mute(["error"]) : null;
         await this.preflight();
         const controller = new AbortController();
         if (this.abortController === null) {
@@ -964,6 +972,7 @@ export class Backupkit {
             if (this.abortController === controller) {
                 this.abortController = null;
             }
+            unmute?.();
         }
     }
 

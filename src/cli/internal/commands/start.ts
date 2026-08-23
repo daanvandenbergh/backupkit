@@ -41,7 +41,7 @@ export async function startCommand(argv: string[], deps: CliDeps): Promise<numbe
         // loop starts anyway, exactly as it would have without --force.
         try {
             deps.stdout("Running every target once now (--force), then scheduling.");
-            printRunReport(await engine.run({ force: true }), deps.stdout);
+            printRunReport(await engine.run({ force: true, quietFailures: true }), deps.stdout);
         } catch (error) {
             deps.stderr(`Initial --force pass failed: ${describeError(error)}`);
         }

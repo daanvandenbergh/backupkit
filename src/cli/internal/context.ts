@@ -35,8 +35,8 @@ export type ExecFn = (bin: string, args: readonly string[], options?: ExecOption
 export interface EngineLike {
     /** Ensure agent + keys + permission checks; `serviceMode` refuses passphrase-protected keys. */
     preflight(options?: { serviceMode?: boolean }): Promise<void>;
-    /** Run every due target once (or the named subset). */
-    run(options?: { targets?: string[]; force?: boolean; dryRun?: boolean }): Promise<RunReport>;
+    /** Run every due target once (or the named subset); `quietFailures` leaves the per-target ERROR console lines to the caller's own report. */
+    run(options?: { targets?: string[]; force?: boolean; dryRun?: boolean; quietFailures?: boolean }): Promise<RunReport>;
     /** Foreground scheduler loop; resolves after stop() completes. */
     start(): Promise<void>;
     /** Graceful stop: abort in-flight work and end the loop. */
@@ -307,9 +307,13 @@ export async function schedulePreview(engine: CliContext["engine"], now: Date = 
         scheduled.map((row) => [
             row.target,
             timeUntil(row.nextDueAt, now),
+            // Why this one is due so far out - not a second pointer. The line
+            // above it already ends with "run: backupkit logs", and two
+            // different places to go, one under the other, is how a reader
+            // ends up going to neither.
             row.consecutiveFailures === 0
                 ? ""
-                : `(waiting after ${count(row.consecutiveFailures, "failure")} - see \`backupkit status\`)`,
+                : `(after ${count(row.consecutiveFailures, "failure")} in a row)`,
         ]),
     );
 }

@@ -96,7 +96,7 @@ interface ResolvedLoggerOptions {
     now: () => Date;
     /** Render console lines for a person rather than for grep. */
     human: boolean;
-    /** Levels whose console line is suppressed (the file sink still gets them). */
+    /** Levels whose console line is suppressed (the file sink still gets them); mutable via `mute()`. */
     consoleMute: readonly LogLevel[];
 }
 
@@ -204,9 +204,13 @@ export class Logger {
     /** Sticky context rendered as `[k=v ...]` on every line from this logger. */
     private readonly context: Readonly<Record<string, string | number | boolean>>;
 
-    /** Construct a root logger. The second parameter is internal (used by `with()`). */
-    constructor(options?: LoggerOptions, context?: Record<string, string | number | boolean>) {
-        this.options = {
+    /** Construct a root logger. The second and third parameters are internal (used by `with()`). */
+    constructor(
+        options?: LoggerOptions,
+        context?: Record<string, string | number | boolean>,
+        inherited?: ResolvedLoggerOptions,
+    ) {
+        this.options = inherited ?? {
             level: options?.level ?? "info",
             stdout: options?.stdout ?? process.stdout,
             stderr: options?.stderr ?? process.stderr,
@@ -220,14 +224,33 @@ export class Logger {
 
     /**
      * Derive a child logger whose lines carry this logger's context merged
-     * with (and overridden by) the given context. Level and sinks are shared.
+     * with (and overridden by) the given context. Level and sinks are shared -
+     * the resolved options OBJECT is shared, not copied, so `mute()` on any
+     * logger in the family reaches the children too. Every per-target line the
+     * engine writes comes from a child, so a copy would have muted nothing.
      */
     with(context: Record<string, string | number | boolean>): Logger {
-        const { level, stdout, stderr, fileSink, now, human, consoleMute } = this.options;
-        return new Logger(
-            { level, stdout, stderr, fileSink: fileSink ?? undefined, now, human, consoleMute },
-            { ...this.context, ...context },
-        );
+        return new Logger(undefined, { ...this.context, ...context }, this.options);
+    }
+
+    /**
+     * Suppress these levels on the console until the returned function puts
+     * the previous set back. The file sink is untouched, and so is every other
+     * level.
+     *
+     * For a command that prints its own report of the same failures: the
+     * engine's ERROR line and `<target>: FAILED - <the same sentence>` one
+     * line below it are the same fact twice. `backupkit run` sets this for its
+     * whole invocation via `logStyleFor`; `backupkit start --force` cannot -
+     * its scheduler loop lives on afterwards and is the ONLY thing that
+     * reports a 3am failure - so it mutes just the one-shot pass and restores.
+     */
+    mute(levels: readonly LogLevel[]): () => void {
+        const previous = this.options.consoleMute;
+        this.options.consoleMute = levels;
+        return () => {
+            this.options.consoleMute = previous;
+        };
     }
 
     /** Log at error level (stderr). */

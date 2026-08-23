@@ -342,4 +342,34 @@ describe("Logger consoleMute", () => {
         logger.with({ target: "web1" }).error("hidden");
         expect(stderr.chunks).toEqual([]);
     });
+
+    it("mute() reaches a child made BEFORE it, and restores", () => {
+        // `backupkit start --force` mutes for the one-shot pass and restores
+        // before the scheduler loop - the loop is the only thing that reports
+        // a 3am failure, so a mute that outlived the pass would silence it.
+        // Every per-target line comes from a `with()` child, so a mute that
+        // did not reach children would suppress nothing at all.
+        const lines: string[] = [];
+        const { logger, stderr } = testLogger({ fileSink: (line) => lines.push(line) });
+        const target = logger.with({ target: "web1" });
+        const restore = logger.mute(["error"]);
+        target.error("printed by the run report instead");
+        logger.error("also hidden");
+        expect(stderr.chunks).toEqual([]);
+        restore();
+        target.error("the 3am failure nobody else reports");
+        expect(stderr.chunks).toHaveLength(1);
+        expect(stderr.chunks[0]).toContain("the 3am failure nobody else reports");
+        // Muted or not, all three are in the log file.
+        expect(lines).toHaveLength(3);
+    });
+
+    it("mute() restores the previous set, not 'nothing muted'", () => {
+        const { logger, stderr } = testLogger({ consoleMute: ["error"] });
+        logger.mute(["error", "warn"])();
+        logger.error("still muted");
+        logger.warn("shown again");
+        expect(stderr.chunks).toHaveLength(1);
+        expect(stderr.chunks[0]).toContain("shown again");
+    });
 });
