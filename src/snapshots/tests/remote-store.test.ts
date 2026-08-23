@@ -147,6 +147,21 @@ describe("RemoteSnapshotStore", () => {
             const store = new RemoteSnapshotStore(ROOT, runner, log);
             await expect(store.freeBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
         });
+
+        // totalBytes reads the OTHER column of the same df, and it used to be
+        // asked by a hand-rolled runRemote + parser in the engine that never
+        // reached this chokepoint: it read no `truncated` flag at all, so a
+        // capped answer whose head still parses handed the percent minFree floor
+        // an attacker-chosen filesystem size.
+        it("refuses truncated df output for totalBytes as well", async () => {
+            const { runner } = fakeRunner((argv) =>
+                argv[0] === "df"
+                    ? { stdout: "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 5 1 4 21% /\n", truncated: true }
+                    : {},
+            );
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.totalBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
     });
 
     describe("claimPartial", () => {
@@ -297,6 +312,38 @@ describe("RemoteSnapshotStore", () => {
             const { runner } = fakeRunner((argv) => (argv[0] === "df" ? { stdout } : {}));
             const store = new RemoteSnapshotStore(ROOT, runner, log);
             await expect(store.freeBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
+        });
+
+        // The OTHER column of the same df. The engine used to parse it itself,
+        // outside this store, with a copy of this arithmetic that returned null
+        // on anything it did not like - so a hostile df could not be told from
+        // an unreachable one, and neither the truncation guard nor the shutdown
+        // signal applied. One parser, one chokepoint, both columns.
+        it("totalBytes reads the 1024-blocks column of the same df", async () => {
+            const { runner, calls } = fakeRunner((argv) => (argv[0] === "df" ? { stdout: DF_OK } : {}));
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.totalBytes()).resolves.toBe(500000 * 1024);
+            expect(calls.at(-1)).toEqual(["df", "-Pk", "--", ROOT]);
+        });
+
+        it.each([
+            ["garbage text", "no columns here at all"],
+            [
+                "non-numeric total",
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 5ooooo 100000 400000 21% /\n",
+            ],
+            [
+                "an unbounded digit run that would parse to Infinity",
+                `Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 ${"9".repeat(400)} 100000 400000 21% /\n`,
+            ],
+            [
+                "a total column above the safe-integer range",
+                "Filesystem 1024-blocks Used Available Capacity Mounted on\n/dev/sda1 90071992547409910 100000 400000 21% /\n",
+            ],
+        ])("totalBytes rejects malformed df output: %s", async (_label, stdout) => {
+            const { runner } = fakeRunner((argv) => (argv[0] === "df" ? { stdout } : {}));
+            const store = new RemoteSnapshotStore(ROOT, runner, log);
+            await expect(store.totalBytes()).rejects.toBeInstanceOf(SnapshotStoreError);
         });
     });
 

@@ -33,6 +33,21 @@ export interface SnapshotStore {
     /** Free bytes on the archive filesystem (statfs locally, `df -Pk --` remotely). */
     freeBytes(): Promise<number>;
     /**
+     * Total bytes of the archive filesystem, or null when this store cannot
+     * know - the percent `minFree` floor's only input, degrading to 0 on null.
+     *
+     * It lives on the store, beside `freeBytes`, because the engine used to ask
+     * the remote itself with a hand-rolled `runRemote` + df parser that went
+     * AROUND this interface - and therefore around the two guarantees the
+     * store's single `run()` chokepoint owns: it read no `truncated` flag
+     * (invariant 33) and carried no shutdown signal (invariant 22), so a
+     * `systemctl stop` during the disk guard could not kill it and the daemon
+     * was SIGKILLed past `TimeoutStopSec` while holding the remote lock - which
+     * only the 24 h TTL clears. A filesystem fact about the archive root is the
+     * store's to answer.
+     */
+    totalBytes(): Promise<number | null>;
+    /**
      * Free inodes on the archive filesystem, or null when this store cannot
      * know (the remote store's `df -Pk --` reports no inode columns and the
      * jail's command grammar is fixed). Null means "skip the inode half of the

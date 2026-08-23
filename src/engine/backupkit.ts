@@ -8,7 +8,7 @@
  */
 
 import { closeSync, constants as fsConstants, openSync, writeSync } from "node:fs";
-import { lstat, readdir, readFile, realpath, statfs } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, posix, resolve, sep } from "node:path";
 
@@ -572,46 +572,6 @@ export class Backupkit {
     }
 
     /**
-     * Total bytes of a target's archive filesystem: statfs for local stores;
-     * `df -Pk --` over the jailed remote surface for push stores. Null when
-     * undeterminable (the percent minFree floor then degrades; disk-guard).
-     */
-    private async totalBytesFor(target: ResolvedTarget): Promise<number | null> {
-        if (target.dst.kind === "local") {
-            try {
-                const stats = await statfs(target.dst.path);
-                return stats.blocks * stats.bsize;
-            } catch {
-                return null;
-            }
-        }
-        try {
-            const result = await runRemote(target.dst.remote, ["df", "-Pk", "--", target.dst.path], {
-                sshBin: this.sshBin(),
-                context: "unattended",
-                authSock: this.authSockFor(target.dst.remote),
-                log: this.log.with({ target: target.name }),
-            });
-            if (result.exitCode !== 0) {
-                return null;
-            }
-            const lines = result.stdout.split("\n").map((line) => line.trim()).filter((line) => line !== "");
-            const tokens = (lines.at(-1) ?? "").split(/\s+/);
-            const pctIndex = tokens.findIndex((token) => /^[0-9]+%$/.test(token));
-            if (pctIndex < 4 || !/^[0-9]+$/.test(tokens[pctIndex - 3])) {
-                return null;
-            }
-            // The digit test has no length bound: a hostile `df` answering 400
-            // digits parses to Infinity, which would make a percent minFree
-            // floor infinite (or, on the free-bytes side, pass unconditionally).
-            const bytes = Number(tokens[pctIndex - 3]) * 1024;
-            return Number.isSafeInteger(bytes) ? bytes : null;
-        } catch {
-            return null;
-        }
-    }
-
-    /**
      * When a target last fulfilled a schedule window, or null when it never
      * has - the single input to every due-ness decision (`run`, the scheduler
      * tick, and the `status` row).
@@ -754,8 +714,16 @@ export class Backupkit {
      * `--rsync-path` at different binaries, and a host-only key would let one
      * target's probe stand in for the other's - leaving a binary the transfer
      * really uses never checked against the floor.
+     *
+     * `signal` is the engine's shutdown signal, so this ssh child dies with a
+     * `systemctl stop` like every other one (invariant 22) instead of running
+     * its 60 s timeout times the control policy's three attempts - ~186 s
+     * against a `TimeoutStopSec` of 30. The memo binds the FIRST caller's
+     * signal, which is correct: an abort only ever happens at shutdown, when
+     * every target is stopping together, and a rejected probe clears the memo
+     * so the next start re-probes.
      */
-    private remoteRsyncFor(target: ResolvedTarget, remote: ResolvedRemote): Promise<string> {
+    private remoteRsyncFor(target: ResolvedTarget, remote: ResolvedRemote, signal?: AbortSignal): Promise<string> {
         const identity = remoteIdentity(remote);
         const key = `${identity}\0${target.rsync.remoteRsyncBin ?? ""}`;
         let probe = this.remoteProbes.get(key);
@@ -768,6 +736,7 @@ export class Backupkit {
                         context: "unattended",
                         authSock: this.authSockFor(remote),
                         log: this.log.with({ remote: remote.name }),
+                        signal,
                     }),
                 remoteRsyncBin: target.rsync.remoteRsyncBin,
                 log: this.log.with({ remote: remote.name }),
@@ -787,7 +756,7 @@ export class Backupkit {
      * unreachable at probe time (invariant 11) - either fails only this
      * remote's targets, never the daemon.
      */
-    private async remoteGate(target: ResolvedTarget): Promise<TargetRunReport | null> {
+    private async remoteGate(target: ResolvedTarget, signal?: AbortSignal): Promise<TargetRunReport | null> {
         const remote = remoteOf(target);
         if (remote === null) {
             return null;
@@ -802,7 +771,7 @@ export class Backupkit {
             return this.syntheticReport(target, "failed", "remote-unavailable", keyFailure);
         }
         try {
-            await this.remoteRsyncFor(target, remote);
+            await this.remoteRsyncFor(target, remote, signal);
             return null;
         } catch (error) {
             const message = describeError(error);
@@ -871,7 +840,7 @@ export class Backupkit {
         }
 
         const wasDiskLow = this.diskLowTargets.has(target.name);
-        let report = await this.remoteGate(target);
+        let report = await this.remoteGate(target, options.signal);
         if (report === null && target.mode === "mirror") {
             const { bin } = await this.localRsync();
             const mirrorDeps: MirrorRunnerDeps = {
@@ -901,7 +870,6 @@ export class Backupkit {
                 transfer: this.deps.transfer,
                 estimate: this.deps.estimate,
                 execFn: this.deps.execFn,
-                totalBytes: () => this.totalBytesFor(target),
                 diskLowTargets: this.diskLowTargets,
                 previousStats: async () =>
                     newestStats(await readTargetReports(this.config.stateDir, target.name, this.log)),

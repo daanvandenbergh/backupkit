@@ -424,6 +424,18 @@ export class LocalSnapshotStore implements SnapshotStore {
     }
 
     /**
+     * Total bytes of the archive filesystem via the same statfs
+     * (`blocks * bsize`), or null when statfs cannot answer - the percent
+     * `minFree` floor then degrades to 0 and the caller logs it once. Null is
+     * "cannot know", never "plenty": `freeBytes` runs a moment later and throws
+     * on the same failure, so a genuinely missing filesystem still fails loudly.
+     */
+    async totalBytes(): Promise<number | null> {
+        const stats = await statfs(this.root).catch(() => null);
+        return stats === null ? null : stats.blocks * stats.bsize;
+    }
+
+    /**
      * Free inodes via the same statfs (`ffree`), or null when the filesystem
      * reports no inode accounting at all (`files === 0`, e.g. APFS/btrfs) - a
      * dynamic-inode filesystem cannot be exhausted this way, so the guard's

@@ -417,12 +417,19 @@ export class RemoteSnapshotStore implements SnapshotStore {
     }
 
     /**
-     * Free bytes on the remote archive filesystem via `df -Pk --`: the last
-     * output line's "Available" column (the all-digits token before the
-     * percent token), shape-validated - garbage output is refused, never
-     * guessed at (security invariant 9).
+     * One `df -Pk --` through the store's `run()` chokepoint, parsed into the
+     * two columns anything here can want: POSIX prints
+     * `Filesystem 1024-blocks Used Available Capacity Mounted-on`, so the
+     * percent token anchors both - total at `pctIndex - 3`, available at
+     * `pctIndex - 1`. Shape-validated; garbage is refused, never guessed at
+     * (security invariant 9).
+     *
+     * ONE parser, because there were two: this one and a hand-rolled copy in
+     * the engine that read the total column. They agreed on the arithmetic and
+     * differed on everything that matters - the engine's ran outside `run()`,
+     * so it read no `truncated` flag and carried no shutdown signal.
      */
-    async freeBytes(): Promise<number> {
+    private async df(): Promise<{ totalBytes: number; freeBytes: number }> {
         await this.ensureRoot();
         const result = await this.run(["df", "-Pk", "--", this.root], "free-space query");
         const lines = result.stdout
@@ -440,15 +447,40 @@ export class RemoteSnapshotStore implements SnapshotStore {
         if (pctIndex < 4) {
             throw malformed;
         }
-        const available = tokens[pctIndex - 1];
-        // The digit test alone has no length bound: a hostile `df` answering 400
-        // digits parses to Infinity, and `Infinity * 1024 >= anything` makes the
-        // disk guard pass unconditionally. The safe-integer bound is the check.
-        const kib = Number(available);
-        if (!/^[0-9]+$/.test(available) || !Number.isSafeInteger(kib * 1024)) {
-            throw malformed;
-        }
-        return kib * 1024;
+        /**
+         * One column as bytes. The digit test alone has no length bound: a
+         * hostile `df` answering 400 digits parses to Infinity, and
+         * `Infinity * 1024 >= anything` makes the disk guard pass
+         * unconditionally. The safe-integer bound is the check.
+         */
+        const column = (offsetBeforePct: number): number => {
+            const raw = tokens[pctIndex - offsetBeforePct];
+            const kib = Number(raw);
+            if (raw === undefined || !/^[0-9]+$/.test(raw) || !Number.isSafeInteger(kib * 1024)) {
+                throw malformed;
+            }
+            return kib * 1024;
+        };
+        return { totalBytes: column(3), freeBytes: column(1) };
+    }
+
+    /** Free bytes on the remote archive filesystem: `df -Pk --`'s "Available" column. */
+    async freeBytes(): Promise<number> {
+        return (await this.df()).freeBytes;
+    }
+
+    /**
+     * Total bytes of the remote archive filesystem: `df -Pk --`'s
+     * "1024-blocks" column. Only the percent `minFree` floor needs it, and that
+     * floor degrades to 0 when it is unknown - but "unknown" here means the
+     * remote answered something that is not a df table, not that the remote is
+     * unreachable. A transport failure, a non-zero exit or a TRUNCATED answer
+     * throws, exactly as it does for `freeBytes`: a capped listing is a partial
+     * result and acting on one is how a cap turns a crash into silent
+     * corruption (invariant 33).
+     */
+    async totalBytes(): Promise<number | null> {
+        return (await this.df()).totalBytes;
     }
 
     /**

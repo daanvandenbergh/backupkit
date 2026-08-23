@@ -58,8 +58,6 @@ export interface TargetRunnerDeps {
     estimate: typeof dryRunStats;
     /** Spawn function for the verify pass and forwarded into transfer/estimate. */
     execFn: ExecFn;
-    /** Total bytes of the archive filesystem, or null when unknown (percent minFree degrades; see disk-guard). */
-    totalBytes: () => Promise<number | null>;
     /** Sticky disk-low state shared across runs, for one-log-per-transition semantics. */
     diskLowTargets: Set<string>;
     /**
@@ -571,7 +569,12 @@ export async function runTarget(
             if (target.minFree !== null) {
                 const estimated = await deps.estimate({ rsyncBin: deps.rsyncBin, spec, log: deps.log, env: deps.env, execFn: execWithSignal });
                 estimatedDelta = estimated.totalTransferredSize;
-                const totalBytes = await deps.totalBytes();
+                // Through the STORE, like every other archive-filesystem fact
+                // this pipeline reads: that is what puts it behind the shutdown
+                // signal and the truncated-output refusal. The engine used to
+                // ask the remote itself, so this one query - inside the lock -
+                // was the one child a `systemctl stop` could not kill.
+                const totalBytes = await deps.store.totalBytes();
                 if (target.minFree.kind === "percent" && totalBytes === null) {
                     deps.log.warn("cannot read this filesystem's total size, so the minFree percentage is ignored for this run");
                 }

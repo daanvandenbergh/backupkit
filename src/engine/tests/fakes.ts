@@ -46,6 +46,9 @@ export class FakeStore implements SnapshotStore {
     /** Free inodes reported by freeInodes() (null = this store cannot report them). */
     freeInodeCount: number | null = null;
 
+    /** Total bytes reported by totalBytes() (null = this store cannot know). */
+    total: number | null = null;
+
     /** Ordered call log: "listComplete", "claimPartial:<n>", "promote:<n>", "remove:<n>", "freeBytes", "lock", "unlock". */
     calls: string[] = [];
 
@@ -114,6 +117,12 @@ export class FakeStore implements SnapshotStore {
     async freeInodes(): Promise<number | null> {
         this.calls.push("freeInodes");
         return this.freeInodeCount;
+    }
+
+    /** The configured total-byte count (null by default: the percent floor then degrades). */
+    async totalBytes(): Promise<number | null> {
+        this.calls.push("totalBytes");
+        return this.total;
     }
 
     /** Fake unlock: reports what `unlockOutcome` says and records the force flag. */

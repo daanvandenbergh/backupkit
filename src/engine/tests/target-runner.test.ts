@@ -57,7 +57,6 @@ function makeDeps(store: FakeStore, overrides: Partial<TargetRunnerDeps> = {}): 
         transfer: fakeTransfer(makeTransferResult()),
         estimate: fakeEstimate(1000),
         execFn: async () => ({ exitCode: 0, signal: null, stdout: "", stderr: "", timedOut: false, truncated: false, durationMs: 1 }),
-        totalBytes: async () => null,
         diskLowTargets: new Set(),
         previousStats: async () => null,
         previousHistory: async () => null,
@@ -182,12 +181,31 @@ describe("runTarget pipeline", () => {
         expect(counter.calls).toBe(0);
     });
 
+    it("the disk guard reads the archive's total size THROUGH the store, not around it", async () => {
+        // The engine used to answer this itself, with its own runRemote + df
+        // parser. That went around the store's single `run()` chokepoint, so
+        // this one query - issued INSIDE the lock - read no `truncated` flag and
+        // carried no shutdown signal: a `systemctl stop` could not kill it, and
+        // ~186 s of ssh timeout times retries against a `TimeoutStopSec` of 30
+        // meant SIGKILL while holding the remote lock, which only the 24 h TTL
+        // clears. Every archive-filesystem fact comes from the store now, and
+        // this asserts the call actually happens there.
+        const store = new FakeStore();
+        store.free = 1_000_000_000; // clears delta*1.2 + 256 MiB and the 5% floor below
+        store.total = 10_000_000_000; // -> a 500 MB floor, which 1 GB free still clears
+        const report = await runTarget(makeTarget({ minFree: { kind: "percent", percent: 5 } }), makeDeps(store));
+        expect(report.status).toBe("success");
+        expect(store.calls).toContain("totalBytes");
+        // ...and it is inside the lock, like the free-space read beside it.
+        expect(store.calls.indexOf("lock")).toBeLessThan(store.calls.indexOf("totalBytes"));
+    });
+
     it("percent minFree with unknown total degrades the floor and still guards the delta requirement", async () => {
         const store = new FakeStore();
         store.free = 300_000_000; // above delta*1.2 + 256MiB for a 1000-byte delta
         const report = await runTarget(
             makeTarget({ minFree: { kind: "percent", percent: 5 } }),
-            makeDeps(store, { totalBytes: async () => null }),
+            makeDeps(store),
         );
         expect(report.status).toBe("success");
     });
