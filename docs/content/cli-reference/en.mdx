@@ -137,20 +137,20 @@ Use it when a key has a passphrase, when you want to watch a schedule run before
 
 `--force` backs every target up once immediately - the same pass `backupkit run --force` makes, printed the same way, down to the per-target `FAILED - <reason>` row standing in for the engine's own error line rather than repeating it - and only then enters the schedule, so you do not have to wait for the first window to see the config work end to end. A failure in that opening pass is reported and the scheduler starts anyway.
 
-Before entering the loop, both `start` and `daemon` print **when the next backup happens**. Targets sharing one schedule all come due together, which is one fact and reads as one line:
+Before entering the loop, both `start` and `daemon` print **when the next backup happens** - one sentence, never a table:
 
 ```
 Scheduler started - 2 of 3 configured targets scheduled. Backups run while this process stays alive; Ctrl-C stops it.
 Next backup in 17h - all 2 targets.
 ```
 
-The moment the times diverge - staggered schedules, or a target pushed out by a failure backoff - the difference is the information, and it becomes a table naming each one:
+It names a target only when it means one in particular - the soonest of several with different times, or the only one scheduled - and then says why that time sits further out than the schedule implies:
 
 ```
-TARGET       NEXT DUE
-photos       in 17h
-persistance  in 12h    (after 9 failures in a row)
+Next backup in 12h - persistance, the soonest of 3 targets (after 9 failures in a row).
 ```
+
+The per-target breakdown is [`backupkit status`](#status). What this line is for is telling a healthy scheduler from a wedged one, and the soonest time answers that.
 
 Without it a scheduler with nothing due for six hours prints nothing for six hours, which is indistinguishable from one that is stuck. It comes from the same read-only calculation `status` uses, so it costs nothing, and if it cannot be produced the scheduler starts regardless.
 

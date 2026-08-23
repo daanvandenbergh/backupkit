@@ -284,26 +284,8 @@ export function timeUntil(iso: string | null, now: Date, never = "-"): string {
 }
 
 /**
- * The "here is what happens next" block both scheduler entry points print
- * under their started line: one row per scheduled target with its next due
- * time, and - for a target already failing - why that time sits further out
- * than its schedule says.
- *
- * A TABLE only when there is a table's worth of information. Targets sharing
- * one schedule - the ordinary config - all come due at the same instant, so
- * the block was a header plus a column of one value repeated:
- *
- * ```
- * TARGET                                       NEXT DUE
- * persistance@personal-backup-server           in 11h 10m
- * persistance-snapshot@personal-backup-server  in 11h 10m
- * ```
- *
- * Three lines and two columns to say one thing, in a CLI whose every other
- * line is a sentence. When the times agree and nothing is failing, it is a
- * sentence; the moment they diverge - staggered schedules, a target pushed
- * out by backoff - the difference IS the information and the table comes
- * back.
+ * The "here is what happens next" line both scheduler entry points print
+ * under their started line: ONE sentence naming the soonest backup.
  *
  * `daemon` already argued the case for its start/stop lines: without them a
  * healthy daemon is indistinguishable from one that died during preflight.
@@ -311,40 +293,55 @@ export function timeUntil(iso: string | null, now: Date, never = "-"): string {
  * hours prints nothing for six hours, and a person watching it has no way to
  * tell that from a wedged one - short of reading the config and working out
  * the window arithmetic themselves.
+ *
+ * That is the whole job, and one fact does it. This used to be a table:
+ *
+ * ```
+ * TARGET                                       NEXT DUE
+ * persistance@personal-backup-server           in 11h 10m
+ * persistance-snapshot@personal-backup-server  in 11h 10m
+ * ```
+ *
+ * Three lines and two columns for one thing, in a CLI whose every other line
+ * is a sentence - and targets sharing one schedule, the ordinary config,
+ * always agree, so the second column was one value repeated. The per-target
+ * breakdown is `backupkit status`, which exists, is read-only, and is where a
+ * person goes when they want it. Here the SOONEST time answers the question
+ * the block is for; the rest is a table nobody opened a scheduler to read.
+ *
+ * The line names the target only when it refers to one in particular - a
+ * single scheduled target, or the soonest of several that disagree - and adds
+ * a failure count only then too, because a time pushed out by backoff
+ * otherwise reads as a wrong schedule.
  */
 export async function schedulePreview(engine: CliContext["engine"], now: Date = new Date()): Promise<string[]> {
     const rows = await engine.status();
-    const scheduled = rows.filter((row) => row.nextDueAt !== null);
+    const scheduled = rows.filter((row): row is TargetStatus & { nextDueAt: string } => row.nextDueAt !== null);
     if (scheduled.length === 0) {
         return [];
     }
-    const whens = scheduled.map((row) => timeUntil(row.nextDueAt, now));
-    // "-" is the unparseable-timestamp case: it reads as a column, never as a
-    // sentence, so it keeps the table.
-    const agree = whens[0] !== "-" && whens.every((when) => when === whens[0]);
-    if (agree && scheduled.every((row) => row.consecutiveFailures === 0)) {
-        // `timeUntil` yields "in 11h 10m" or "due now", both of which finish
-        // the sentence on their own.
-        return [
-            scheduled.length === 1
-                ? `Next backup ${whens[0]}.`
-                : `Next backup ${whens[0]} - all ${count(scheduled.length, "target")}.`,
-        ];
-    }
-    return alignRows(
-        ["TARGET", "NEXT DUE", ""],
-        scheduled.map((row, index) => [
-            row.target,
-            whens[index],
-            // Why this one is due so far out - not a second pointer. The line
-            // above it already ends with "run: backupkit logs", and two
-            // different places to go, one under the other, is how a reader
-            // ends up going to neither.
-            row.consecutiveFailures === 0
-                ? ""
-                : `(after ${count(row.consecutiveFailures, "failure")} in a row)`,
-        ]),
+    const soonest = scheduled.reduce((earliest, row) =>
+        new Date(row.nextDueAt).getTime() < new Date(earliest.nextDueAt).getTime() ? row : earliest,
     );
+    // `timeUntil` yields "in 11h 10m" or "due now", both of which finish the
+    // sentence on their own - and "-" for a timestamp it cannot parse, which
+    // is no sentence at all. The preview is a convenience; it stays silent
+    // rather than printing a shrug.
+    const when = timeUntil(soonest.nextDueAt, now);
+    if (when === "-") {
+        return [];
+    }
+    const agree = scheduled.every((row) => row.nextDueAt === soonest.nextDueAt);
+    const named = scheduled.length === 1 || !agree;
+    const who = named
+        ? scheduled.length === 1
+            ? ""
+            : ` - ${soonest.target}, the soonest of ${count(scheduled.length, "target")}`
+        : ` - all ${count(scheduled.length, "target")}`;
+    // Only on a line that names ONE target: hung off "all 3 targets" it would
+    // claim every one of them is failing.
+    const failing = named && soonest.consecutiveFailures > 0 ? ` (after ${count(soonest.consecutiveFailures, "failure")} in a row)` : "";
+    return [`Next backup ${when}${who}${failing}.`];
 }
 
 /**

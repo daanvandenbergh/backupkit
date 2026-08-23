@@ -96,85 +96,38 @@ describe("schedule preview", () => {
     // preflight. The same holds one step in - a scheduler with nothing due for
     // six hours printed nothing for six hours, and a person watching it could
     // not tell that from a wedged one.
-    it.each(["start", "daemon"])("%s prints when each target is next due", async (command) => {
-        vi.useFakeTimers({ toFake: ["Date"] });
-        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
-        const h = fakeDeps();
-        h.engine.statusRows = [
-            {
-                target: "web",
-                lastSnapshot: null,
-                nextDueAt: "2026-08-23T03:00:00.000Z",
-                lastResult: "success",
-                lastSuccessAt: null,
-                consecutiveFailures: 0,
-                lockHeld: false,
-                lastError: null,
-                lastErrorAt: null,
-            },
-            {
-                target: "db",
-                lastSnapshot: null,
-                nextDueAt: "2026-08-22T22:09:15.000Z",
-                lastResult: "failed",
-                lastSuccessAt: null,
-                consecutiveFailures: 9,
-                lockHeld: false,
-                lastError: "boom",
-                lastErrorAt: "2026-08-22T16:09:15.000Z",
-            },
-        ];
-        expect(await main([command], h.deps)).toBe(0);
-        const out = h.out.join("\n");
-        // Relative, like the status table: the question is "when does this run
-        // next", and a timestamp makes the reader do that arithmetic.
-        expect(out).toContain("in 3h");
-        // A time further out than the schedule says needs its reason, or it
-        // reads as a wrong schedule.
-        expect(out).toContain("after 9 failures in a row");
-    });
-
-    // A header plus a column of one repeated value is three lines to say one
-    // thing, in a CLI whose every other line is a sentence - and targets
-    // sharing one schedule (the ordinary config) always agree.
-    it("collapses to a sentence when every target comes due at the same time", async () => {
+    //
+    // ONE sentence, never a table: the per-target breakdown is `backupkit
+    // status`, and the question a scheduler's opening line has to answer is
+    // "is this alive, and when does something happen".
+    it.each(["start", "daemon"])("%s says when the next backup happens", async (command) => {
         vi.useFakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
         const h = fakeDeps();
         h.engine.statusRows = [
             statusRow({ target: "web", nextDueAt: "2026-08-23T03:00:00.000Z" }),
-            statusRow({ target: "db", nextDueAt: "2026-08-23T03:00:00.000Z" }),
+            statusRow({
+                target: "db",
+                nextDueAt: "2026-08-22T22:09:15.000Z",
+                lastResult: "failed",
+                consecutiveFailures: 9,
+                lastError: "boom",
+                lastErrorAt: "2026-08-22T16:09:15.000Z",
+            }),
         ];
-        expect(await main(["start"], h.deps)).toBe(0);
-        expect(h.out).toContain("Next backup in 3h - all 2 targets.");
+        expect(await main([command], h.deps)).toBe(0);
+        // Relative, like the status table: the question is "when does this run
+        // next", and a timestamp makes the reader do that arithmetic. `db` is
+        // the soonest, so it is the one named - and a time pushed out by
+        // backoff needs its reason or it reads as a wrong schedule.
+        expect(h.out).toContain("Next backup due now - db, the soonest of 2 targets (after 9 failures in a row).");
         expect(h.out.join("\n")).not.toContain("NEXT DUE");
     });
 
-    it("names no count for a single target - the started line already said how many", async () => {
-        vi.useFakeTimers({ toFake: ["Date"] });
-        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
-        const h = fakeDeps();
-        h.engine.statusRows = [statusRow({ target: "web", nextDueAt: "2026-08-23T03:00:00.000Z" })];
-        expect(await main(["start"], h.deps)).toBe(0);
-        expect(h.out).toContain("Next backup in 3h.");
-    });
-
-    // The moment the times diverge, the difference IS the information.
-    it("keeps the table when one target is pushed out by backoff", async () => {
-        vi.useFakeTimers({ toFake: ["Date"] });
-        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
-        const h = fakeDeps();
-        h.engine.statusRows = [
-            statusRow({ target: "web", nextDueAt: "2026-08-23T03:00:00.000Z" }),
-            statusRow({ target: "db", nextDueAt: "2026-08-23T06:00:00.000Z" }),
-        ];
-        expect(await main(["start"], h.deps)).toBe(0);
-        expect(h.out.join("\n")).toContain("NEXT DUE");
-    });
-
-    // Same instant, but one of them is only there because it keeps failing -
-    // collapsing would drop the one fact that explains the wait.
-    it("keeps the table when the times agree but a target is failing", async () => {
+    // The ordinary config: every target on one schedule, all due together.
+    // Naming one of them would be arbitrary, and a failure count hung off
+    // "all 2 targets" would claim both are failing.
+    it("says 'all N targets' when they all come due at the same instant", async () => {
         vi.useFakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
         const h = fakeDeps();
@@ -183,7 +136,39 @@ describe("schedule preview", () => {
             statusRow({ target: "db", nextDueAt: "2026-08-23T03:00:00.000Z", consecutiveFailures: 4 }),
         ];
         expect(await main(["start"], h.deps)).toBe(0);
-        expect(h.out.join("\n")).toContain("after 4 failures in a row");
+        expect(h.out).toContain("Next backup in 3h - all 2 targets.");
+    });
+
+    // One target needs no "the soonest of 1" and no name - the started line
+    // directly above already said how many are scheduled.
+    it("names no target and no count when only one is scheduled", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+        const h = fakeDeps();
+        h.engine.statusRows = [statusRow({ target: "web", nextDueAt: "2026-08-23T03:00:00.000Z" })];
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.out).toContain("Next backup in 3h.");
+    });
+
+    it("keeps the failure reason on a single scheduled target", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            statusRow({ target: "web", nextDueAt: "2026-08-23T03:00:00.000Z", consecutiveFailures: 1 }),
+        ];
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.out).toContain("Next backup in 3h (after 1 failure in a row).");
+    });
+
+    // A shrug is worse than silence: the preview is a convenience, and the
+    // scheduler starts either way.
+    it("stays silent rather than printing a time it cannot read", async () => {
+        const h = fakeDeps();
+        h.engine.statusRows = [statusRow({ target: "web", nextDueAt: "not-a-timestamp" })];
+        expect(await main(["start"], h.deps)).toBe(0);
+        expect(h.out.join("\n")).not.toContain("Next backup");
+        expect(h.engine.calls.map((call) => call.method)).toContain("start");
     });
 
     // A disabled target has no next due time, and inventing one for it would
