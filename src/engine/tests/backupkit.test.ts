@@ -119,6 +119,56 @@ describe("Backupkit", () => {
         expect((await kit.run({ targets: ["web"], force: true })).targets).toHaveLength(1);
     });
 
+    it("run: a due check that throws is a failed report, and the LATER targets still run", async () => {
+        // The sibling-path rule, on the one-shot pass. The due check LISTS the
+        // archive - an ssh round-trip for a push target, so a revoked key, a
+        // changed host key or a renamed jail script all land there rather than
+        // in the pipeline. Letting it escape `runPass` wrote NO report for this
+        // target OR ANY LATER ONE, so `status` kept reporting the last success
+        // with 0 failures and no backoff while nothing ran. The scheduler tick
+        // has always recorded this; the pass did not.
+        //
+        // The listing is broken locally (the archive root is a FILE, so readdir
+        // is ENOTDIR) rather than over ssh: same throw out of the same call,
+        // with no network, no DNS and no retry budget in the test.
+        const fixture = track(
+            await makeKit({
+                extraTargets: (archiveParent) => {
+                    const apiArchive = join(archiveParent, "api-archive");
+                    return [makeTarget({ name: "api", destination: apiArchive, dst: { kind: "local", path: apiArchive } })];
+                },
+            }),
+        );
+        // Preflight is memoized, so running it first pins the permission gate
+        // (which legitimately refuses a non-directory archive root) and lets the
+        // root break AFTERWARDS - which is the real timeline anyway: the gate
+        // passes at startup and the archive becomes unlistable later.
+        await fixture.kit.preflight();
+        await rm(fixture.destination, { recursive: true, force: true });
+        await writeFile(fixture.destination, "not a directory\n", { mode: 0o600 });
+
+        // The pass completes rather than unwinding on the first target.
+        const report = await fixture.kit.run();
+
+        // `api` sits AFTER `web` in document order: it must still have run.
+        expect(report.targets.map((t) => t.target)).toEqual(["api"]);
+        expect(report.targets[0].status).toBe("success");
+        expect(existsSync(join(fixture.root, "api-archive", "2026-08-10T120000Z"))).toBe(true);
+
+        // ...and the failing target left a report, so status and the backoff
+        // derivation can see it - the whole point of the guard.
+        const persisted = JSON.parse(
+            await readFile(join(fixture.stateDir, "runs", "web", "2026-08-10T120000Z_web.json"), "utf8"),
+        );
+        expect(persisted.status).toBe("failed");
+        expect(persisted.reason).toBe("due-check-failed");
+        expect(persisted.error).toMatch(/ENOTDIR|not a directory/);
+
+        const rows = await fixture.kit.status({ targets: ["web"] });
+        expect(rows[0].lastResult).toBe("failed");
+        expect(rows[0].consecutiveFailures).toBe(1);
+    });
+
     it("a failed run enters backoff: skipped without force, rehydrated by a fresh instance", async () => {
         const failing = {
             transfer: async (): Promise<never> => {
