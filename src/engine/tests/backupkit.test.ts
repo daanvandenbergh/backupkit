@@ -7,7 +7,7 @@
  */
 
 import { exec } from "../../exec/exec.js";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -321,6 +321,74 @@ describe("Backupkit", () => {
             // Every name still on disk - including the real history prune would
             // otherwise have deleted to make room for the plants.
             for (const name of REAL_PLUS_PLANTS) {
+                expect(existsSync(join(fixture.destination, name))).toBe(true);
+            }
+        });
+
+        it("plans over the listing it COUNTED: a name planted while the lock is taken still trips the guard", async () => {
+            // The count and the plan must come from ONE listing. Prune used to
+            // list TWICE - once to count (before the lock) and once to plan
+            // (inside it) - so a name appearing in the gap was never counted but
+            // WAS planned over. That gap is two ssh round-trips wide on a push
+            // target (ensureRoot, then the lock mkdir), and it is the whole
+            // attack: retention selects purely on names, the future-dated split
+            // cannot see a PAST-dated plant, so the plants take the keep slots
+            // and the genuine history goes into the prune list - which this path
+            // then deletes. The run pipeline has always pinned one listing.
+            //
+            // The clock is the seam that fires inside that gap: the lock's meta
+            // write is the first `now()` of a prune, landing after the old
+            // pre-lock listing and before the in-lock one.
+            const real = ["2026-08-01T000000Z", "2026-08-02T000000Z", "2026-08-03T000000Z"];
+            const planted = "2026-08-02T000001Z";
+            let armed = false;
+            let destination = "";
+            const clock = { now: new Date("2026-08-10T12:00:00Z") };
+            const fixture = track(
+                await makeKit({
+                    target: { retention: { keepLast: 1 } },
+                    deps: {
+                        now: () => {
+                            if (armed) {
+                                armed = false;
+                                mkdirSync(join(destination, planted), { recursive: true });
+                            }
+                            return clock.now;
+                        },
+                    },
+                }),
+            );
+            destination = fixture.destination;
+            for (const name of real) {
+                await mkdir(join(fixture.destination, name), { recursive: true });
+            }
+            await writeTargetReport(fixture.stateDir, {
+                runId: "2026-08-03T000000Z_web",
+                target: "web",
+                direction: "pull",
+                snapshot: "2026-08-03T000000Z",
+                status: "success",
+                reason: null,
+                startedAt: "2026-08-03T00:00:00.000Z",
+                finishedAt: "2026-08-03T00:00:10.000Z",
+                attempts: [],
+                stats: null,
+                skippedFiles: [],
+                error: null,
+                completeCount: 3,
+            });
+            // Get preflight's own clock reads out of the way, then arm: the next
+            // `now()` is the lock's, i.e. mid-prune.
+            await fixture.kit.preflight();
+            armed = true;
+
+            const report = await fixture.kit.prune();
+
+            expect(report.targets[0].executed).toBe(false);
+            expect(report.targets[0].errors[0]).toContain("1 snapshot(s) appeared at or below");
+            // Nothing deleted - keepLast:1 would otherwise have taken all three
+            // real snapshots bar the newest, with the plant sitting in the middle.
+            for (const name of [...real, planted]) {
                 expect(existsSync(join(fixture.destination, name))).toBe(true);
             }
         });

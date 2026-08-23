@@ -1422,67 +1422,49 @@ export class Backupkit {
             }
             const store = this.storeFor(target, "unattended");
             const errors: string[] = [];
-
-            // The past-dated-insertion guard, on the operator's path too.
-            //
-            // The run pipeline skips retention when names appear below the
-            // previous run's newest, but `prune` is the documented way to clear
-            // that state - so it cannot simply refuse, or an operator would be
-            // left with a tripwire and no way out. It also cannot quietly
-            // proceed: retention selects on names, so a poisoned listing makes
-            // prune delete the REAL history (measured: 10 of 11) while the
-            // planted names take every keep slot.
-            //
-            // So: detect, refuse by default, and require `--force`. The operator
-            // reviews `--dry-run` (which prints the full keep/prune plan and
-            // therefore SHOWS real snapshots queued for deletion), then decides.
-            // That turns a silent deletion into an authorised one.
-            //
-            // Deliberately NOT "delete the unattested names and keep the rest":
-            // run reports rotate, so a genuine snapshot older than the report
-            // window is unattested exactly like a plant. The count knows HOW MANY
-            // names appeared, never WHICH - so naming suspects is best-effort
-            // context for a human, never grounds for the machine to delete.
-            const complete = await store.listComplete();
             const targetReports = await readTargetReports(this.config.stateDir, target.name, this.log);
-            const mark = newestHistoryMark(targetReports);
-            const insertion = detectHistoryInsertion(complete, mark);
-            if (insertion !== null && options.force !== true) {
-                const suspects = mark === null ? [] : unattestedBelow(complete, targetReports, mark);
-                this.log.error("refusing to prune: snapshots appeared below the previous run's newest", {
-                    target: target.name,
-                    previousNewest: sanitize(insertion.previousNewest),
-                    previousCount: insertion.previousCount,
-                    count: insertion.count,
-                });
-                errors.push(
-                    `${insertion.count - insertion.previousCount} snapshot(s) appeared at or below ` +
-                        `${sanitize(insertion.previousNewest)} since the last run recorded ${insertion.previousCount} ` +
-                        `there - this client only ever creates snapshots dated now, so something else wrote into the ` +
-                        `archive. Retention selects on names, so pruning now may delete real history instead of the ` +
-                        `additions.` +
-                        (suspects.length === 0
-                            ? ""
-                            : ` Not created by any recorded run (best effort - reports rotate): ` +
-                              `${suspects.slice(0, 10).map(sanitize).join(", ")}.`) +
-                        ` Review with \`backupkit prune --dry-run\`, remove anything that is not yours, then re-run ` +
-                        `with --force to prune anyway.`,
-                );
-                // --dry-run must still SHOW the plan: it is the review step this
-                // very message sends the operator to, and a refusal that also
-                // refuses to explain itself is a dead end.
-                const plan = options.dryRun === true ? this.planFor(complete, target) : { keep: [], prune: [] };
-                reports.push({ target: target.name, plan, executed: false, errors });
+
+            // --dry-run is READ-ONLY, so it takes no lock: it writes nothing
+            // either way, and a listing that goes stale under it can only make
+            // the PREVIEW stale, never the archive wrong. (Same trade the run
+            // pipeline's dry run makes, and for the same reason - locking an
+            // advisory estimate made it fail against a real run in flight.)
+            if (options.dryRun === true) {
+                const complete = await store.listComplete();
+                const refusal = options.force === true ? null : this.insertionRefusal(target, complete, targetReports);
+                if (refusal !== null) {
+                    // A refusal must still SHOW the plan: --dry-run is the review
+                    // step the refusal message sends the operator to, and a
+                    // refusal that also refuses to explain itself is a dead end.
+                    errors.push(refusal);
+                }
+                reports.push({ target: target.name, plan: this.planFor(complete, target), executed: false, errors });
                 continue;
             }
 
-            if (options.dryRun === true) {
-                const plan = this.planFor(complete, target);
-                reports.push({ target: target.name, plan, executed: false, errors });
-                continue;
-            }
+            // The DESTRUCTIVE path takes ONE listing, inside the lock, and both
+            // the insertion guard and the plan run over THAT array.
+            //
+            // Listing twice - once to count, once to plan - reopened the exact
+            // window the guard exists to close (invariant 41: the listing counted
+            // and the listing retention plans over must be the SAME listing).
+            // Between the two sat `ensureRoot` and the lock-acquire mkdir, two
+            // ssh round-trips on a push target, and names planted in that gap
+            // were never counted but were still planned over. Retention selects
+            // purely on names and the future-dated split cannot see a PAST-dated
+            // plant, so the plants take the keep slots and the genuine snapshots
+            // go into the prune list - which this path then deletes. The run
+            // pipeline has always pinned one listing; prune, the more dangerous
+            // verb, did not. Sibling paths drifting apart is this codebase's most
+            // repeated bug shape.
             const plan = await store.withLock(async () => {
-                const inner = this.planFor(await store.listComplete(), target);
+                const complete = await store.listComplete();
+                const refusal = options.force === true ? null : this.insertionRefusal(target, complete, targetReports);
+                if (refusal !== null) {
+                    errors.push(refusal);
+                    return { keep: [], prune: [] };
+                }
+                const inner = this.planFor(complete, target);
                 // There is no "would remove all snapshots" check here: the floor
                 // is planRetention always claiming a "newest" plus the store's own
                 // newest-complete guard (`newestUndeletable`), which no plan can
@@ -1500,6 +1482,62 @@ export class Backupkit {
             reports.push({ target: target.name, plan, executed: plan.prune.length > 0, errors });
         }
         return { targets: reports };
+    }
+
+    /**
+     * The refusal text for a listing whose history GREW underneath us, or null
+     * when it did not - the past-dated-insertion guard on the operator's path.
+     *
+     * The run pipeline skips retention when names appear below the previous
+     * run's newest, but `prune` is the documented way to clear that state - so
+     * it cannot simply refuse, or an operator is left with a tripwire and no way
+     * out. It also cannot quietly proceed: retention selects on names, so a
+     * poisoned listing makes prune delete the REAL history (measured: 10 of 11)
+     * while the planted names take every keep slot. So: detect, refuse by
+     * default, require `--force`, and let `--dry-run` still print the plan.
+     *
+     * Deliberately NOT "delete the unattested names and keep the rest": run
+     * reports rotate, so a genuine snapshot older than the report window is
+     * unattested exactly like a plant. The count knows HOW MANY names appeared,
+     * never WHICH - naming suspects is best-effort context for a human, never
+     * grounds for the machine to delete.
+     *
+     * A method rather than two inline copies because `prune` asks it on two
+     * paths - the lock-free preview and the destructive pass inside the lock -
+     * and those must ask the same question of whichever listing they will act
+     * on. `complete` is the listing the CALLER will plan over; passing a
+     * different one is the bug this shape exists to prevent.
+     */
+    private insertionRefusal(
+        target: ResolvedTarget,
+        complete: readonly string[],
+        reports: readonly TargetRunReport[],
+    ): string | null {
+        const mark = newestHistoryMark(reports);
+        const insertion = detectHistoryInsertion(complete, mark);
+        if (insertion === null || mark === null) {
+            return null;
+        }
+        const suspects = unattestedBelow(complete, reports, mark);
+        this.log.error("refusing to prune: snapshots appeared below the previous run's newest", {
+            target: target.name,
+            previousNewest: sanitize(insertion.previousNewest),
+            previousCount: insertion.previousCount,
+            count: insertion.count,
+        });
+        return (
+            `${insertion.count - insertion.previousCount} snapshot(s) appeared at or below ` +
+            `${sanitize(insertion.previousNewest)} since the last run recorded ${insertion.previousCount} ` +
+            `there - this client only ever creates snapshots dated now, so something else wrote into the ` +
+            `archive. Retention selects on names, so pruning now may delete real history instead of the ` +
+            `additions.` +
+            (suspects.length === 0
+                ? ""
+                : ` Not created by any recorded run (best effort - reports rotate): ` +
+                  `${suspects.slice(0, 10).map(sanitize).join(", ")}.`) +
+            ` Review with \`backupkit prune --dry-run\`, remove anything that is not yours, then re-run ` +
+            `with --force to prune anyway.`
+        );
     }
 
     /**
