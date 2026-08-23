@@ -121,8 +121,10 @@ describe("transient ssh cause", () => {
     it("refuses to pick a side when nothing answered - the whole point of the change", () => {
         const message = describeTransientSshStderr(sshStderrTail("ssh: connect to host h port 22: Connection timed out"));
         expect(message).toBe(SSH_NO_ANSWER_MESSAGE);
-        expect(message).toContain("may be offline");
-        expect(message).toContain("network/route to it may be down");
+        // Still refuses to pick a side - an offline host and a dead local link
+        // are indistinguishable from here - now in one clause instead of three.
+        expect(message).toContain("the host is offline");
+        expect(message).toContain("this machine cannot reach it");
     });
 
     it("returns null for stderr it does not recognise, and for empty stderr", () => {

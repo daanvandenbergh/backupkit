@@ -9,6 +9,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { TargetStatus } from "../../engine/types.js";
+import { logStyleFor } from "../internal/context.js";
 import { main } from "../main.js";
 import { fakeDeps, makeConfig, makeRunReport, makeTarget } from "./fakes.js";
 
@@ -690,7 +691,7 @@ describe("check", () => {
         });
     });
 
-    it("exits 1 and surfaces every error when a probe failed", async () => {
+    it("exits 1 and surfaces every error when a probe failed - each stated ONCE", async () => {
         const h = fakeDeps();
         h.engine.checkReport = {
             ok: false,
@@ -702,7 +703,31 @@ describe("check", () => {
             errors: ["rsync too old", "remote example: host unreachable"],
         };
         expect(await main(["check"], h.deps)).toBe(1);
+        // Both problems are COUNTED...
         expect(h.out.join("\n")).toContain("Check FAILED - 2 problems above need fixing");
-        expect(h.err).toEqual(["Error: rsync too old", "Error: remote example: host unreachable"]);
+        // ...but the remote's failure was already on its own row as
+        // `NOT REACHABLE - host unreachable`, so the closing block carries only
+        // the error no row showed. Saying it twice is what made the output a wall.
+        expect(h.out.join("\n")).toContain("Remote example (explicit): NOT REACHABLE - host unreachable");
+        expect(h.err).toEqual(["Error: rsync too old"]);
+    });
+});
+
+describe("logStyleFor - who is reading the log lines", () => {
+    it("an interactive verb gets human console lines and hides nothing", () => {
+        expect(logStyleFor()).toEqual({ human: true, consoleMute: undefined });
+        expect(logStyleFor({})).toEqual({ human: true, consoleMute: undefined });
+    });
+
+    it("a verb that prints its own failure report mutes error lines on the console", () => {
+        // `backupkit run` prints `<target>: FAILED - <error>`. Without this the
+        // same sentence appeared twice, once as an ERROR log line directly above
+        // the report row - which is exactly what made the output unreadable.
+        expect(logStyleFor({ printsFailures: true })).toEqual({ human: true, consoleMute: ["error"] });
+    });
+
+    it("the service keeps the MACHINE format - its console is the journal", () => {
+        expect(logStyleFor({ service: true })).toBeUndefined();
+        expect(logStyleFor({ service: true, printsFailures: true })).toBeUndefined();
     });
 });

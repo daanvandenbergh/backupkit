@@ -20,6 +20,7 @@
 import { dirname } from "node:path";
 
 import { SYSTEM_CONFIG_DIR } from "../../../config/config.js";
+import { remoteCheckError } from "../../../engine/backupkit.js";
 import type { CliDeps } from "../context.js";
 import { count, parseFlags } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
@@ -76,8 +77,20 @@ export async function checkCommand(argv: string[], deps: CliDeps): Promise<numbe
         }
     }
 
+    // A remote's own row already read `NOT REACHABLE - <reason>`. Repeating
+    // that exact sentence in the closing error block is the same fact twice, so
+    // only errors NO row showed are printed here - the local rsync, the ssh
+    // binary, a legacy on-disk layout. The COUNT below still comes from
+    // report.errors: every problem is still counted, each is just stated once.
+    const shownInRows = new Set(
+        report.remotes.flatMap((remote) =>
+            remote.error === null ? [] : [remoteCheckError(remote.remote, remote.error)],
+        ),
+    );
     for (const error of report.errors) {
-        deps.stderr(`Error: ${error}`);
+        if (!shownInRows.has(error)) {
+            deps.stderr(`Error: ${error}`);
+        }
     }
     deps.stdout("");
     if (!report.ok) {

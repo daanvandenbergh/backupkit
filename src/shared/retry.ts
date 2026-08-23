@@ -58,8 +58,15 @@ export function computeRetryDelayMs(attempt: number, policy: RetryPolicy, random
     return Math.round(base * (0.8 + 0.4 * random));
 }
 
-/** How much of a failure message the per-attempt warn carries before it is trimmed. */
-const CAUSE_MAX_CHARS = 200;
+/**
+ * How much of a failure message the per-attempt warn carries before it is
+ * trimmed. Sized to hold a CLASSIFIED cause ("no answer - the host is offline,
+ * or this machine cannot reach it") and cut the raw stderr tail that follows
+ * it: a retry line answers "why is this still going?", and three of them stack
+ * up on screen. The untrimmed message is one line further down, on the failure
+ * that finally throws, and in the log file.
+ */
+const CAUSE_MAX_CHARS = 100;
 
 /** Whether the shutdown signal (if any) has fired. A function so each call re-reads it after an await. */
 function isAborted(signal: AbortSignal | undefined): boolean {
@@ -137,12 +144,12 @@ export async function withTransientRetry<T>(
             }
             const next = attempt + 1;
             const delayMs = computeRetryDelayMs(next, policy, Math.random());
-            // The message says the wait the way a person reads it ("in 2s");
-            // `delayMs` stays as a field because the exact jittered number is
-            // what makes the backoff ladder checkable.
-            log.warn(`${label} hit a temporary problem - trying again in ${formatDuration(delayMs)}`, {
-                attempt: next,
-                of: policy.attempts,
+            // One line, one read: what is retrying, how far into the ladder,
+            // how long the wait is, and why - in that order. `delayMs` stays as
+            // a field (the log file's copy needs the exact jittered number to
+            // make the ladder checkable) but never reaches a human line, where
+            // the sentence already says "in 2s".
+            log.warn(`${label}: retrying (${next}/${policy.attempts}) in ${formatDuration(delayMs)}`, {
                 delayMs,
                 cause: retryCause(error),
             });

@@ -128,7 +128,9 @@ Backupkit still adds its own safety options on the command line, which override 
 ssh-add /path/to/that/key      # once per agent, in the session backupkit runs from
 ```
 
-Without that, `ssh myserver` still works for you - ssh prompts on your terminal - while every backupkit run fails to authenticate. When it does, backupkit says so by name: it resolves the alias with `ssh -G`, checks whether the key needs a passphrase, and checks whether your agent holds it, then reports which of those is missing and the exact `ssh-add` that fixes it. A root service is a different session again, with root's `ssh_config` and root's agent - if you want a schedule that survives a logout without an agent to babysit, use an explicit remote with a key that has no passphrase.
+Without that, `ssh myserver` still works for you - ssh prompts on your terminal - while every backupkit run fails to authenticate. When it does, backupkit names the cause and the fix in one line: `the SSH key needs a passphrase and the ssh-agent is empty. Fix: ssh-add /path/to/that/key`.
+
+A root service is a different session again, with root's `ssh_config` and root's agent - if you want a schedule that survives a logout without an agent to babysit, use an explicit remote with a key that has no passphrase.
 
 ## Targets
 

@@ -20,6 +20,7 @@ import type {
     TargetUnlockReport,
 } from "../../engine/types.js";
 import { describeError } from "../../shared/errors.js";
+import type { LoggerOptions } from "../../shared/logger.js";
 import { formatBytes, formatDuration } from "../../shared/format.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
@@ -85,6 +86,42 @@ export interface FileOps {
     rename(from: string, to: string): void;
 }
 
+/**
+ * How the engine a command builds should talk to the terminal. The default -
+ * pass nothing - is the right answer for every interactive verb: human log
+ * lines, everything shown.
+ */
+export interface LoadContextOptions {
+    /**
+     * This process IS the installed service (`backupkit daemon`), whose
+     * "console" is journald/launchd - keep the machine log format there, so
+     * timestamps and `key=value` fields survive into the system log.
+     */
+    service?: boolean;
+    /**
+     * This command prints its own per-target failure report, so the engine's
+     * error-level console lines are suppressed (the log file still gets them).
+     * Without this, `backupkit run` printed each failure twice: once as an
+     * ERROR line and once as `<target>: FAILED - <the same sentence>`.
+     */
+    printsFailures?: boolean;
+}
+
+/**
+ * The engine's console log style for one command's options - the single place
+ * that decides who is reading backupkit's log lines.
+ *
+ * `undefined` means "leave the Logger's defaults alone", which is the machine
+ * format: that is what the service wants, because its console IS the journal.
+ * Everything else is a person at a terminal.
+ */
+export function logStyleFor(options?: LoadContextOptions): Pick<LoggerOptions, "human" | "consoleMute"> | undefined {
+    if (options?.service === true) {
+        return undefined;
+    }
+    return { human: true, consoleMute: options?.printsFailures === true ? ["error"] : undefined };
+}
+
 /** Everything a CLI command needs from the outside world - injectable for tests. */
 export interface CliDeps {
     /** Write one line to stdout (newline appended). */
@@ -110,7 +147,7 @@ export interface CliDeps {
     /** True after loadContext saw `logging.level: "debug"` - enables stack traces on stderr. */
     debugEnabled: boolean;
     /** Load config (honoring --config / $BACKUPKIT_CONFIG) and build the engine. */
-    loadContext(configArg?: string): CliContext;
+    loadContext(configArg?: string, options?: LoadContextOptions): CliContext;
     /** Register SIGINT/SIGTERM to call `stop` once; a second signal exits 1 immediately. */
     wireSignals(stop: () => Promise<void>): void;
 }

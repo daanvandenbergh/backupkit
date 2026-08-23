@@ -32,7 +32,7 @@ import { startCommand } from "./internal/commands/start.js";
 import { statusCommand } from "./internal/commands/status.js";
 import { unlockCommand } from "./internal/commands/unlock.js";
 import type { CliDeps } from "./internal/context.js";
-import { UsageError } from "./internal/context.js";
+import { logStyleFor, UsageError } from "./internal/context.js";
 import { COMMAND_HELP, ROOT_HELP } from "./internal/help.js";
 import { serviceCommand } from "./internal/service/lifecycle.js";
 import { logsCommand } from "./internal/service/logs.js";
@@ -102,10 +102,10 @@ export function defaultDeps(): CliDeps {
         cliPath: fileURLToPath(import.meta.url),
         version: packageVersion(),
         debugEnabled: false,
-        loadContext: (configArg) => {
+        loadContext: (configArg, options) => {
             const config = loadConfig(configArg);
             deps.debugEnabled = config.logging.level === "debug";
-            return { config, engine: new Backupkit(config) };
+            return { config, engine: new Backupkit(config, { logStyle: logStyleFor(options) }) };
         },
         wireSignals: (stop) => {
             let stopping = false;

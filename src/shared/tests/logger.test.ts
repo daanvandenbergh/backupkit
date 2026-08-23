@@ -225,3 +225,76 @@ describe("Logger file sink", () => {
         expect(lines[0]).toContain("[t=x] w");
     });
 });
+
+describe("Logger human console mode", () => {
+    it("drops the timestamp, the level noise, and the context bracket", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.with({ target: "web1", run: "r1" }).info("backing up /srv");
+        expect(stdout.chunks).toEqual(["backing up /srv\n"]);
+    });
+
+    it("prefixes warn and error so severity is visible at a glance", () => {
+        const { logger, stderr } = testLogger({ human: true });
+        logger.warn("disk is nearly full");
+        logger.error("cannot use this backup server");
+        expect(stderr.chunks).toEqual(["Warning: disk is nearly full\n", "Error: cannot use this backup server\n"]);
+    });
+
+    it("appends the `error` field as a clause instead of a quoted key=value tail", () => {
+        const { logger, stderr } = testLogger({ human: true });
+        logger.error("cannot use this backup server", {
+            target: "web1",
+            remote: "archive",
+            error: 'the SSH key needs a passphrase. Fix: ssh-add /k/id_ed25519',
+        });
+        // The machine line would render that value as error="the SSH key needs a
+        // passphrase. Fix: ssh-add /k/id_ed25519" - every embedded quote escaped
+        // and the sentence buried behind two field tokens the reader already knows.
+        expect(stderr.chunks).toEqual([
+            "Error: cannot use this backup server - the SSH key needs a passphrase. Fix: ssh-add /k/id_ed25519\n",
+        ]);
+    });
+
+    it("`detail` is a cause too, and keeps any field the sentence does NOT already carry", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.info("pruned snapshot", { target: "web1", snapshot: "2026-08-10T03-00-00Z", detail: "past keepDaily" });
+        expect(stdout.chunks).toEqual(["pruned snapshot - past keepDaily snapshot=2026-08-10T03-00-00Z\n"]);
+    });
+
+    it("the FILE sink still gets the full machine line - the record is unchanged", () => {
+        const lines: string[] = [];
+        const { logger } = testLogger({ human: true, fileSink: (line) => lines.push(line) });
+        logger.with({ target: "web1" }).error("cannot use this backup server", { error: "key refused" });
+        expect(lines).toEqual([
+            '2026-08-10T03:15:00.123Z ERROR [target=web1] cannot use this backup server error="key refused"',
+        ]);
+    });
+
+    it("children inherit human mode", () => {
+        const { logger, stdout } = testLogger({ human: true });
+        logger.with({ target: "web1" }).info("hello");
+        expect(stdout.chunks).toEqual(["hello\n"]);
+    });
+});
+
+describe("Logger consoleMute", () => {
+    it("suppresses the console line while the file sink still records it", () => {
+        const lines: string[] = [];
+        const { logger, stdout, stderr } = testLogger({ consoleMute: ["error"], fileSink: (line) => lines.push(line) });
+        logger.error("cannot use this backup server");
+        logger.warn("still shown");
+        logger.info("still shown");
+        expect(stderr.chunks).toEqual(["2026-08-10T03:15:00.123Z WARN still shown\n"]);
+        expect(stdout.chunks).toEqual(["2026-08-10T03:15:00.123Z INFO still shown\n"]);
+        // The muted line is a RECORD, not a discard: `backupkit logs` must
+        // still show the failure the run report summarized.
+        expect(lines).toHaveLength(3);
+        expect(lines[0]).toContain("ERROR cannot use this backup server");
+    });
+
+    it("children inherit the mute", () => {
+        const { logger, stderr } = testLogger({ consoleMute: ["error"] });
+        logger.with({ target: "web1" }).error("hidden");
+        expect(stderr.chunks).toEqual([]);
+    });
+});

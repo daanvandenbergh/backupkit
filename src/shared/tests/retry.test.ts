@@ -84,8 +84,13 @@ describe("withTransientRetry", () => {
         await expect(promise).resolves.toBe("ok");
         expect(calls()).toBe(2);
         expect(warns).toHaveLength(1);
-        expect(warns[0]).toContain("list hit a temporary problem - trying again");
-        expect(warns[0]).toContain("attempt=2");
+        // The ladder position and the readable wait are in the SENTENCE - a
+        // retry storm has to be scannable, and `attempt=2 of=3` restating what
+        // "(2/3)" already says is three tokens of nothing.
+        expect(warns[0]).toContain("list: retrying (2/3) in ");
+        expect(warns[0]).not.toContain("attempt=");
+        // The exact jittered delay stays a FIELD: the machine line is where the
+        // backoff ladder is checkable.
         expect(warns[0]).toContain("delayMs=2000");
         // The cause is the field that makes a retry storm readable: without it
         // a night of dropped Wi-Fi and a night of a dead server log identically.
@@ -108,7 +113,7 @@ describe("withTransientRetry", () => {
         for (const warn of warns) {
             expect(warn).toContain(head);
             expect(warn).toContain("...");
-            expect(warn.length).toBeLessThan(500);
+            expect(warn.length).toBeLessThan(220);
         }
     });
 

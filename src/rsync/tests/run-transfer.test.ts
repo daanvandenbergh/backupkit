@@ -109,7 +109,7 @@ describe("runTransfer: retry wiring", () => {
             skippedFiles: [],
         });
         expect(outcome.ok?.attempts.map((a: TransferAttempt) => a.class)).toEqual(["transient", "ok"]);
-        expect(lines.filter((l) => l.includes("hit a temporary problem - trying again"))).toHaveLength(1);
+        expect(lines.filter((l) => l.includes(": retrying ("))).toHaveLength(1);
     });
 
     it("every attempt reuses the exact same argv - the same .partial destination", async () => {

@@ -86,17 +86,15 @@ export type TransientSshCause = "no-network" | "dns" | "refused" | "unanswered" 
  * and a dead local link are genuinely indistinguishable, and claiming
  * otherwise is what sends a reader to reboot a server that was never down.
  */
-export const SSH_NO_ANSWER_MESSAGE =
-    "no answer from the host - it may be offline, or this machine's network/route to it may be down; " +
-    "from here those look identical";
+export const SSH_NO_ANSWER_MESSAGE = "no answer - the host is offline, or this machine cannot reach it";
 
 /** The plain-language meaning of each transient cause. */
 const TRANSIENT_CAUSE_MESSAGE: Record<TransientSshCause, string> = {
-    "no-network": "this machine has no route to the network (dropped Wi-Fi/VPN, or an unplugged link) - not the host",
-    dns: "the hostname could not be resolved, which is DNS on this machine or its network - not the host",
-    refused: "the host answered but refused the ssh port - it is UP; sshd is not listening, or a firewall rejected it",
+    "no-network": "no network route from this machine (dropped Wi-Fi/VPN, or an unplugged link) - not the host",
+    dns: "the hostname could not be resolved - DNS on this machine or its network, not the host",
+    refused: "the host is UP but refused the ssh port - sshd is not listening, or a firewall rejected it",
     unanswered: SSH_NO_ANSWER_MESSAGE,
-    dropped: "the connection dropped mid-session - a flaky link on either side, not a configuration problem",
+    dropped: "the connection dropped mid-session - a flaky link, not a configuration problem",
 };
 
 /**

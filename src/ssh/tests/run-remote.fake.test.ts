@@ -148,8 +148,9 @@ describe("runRemote (fake ssh)", () => {
             (error: unknown) =>
                 error instanceof SshError &&
                 error.retriable === false &&
-                /ssh alias "myserver": authentication failed under BatchMode/.test(error.message) &&
-                /does not manage keys for alias remotes/.test(error.message),
+                /^myserver refused backupkit's SSH key/.test(error.message) &&
+                /does not manage keys for ssh_config aliases/.test(error.message) &&
+                /Fix: make "ssh myserver" work with no prompt/.test(error.message),
         );
         // One CONNECT attempt (auth failure is permanent - never retried), plus
         // the local `ssh -G myserver` the key diagnosis runs to look for a
@@ -166,7 +167,7 @@ describe("runRemote (fake ssh)", () => {
             runRemote(EXPLICIT, ["true"], options([{ exit: 255, stderr: "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!" }])),
         ).rejects.toSatisfy(
             (error: unknown) =>
-                error instanceof SshError && error.retriable === false && /never auto-removes/.test(error.message),
+                error instanceof SshError && error.retriable === false && /never removes a pinned key for you/.test(error.message),
         );
         expect(await fake.calls()).toHaveLength(1);
     });
@@ -174,7 +175,7 @@ describe("runRemote (fake ssh)", () => {
     it("unpinned host key is permanent, pointing at backupkit check", async () => {
         await expect(
             runRemote(EXPLICIT, ["true"], options([{ exit: 255, stderr: "Host key verification failed." }])),
-        ).rejects.toThrowError(/pin the host key/);
+        ).rejects.toThrowError(/Fix: run backupkit check in a terminal to pin it/);
         expect(await fake.calls()).toHaveLength(1);
     });
 
@@ -199,7 +200,7 @@ describe("runRemote (fake ssh)", () => {
             // The message must name BOTH possibilities. A timeout cannot tell an
             // offline host from a dead local link, and the old "timed out after
             // 60000ms" wording read as a verdict on the host.
-        ).rejects.toThrowError(/gave up after 250ms.*may be offline.*network\/route to it may be down/);
+        ).rejects.toThrowError(/gave up after 250ms.*the host is offline, or this machine cannot reach it/);
         expect(Date.now() - started).toBeLessThan(10_000);
     });
 

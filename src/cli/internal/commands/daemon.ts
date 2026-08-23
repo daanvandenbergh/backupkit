@@ -21,7 +21,7 @@ export async function daemonCommand(argv: string[], deps: CliDeps): Promise<numb
         deps.stdout(COMMAND_HELP.daemon);
         return 0;
     }
-    const { config, engine } = deps.loadContext(values.config as string | undefined);
+    const { config, engine } = deps.loadContext(values.config as string | undefined, { service: true });
     deps.wireSignals(() => engine.stop());
     await engine.preflight({ serviceMode: true });
     // The unit's ExecStart is this command, so these two lines are what the

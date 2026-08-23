@@ -90,18 +90,14 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
         return [{ exit: 0, stdout: sshConfigOutput(keyPath) }];
     }
 
-    it("encrypted key with NO agent: names the key, the missing agent, and the exact ssh-add fix", async () => {
+    it("encrypted key with NO agent: one sentence and the exact ssh-add that fixes it", async () => {
         const message = await diagnoseAliasAuth(
             "archive",
             options(resolvesFixtureKey(), [{ exit: 255, stderr: "load failed: incorrect passphrase" }]),
         );
-        expect(message).not.toBeNull();
-        expect(message).toContain(keyPath);
-        expect(message).toContain("passphrase-protected");
-        expect(message).toContain("SSH_AUTH_SOCK was unset");
-        expect(message).toContain(`ssh-add ${keyPath}`);
-        // The whole point: it explains why the human's own `ssh archive` works.
-        expect(message).toContain('"ssh archive"');
+        // The whole message, asserted literally: this is a terminal line, and
+        // it stops being one the moment it grows a second sentence.
+        expect(message).toBe(`the SSH key needs a passphrase and no ssh-agent is running. Fix: ssh-add ${keyPath}`);
     });
 
     it("encrypted key with an agent that does not answer: says so, never claims the key is missing", async () => {
@@ -109,9 +105,7 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
             "archive",
             options(resolvesFixtureKey(), [LOCKED], [{ exit: 2, stderr: "Error connecting to agent" }], "/run/dead.sock"),
         );
-        expect(message).toContain("/run/dead.sock");
-        expect(message).toContain("did not answer");
-        expect(message).toContain(`ssh-add ${keyPath}`);
+        expect(message).toBe(`the SSH key needs a passphrase and the ssh-agent is not answering. Fix: ssh-add ${keyPath}`);
     });
 
     it("encrypted key with an EMPTY agent (ssh-add -l exit 1): the agent holds no keys at all", async () => {
@@ -119,12 +113,10 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
             "archive",
             options(resolvesFixtureKey(), [LOCKED], [{ exit: 1, stderr: "The agent has no identities." }], "/run/a.sock"),
         );
-        expect(message).toContain("holds no keys at all");
-        expect(message).toContain("/run/a.sock");
-        expect(message).toContain(`ssh-add ${keyPath}`);
+        expect(message).toBe(`the SSH key needs a passphrase and the ssh-agent is empty. Fix: ssh-add ${keyPath}`);
     });
 
-    it("encrypted key absent from a POPULATED agent: counts the other keys and says this one is not among them", async () => {
+    it("encrypted key absent from a POPULATED agent: says it is not in the agent, not that the agent is empty", async () => {
         const message = await diagnoseAliasAuth(
             "archive",
             options(
@@ -135,22 +127,7 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
                 "/run/a.sock",
             ),
         );
-        expect(message).toContain("not loaded in the ssh-agent at /run/a.sock");
-        expect(message).toContain("holds 2 keys");
-        expect(message).toContain(`ssh-add ${keyPath}`);
-    });
-
-    it("singular wording when the agent holds exactly one other key", async () => {
-        const message = await diagnoseAliasAuth(
-            "archive",
-            options(
-                resolvesFixtureKey(),
-                [LOCKED, { exit: 0, stdout: "256 SHA256:MINE key (ED25519)\n" }],
-                [{ exit: 0, stdout: agentListing("SHA256:OTHER1") }],
-                "/run/a.sock",
-            ),
-        );
-        expect(message).toContain("holds 1 key,");
+        expect(message).toBe(`the SSH key needs a passphrase and is not in the ssh-agent. Fix: ssh-add ${keyPath}`);
     });
 
     it("SILENT when the agent already holds the key - the failure is something else", async () => {
@@ -256,7 +233,7 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
 
     it("an empty SSH_AUTH_SOCK counts as no agent, not as a dead one", async () => {
         const message = await diagnoseAliasAuth("archive", options(resolvesFixtureKey(), [LOCKED], [], ""));
-        expect(message).toContain("SSH_AUTH_SOCK was unset");
+        expect(message).toBe(`the SSH key needs a passphrase and no ssh-agent is running. Fix: ssh-add ${keyPath}`);
     });
 
     it("names every locked key once and offers a single ssh-add that loads them all", async () => {
@@ -266,8 +243,7 @@ describe("diagnoseAliasAuth (fake binaries)", () => {
             "archive",
             options([{ exit: 0, stdout: sshConfigOutput(keyPath, second) }], [LOCKED]),
         );
-        expect(message).toContain(`ssh-add ${keyPath} ${second}`);
-        expect(message).toContain("are passphrase-protected");
+        expect(message).toBe(`the SSH key needs a passphrase and no ssh-agent is running. Fix: ssh-add ${keyPath} ${second}`);
     });
 
     it("de-duplicates an identity file ssh -G printed twice", async () => {

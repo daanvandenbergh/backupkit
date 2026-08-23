@@ -17,7 +17,7 @@ import type { ResolvedConfig, ResolvedTarget } from "../config/types.js";
 import { exec, minimalEnv, type ExecOptions, type ExecResult } from "../exec/exec.js";
 import { ConfigError, describeError, isBackupkitError, isTransientFailure, RestoreError } from "../shared/errors.js";
 import { formatEndpoint, formatUtc } from "../shared/format.js";
-import { Logger } from "../shared/logger.js";
+import { Logger, type LoggerOptions } from "../shared/logger.js";
 import { sanitize } from "../shared/sanitize.js";
 import { parseSnapshotName } from "../shared/snapshot-name.js";
 import type { Endpoint, ResolvedRemote } from "../shared/types.js";
@@ -91,6 +91,14 @@ export interface BackupkitDeps {
     reach?: typeof reachRemote;
     /** Logger override (tests). Default: a Logger built from `config.logging`. */
     logger?: Logger;
+    /**
+     * Console rendering for the logger this engine builds - who is reading its
+     * output. A CLI verb passes `{ human: true }`; one that prints its own
+     * failure report also mutes "error" so the same sentence is not printed
+     * twice. The service passes nothing: its console IS the journal, which
+     * wants the machine format. Ignored when `logger` is given.
+     */
+    logStyle?: Pick<LoggerOptions, "human" | "consoleMute">;
 }
 
 /**
@@ -229,6 +237,18 @@ function jailCommandPrefix(destination: string): string {
 const DISK_LOW_RECHECK_MS = 5 * 60_000;
 
 /** The versioned-backup engine over one resolved config. */
+/**
+ * One `CheckReport.errors` entry for a problem with a remote - the SINGLE
+ * wording, so `backupkit check` can recognise which of its collected errors a
+ * remote's own row already printed and not say the same thing twice. Both
+ * producers (key priming, the rsync/reachability probe) and the CLI consumer
+ * go through here; a second template anywhere is how the dedupe silently stops
+ * matching and the duplicate comes back.
+ */
+export function remoteCheckError(remote: string, message: string): string {
+    return `remote ${remote}: ${message}`;
+}
+
 export class Backupkit {
     /** The fully resolved config this instance runs. */
     private readonly config: ResolvedConfig;
@@ -346,6 +366,8 @@ export class Backupkit {
                 level: config.logging.level,
                 now: this.deps.now,
                 fileSink: config.logging.file === null ? undefined : this.deferredFileSink(config.logging.file),
+                human: deps.logStyle?.human,
+                consoleMute: deps.logStyle?.consoleMute,
             });
         this.backoff = new BackoffTracker(this.log);
         this.runtimeDir =
@@ -763,7 +785,7 @@ export class Backupkit {
         }
         const keyFailure = this.keyFailures.get(remote.name);
         if (keyFailure !== undefined) {
-            this.log.error("the SSH key for this backup server could not be loaded, so this target cannot run", {
+            this.log.error("SSH key not loaded", {
                 target: target.name,
                 remote: remote.name,
                 error: keyFailure,
@@ -782,9 +804,11 @@ export class Backupkit {
             // Wi-Fi read exactly like a broken configuration.
             const transient = isTransientFailure(error);
             this.log[transient ? "warn" : "error"](
-                transient
-                    ? "could not reach this target's backup server - skipping this run, will retry"
-                    : "the pre-run check against this target's backup server failed, so this target cannot run",
+                // The wrapper stays SHORT because the `error` field is the
+                // payload: on a human line it is appended to this sentence, and
+                // a wrapper that restates the cause turns one fact into two
+                // clauses that say the same thing.
+                transient ? "backup server not reachable - will retry" : "cannot use this backup server",
                 { target: target.name, remote: remote.name, error: message },
             );
             return this.syntheticReport(target, "failed", "remote-unavailable", message);
@@ -1614,7 +1638,7 @@ export class Backupkit {
             // Per-remote priming failures do not fail preflight (fault isolation),
             // but check() is the diagnostic surface: report each one loudly.
             for (const [remoteName, message] of this.keyFailures) {
-                errors.push(`remote ${remoteName}: ${message}`);
+                errors.push(remoteCheckError(remoteName, message));
             }
         } catch (error) {
             errors.push(describeError(error));
@@ -1700,7 +1724,7 @@ export class Backupkit {
                     const message = describeError(error);
                     row.error = row.error ?? message;
                     row.reachable = false;
-                    errors.push(`remote ${remote.name}: ${message}`);
+                    errors.push(remoteCheckError(remote.name, message));
                 }
             }
             remoteChecks.push(row);

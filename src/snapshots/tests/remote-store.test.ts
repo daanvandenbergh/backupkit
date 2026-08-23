@@ -838,7 +838,7 @@ describe("openStore", () => {
                     },
                 },
             );
-            await expect(store.withLock(async () => "never runs")).rejects.toThrow(/ssh myserver failed \(exit 255\)/);
+            await expect(store.withLock(async () => "never runs")).rejects.toThrow(/myserver: the connection dropped mid-session/);
             const calls = await fake.calls();
             const commands = calls.map((call) => call.argv.at(-1));
             expect(commands).toEqual(["'mkdir' '-p' '--' '/srv/backups/web'", "'mkdir' '--' '/srv/backups/web/.backupkit.lock'"]);

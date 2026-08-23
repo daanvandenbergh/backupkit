@@ -161,15 +161,21 @@ async function agentState(options: AliasAuthDiagnosisOptions): Promise<AgentStat
     return { kind: "loaded", sock: sanitize(sock), fingerprints };
 }
 
-/** `n key`/`n keys`. */
-function keyCount(n: number): string {
-    return `${n} ${n === 1 ? "key" : "keys"}`;
+/**
+ * One short sentence and the command that fixes it. Every message this module
+ * produces is read off a terminal by someone who wants to know what to type
+ * next, so it says what is wrong once and then says that - the explanation of
+ * WHY `ssh <alias>` works by hand while backupkit cannot is true, useful, and
+ * belongs in the docs, not stapled to the end of every failure line.
+ */
+function withFix(problem: string, keys: readonly string[]): string {
+    return `${problem}. Fix: ssh-add ${keys.map((key) => sanitize(key)).join(" ")}`;
 }
 
 /**
- * The actionable reason an alias's authentication failed, or null when the
- * probes cannot establish one (in which case the caller keeps its generic
- * message).
+ * The actionable reason an alias's authentication failed - one sentence and
+ * the command that fixes it - or null when the probes cannot establish one (in
+ * which case the caller keeps its generic message).
  *
  * A reason is returned ONLY for the one shape that is certain: every identity
  * file ssh_config gives the alias is passphrase-protected, and the agent
@@ -200,31 +206,14 @@ export async function diagnoseAliasAuth(
     }
 
     const agent = await agentState(options);
-    const list = encrypted.map((key) => sanitize(key)).join(", ");
-    const noun = encrypted.length === 1 ? "is passphrase-protected" : "are passphrase-protected";
-    const fix = `ssh-add ${encrypted.map((key) => sanitize(key)).join(" ")}`;
-    const source = `ssh_config gives alias "${alias}" ${encrypted.length === 1 ? "the key" : "the keys"} ${list}, which ${noun}`;
-
     if (agent.kind === "absent") {
-        return (
-            `${source}, and backupkit's ssh had NO ssh-agent to unlock ${encrypted.length === 1 ? "it" : "them"} ` +
-            `(SSH_AUTH_SOCK was unset in its environment). That is why "ssh ${alias}" works for you - it prompts ` +
-            `on your terminal - and an unattended run cannot. Start an agent and load the key in the session ` +
-            `backupkit runs from: eval "$(ssh-agent -s)" && ${fix}`
-        );
+        return withFix("the SSH key needs a passphrase and no ssh-agent is running", encrypted);
     }
     if (agent.kind === "unreachable") {
-        return (
-            `${source}, and the ssh-agent at ${agent.sock} did not answer, so nothing could unlock ` +
-            `${encrypted.length === 1 ? "it" : "them"}. Start a working agent and load the key: ` +
-            `eval "$(ssh-agent -s)" && ${fix}`
-        );
+        return withFix("the SSH key needs a passphrase and the ssh-agent is not answering", encrypted);
     }
     if (agent.fingerprints.size === 0) {
-        return (
-            `${source}, and the ssh-agent at ${agent.sock} holds no keys at all. That is why "ssh ${alias}" works ` +
-            `for you - it prompts on your terminal - and an unattended run cannot. Load the key into that agent: ${fix}`
-        );
+        return withFix("the SSH key needs a passphrase and the ssh-agent is empty", encrypted);
     }
     const missing: string[] = [];
     for (const key of encrypted) {
@@ -240,9 +229,5 @@ export async function diagnoseAliasAuth(
     if (missing.length === 0) {
         return null;
     }
-    return (
-        `${source}, and ${missing.length === 1 ? "it is" : "they are"} not loaded in the ssh-agent at ` +
-        `${agent.sock} (which holds ${keyCount(agent.fingerprints.size)}, none of them this one). Load it: ` +
-        `ssh-add ${missing.map((key) => sanitize(key)).join(" ")}`
-    );
+    return withFix("the SSH key needs a passphrase and is not in the ssh-agent", missing);
 }

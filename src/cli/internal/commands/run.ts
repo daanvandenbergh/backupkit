@@ -20,7 +20,7 @@ export async function runCommand(argv: string[], deps: CliDeps): Promise<number>
         deps.stdout(COMMAND_HELP.run);
         return 0;
     }
-    const { config, engine } = deps.loadContext(values.config as string | undefined);
+    const { config, engine } = deps.loadContext(values.config as string | undefined, { printsFailures: true });
     const targets = selectTargets(positionals, config);
     deps.wireSignals(() => engine.stop());
     const report = await engine.run({

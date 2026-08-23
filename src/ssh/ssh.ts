@@ -129,12 +129,16 @@ export interface RunRemoteOptions {
  * matched permanent pattern (spec section 4's messages) or the transient
  * default. `tail` must already be sanitized.
  *
+ * ONE SHORT SENTENCE, then `Fix: <command>` when there is a command. These are
+ * read off a terminal by someone who wants to know what to type next; the
+ * paragraph explaining why `ssh <alias>` works by hand while an unattended run
+ * cannot is true and belongs in the docs, not on the failure line.
+ *
  * An alias auth-failure additionally asks `diagnoseAliasAuth` for the CAUSE -
- * "authentication failed under BatchMode" is a symptom, and the usual cause is
- * a passphrase-protected ssh_config key that no reachable agent holds, which
- * is exactly the state in which `ssh <alias>` succeeds for a human and every
- * unattended run fails. The diagnosis is best-effort and never throws; when it
- * cannot establish a cause the generic message stands.
+ * "authentication failed" is a symptom, and the usual cause is a
+ * passphrase-protected ssh_config key that no reachable agent holds. The
+ * diagnosis is best-effort and never throws; when it cannot establish a cause
+ * the generic message stands.
  */
 async function sshFailureMessage(
     remote: ResolvedRemote,
@@ -145,36 +149,31 @@ async function sshFailureMessage(
     const pattern = matchPermanentSshPattern(tail);
     if (pattern === "auth-failure") {
         if (remote.kind === "alias") {
-            const euid = process.geteuid?.() ?? process.getuid?.() ?? -1;
             const cause = await diagnoseAliasAuth(remote.alias, { sshBin: options.sshBin, env: options.env });
             if (cause !== null) {
-                return `ssh alias "${remote.alias}": authentication failed under BatchMode - ${cause}`;
+                return cause;
             }
+            const euid = process.geteuid?.() ?? process.getuid?.() ?? -1;
             return (
-                `ssh alias "${remote.alias}": authentication failed under BatchMode - verify that ` +
-                `"ssh ${remote.alias}" works non-interactively for this user (uid ${euid}); ` +
-                `backupkit does not manage keys for alias remotes`
+                `${dest} refused backupkit's SSH key (backupkit does not manage keys for ssh_config aliases). ` +
+                `Fix: make "ssh ${dest}" work with no prompt as uid ${euid}`
             );
         }
-        return (
-            `ssh ${dest}: authentication failed - key ${remote.identityFile} was refused; ` +
-            `run "backupkit check" to load keys and diagnose`
-        );
+        return `${dest} refused the SSH key ${remote.identityFile}. Fix: backupkit check`;
     }
     if (pattern === "host-key-verification") {
-        const where = remote.kind === "alias" ? "your known_hosts" : remote.knownHostsFile;
-        return `ssh ${dest}: host key is not pinned in ${where}; run "backupkit check" interactively to pin the host key`;
+        return `${dest}'s host key is not pinned yet. Fix: run backupkit check in a terminal to pin it`;
     }
     if (pattern === "host-key-changed") {
         const where = remote.kind === "alias" ? "your known_hosts" : remote.knownHostsFile;
         return (
-            `ssh ${dest}: REMOTE HOST IDENTIFICATION HAS CHANGED - possible man-in-the-middle; ` +
-            `verify the host, then edit ${where} manually (backupkit never auto-removes a pinned key)`
+            `${dest}'s host key CHANGED - this can be a man-in-the-middle. ` +
+            `Fix: verify the host, then edit ${where} by hand (backupkit never removes a pinned key for you)`
         );
     }
     const cause = describeTransientSshStderr(tail);
     const why = cause ?? SSH_NO_ANSWER_MESSAGE;
-    return `ssh ${dest} failed (exit 255): ${why}${tail === "" ? "" : ` [ssh said: ${tail}]`}`;
+    return `${dest}: ${why}${tail === "" ? "" : ` (ssh said: ${tail})`}`;
 }
 
 /**
