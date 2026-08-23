@@ -5,36 +5,10 @@
  */
 
 import type { TargetStatus } from "../../../engine/types.js";
-import { formatDuration, formatUtc } from "../../../shared/format.js";
+import { formatUtc } from "../../../shared/format.js";
 import type { CliDeps } from "../context.js";
-import { alignRows, parseFlags, selectTargets } from "../context.js";
+import { alignRows, parseFlags, selectTargets, timeAgo, timeUntil } from "../context.js";
 import { COMMAND_HELP } from "../help.js";
-
-/**
- * How long ago the newest successful run started, as a person reads it -
- * "20h ago", "3d 4h ago", or "never".
- *
- * RELATIVE, where every other time column is absolute, and deliberately so:
- * this column exists to answer "are my backups current", and an absolute
- * timestamp makes the reader do the arithmetic that IS the question. The exact
- * instant is still in `--json` as `lastSuccessAt` for anything that needs to
- * compute on it.
- *
- * A future timestamp (a clock that moved backwards, a report written by a host
- * whose clock is ahead) reads "just now" rather than a negative age - the
- * clock-skew guard is what reports that condition, and it says so properly.
- */
-function successAge(lastSuccessAt: string | null, now: Date): string {
-    if (lastSuccessAt === null) {
-        return "never";
-    }
-    const at = new Date(lastSuccessAt);
-    if (Number.isNaN(at.getTime())) {
-        return "-";
-    }
-    const elapsed = now.getTime() - at.getTime();
-    return elapsed <= 0 ? "just now" : `${formatDuration(elapsed)} ago`;
-}
 
 /** How much of a failure explanation one status line carries before it is trimmed. */
 const ERROR_MAX_CHARS = 300;
@@ -48,7 +22,7 @@ const ERROR_MAX_CHARS = 300;
  * only way to find out was to go and read the log. A column cannot hold a
  * sentence, so this goes underneath, once per failing target.
  */
-function failureNotes(rows: TargetStatus[]): string[] {
+function failureNotes(rows: TargetStatus[], now: Date): string[] {
     const lines: string[] = [];
     for (const row of rows.filter((r) => r.lastError !== null)) {
         const error = row.lastError as string;
@@ -59,7 +33,7 @@ function failureNotes(rows: TargetStatus[]): string[] {
         lines.push(`  ${error.length > ERROR_MAX_CHARS ? `${error.slice(0, ERROR_MAX_CHARS)}...` : error}`);
         if (row.consecutiveFailures > 0 && row.nextDueAt !== null) {
             lines.push(
-                `  Waiting until ${formatUtc(new Date(row.nextDueAt))} before trying again; ` +
+                `  Trying again ${timeUntil(row.nextDueAt, now)} (${formatUtc(new Date(row.nextDueAt))}); ` +
                     `\`backupkit run --force ${row.target}\` retries it now.`,
             );
         }
@@ -81,15 +55,16 @@ export function formatStatusRows(rows: TargetStatus[], now: Date = new Date()): 
         rows.map((row) => [
             row.target,
             row.lastSnapshot ?? "-",
-            successAge(row.lastSuccessAt, now),
-            // The struct carries strict ISO-8601 for --json; humans get formatUtc.
-            row.nextDueAt === null ? "-" : formatUtc(new Date(row.nextDueAt)),
+            // Both time columns read the same way, and the exact instants stay
+            // in `--json` for anything that needs to compute on them.
+            timeAgo(row.lastSuccessAt, now),
+            timeUntil(row.nextDueAt, now),
             row.lastResult ?? "-",
             String(row.consecutiveFailures),
             row.lockHeld ? "held" : "-",
         ]),
     );
-    return [...table, ...failureNotes(rows)];
+    return [...table, ...failureNotes(rows, now)];
 }
 
 /** The `backupkit status` command entry. */

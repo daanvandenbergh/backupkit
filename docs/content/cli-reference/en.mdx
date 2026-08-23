@@ -142,8 +142,8 @@ Before entering the loop, both `start` and `daemon` print **when each target is 
 ```
 Scheduler started - 2 of 3 configured targets scheduled. Backups run while this process stays alive; Ctrl-C stops it.
 TARGET       NEXT DUE
-photos       2026-08-23T03:00:00Z
-persistance  2026-08-22T22:09:15Z  (waiting after 9 failures - see `backupkit status`)
+photos       in 17h
+persistance  in 12h    (waiting after 9 failures - see `backupkit status`)
 ```
 
 Without it a scheduler with nothing due for six hours prints nothing for six hours, which is indistinguishable from one that is stuck. It comes from the same read-only calculation `status` uses, so it costs nothing, and if it cannot be produced the scheduler starts regardless.
@@ -180,7 +180,11 @@ A [mirror target](/configuration/#snapshot-or-mirror) contributes nothing here: 
 
 One row per target: last snapshot, how long ago it last succeeded, next due, last result, consecutive failures, and lock state. A mirror target has no snapshot to name, so its `LAST SNAPSHOT` is empty and it never reports a lock (it takes none); everything else on the row works the same, dated from its newest completed run.
 
-`LAST SUCCESS` is **relative** - `20h ago`, `3d 4h ago`, or `never` - where every other time column is absolute. That is deliberate: the column exists to answer "are my backups current", and an absolute timestamp makes you do the arithmetic that *is* the question. It counts the newest run that actually backed the source up, which includes a run that finished with warnings (skipped or vanished files still made a backup), and it is the only currency signal a mirror target has, since it writes no snapshot. The exact instant is in `--json` as `lastSuccessAt`.
+Both time columns are **relative** - `20h ago`, `3d 4h ago`, `never`; `in 17h`, `in 3d 4h`, `due now` - because that is what the questions are. "Are my backups current" and "when does this run next" both turn an absolute timestamp into arithmetic you have to do yourself. The exact instants stay in `--json` as `lastSuccessAt` and `nextDueAt`, and the failure block below the table prints the absolute retry time alongside the relative one.
+
+`LAST SUCCESS` counts the newest run that actually backed the source up, which includes a run that finished with warnings (skipped or vanished files still made a backup). It is the only currency signal a mirror target has, since it writes no snapshot. `NEXT DUE` reads `due now` for a time already passed - the target is waiting for the next scheduler tick, at most 30 seconds away - and `-` for a disabled target.
+
+`LAST SNAPSHOT` stays a snapshot **name**, not a time: it is the identifier you hand to `backupkit restore`.
 
 A stale `LAST SUCCESS` next to `0` failures is worth a look: it means runs are being *skipped* rather than failing - a window already fulfilled, a disk-low guard, or a target that is disabled.
 

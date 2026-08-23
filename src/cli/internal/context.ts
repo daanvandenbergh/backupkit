@@ -20,7 +20,7 @@ import type {
     TargetUnlockReport,
 } from "../../engine/types.js";
 import { describeError } from "../../shared/errors.js";
-import { formatBytes, formatUtc } from "../../shared/format.js";
+import { formatBytes, formatDuration } from "../../shared/format.js";
 import type { SnapshotInfo } from "../../snapshots/types.js";
 
 /** The exec/ spawn function shape used by the service/logs passthroughs. */
@@ -194,6 +194,54 @@ export function count(n: number, singular: string, plural: string = `${singular}
 }
 
 /**
+ * How long ago something happened, as a person reads it - "20h ago",
+ * "3d 4h ago", or a caller-chosen word for "it never did".
+ *
+ * The status table shows RELATIVE times where the persisted data is absolute,
+ * and that is the whole point: its columns answer "are my backups current" and
+ * "when does this run next", and an absolute timestamp makes the reader do the
+ * arithmetic that IS the question. The exact instants stay in `--json`.
+ *
+ * A timestamp in the FUTURE reads "just now" rather than a negative age - a
+ * clock that moved backwards, or a report from a host whose clock is ahead,
+ * is a condition the clock-skew guard reports properly, and this column must
+ * not invent a second, worse account of it.
+ */
+export function timeAgo(iso: string | null, now: Date, never = "never"): string {
+    if (iso === null) {
+        return never;
+    }
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) {
+        return "-";
+    }
+    const elapsed = now.getTime() - at.getTime();
+    return elapsed <= 0 ? "just now" : `${formatDuration(elapsed)} ago`;
+}
+
+/**
+ * How long until something is scheduled to happen - "in 12h", "in 3d 4h", or
+ * "due now" for a time already passed.
+ *
+ * The twin of `timeAgo`, and separate from it precisely because the two
+ * disagree about which direction is impossible: a past due time is ORDINARY
+ * (the target is waiting for the next tick, at most 30 s away) where a future
+ * success is a broken clock. Folding them into one signed formatter would have
+ * to pick one of those readings and be wrong about the other.
+ */
+export function timeUntil(iso: string | null, now: Date, never = "-"): string {
+    if (iso === null) {
+        return never;
+    }
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) {
+        return "-";
+    }
+    const remaining = at.getTime() - now.getTime();
+    return remaining <= 0 ? "due now" : `in ${formatDuration(remaining)}`;
+}
+
+/**
  * The "here is what happens next" block both scheduler entry points print
  * under their started line: one row per scheduled target with its next due
  * time, and - for a target already failing - why that time sits further out
@@ -206,7 +254,7 @@ export function count(n: number, singular: string, plural: string = `${singular}
  * tell that from a wedged one - short of reading the config and working out
  * the window arithmetic themselves.
  */
-export async function schedulePreview(engine: CliContext["engine"]): Promise<string[]> {
+export async function schedulePreview(engine: CliContext["engine"], now: Date = new Date()): Promise<string[]> {
     const rows = await engine.status();
     const scheduled = rows.filter((row) => row.nextDueAt !== null);
     if (scheduled.length === 0) {
@@ -216,7 +264,7 @@ export async function schedulePreview(engine: CliContext["engine"]): Promise<str
         ["TARGET", "NEXT DUE", ""],
         scheduled.map((row) => [
             row.target,
-            formatUtc(new Date(row.nextDueAt as string)),
+            timeUntil(row.nextDueAt, now),
             row.consecutiveFailures === 0
                 ? ""
                 : `(waiting after ${count(row.consecutiveFailures, "failure")} - see \`backupkit status\`)`,

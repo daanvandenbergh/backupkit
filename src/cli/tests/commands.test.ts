@@ -86,12 +86,18 @@ function statusRow(overrides: Partial<TargetStatus> & { target: string }): Targe
 }
 
 describe("schedule preview", () => {
+    afterEach(() => {
+        vi.useRealTimers();
+    });
+
     // Regression in kind: `daemon` already argued that without its start/stop
     // lines a healthy daemon is indistinguishable from one that died during
     // preflight. The same holds one step in - a scheduler with nothing due for
     // six hours printed nothing for six hours, and a person watching it could
     // not tell that from a wedged one.
     it.each(["start", "daemon"])("%s prints when each target is next due", async (command) => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
         const h = fakeDeps();
         h.engine.statusRows = [
             {
@@ -119,7 +125,9 @@ describe("schedule preview", () => {
         ];
         expect(await main([command], h.deps)).toBe(0);
         const out = h.out.join("\n");
-        expect(out).toContain("2026-08-23T03:00:00Z");
+        // Relative, like the status table: the question is "when does this run
+        // next", and a timestamp makes the reader do that arithmetic.
+        expect(out).toContain("in 3h");
         // A time further out than the schedule says needs its reason, or it
         // reads as a wrong schedule.
         expect(out).toContain("waiting after 9 failures");
@@ -304,6 +312,33 @@ describe("status", () => {
         expect(h.out.join("\n")).toContain("just now");
         // A negative duration would render as "-<something> ago".
         expect(h.out.join("\n")).not.toContain(" ago");
+    });
+
+    // The twin of the LAST SUCCESS column, and the reason the two formatters
+    // are separate: a due time already PASSED is ordinary - the target is
+    // waiting for the next tick, at most 30 s away - where a success in the
+    // future is a broken clock. One signed formatter would have to pick one of
+    // those readings and be wrong about the other.
+    it("shows how long until each target is next due", async () => {
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(new Date("2026-08-23T00:00:00Z"));
+        const h = fakeDeps();
+        h.engine.statusRows = [
+            statusRow({ target: "soon", nextDueAt: "2026-08-23T03:00:00.000Z" }),
+            statusRow({ target: "later", nextDueAt: "2026-08-26T04:00:00.000Z" }),
+            // Already passed: due on the next tick, not an error.
+            statusRow({ target: "overdue", nextDueAt: "2026-08-22T23:00:00.000Z" }),
+            // Disabled targets have no next due time, and inventing one is worse.
+            statusRow({ target: "off", nextDueAt: null }),
+        ];
+        expect(await main(["status"], h.deps)).toBe(0);
+        const row = (name: string): string => h.out.find((line) => line.startsWith(name)) as string;
+        expect(row("soon")).toContain("in 3h");
+        expect(row("later")).toContain("in 3d 4h");
+        expect(row("overdue")).toContain("due now");
+        // The NEXT DUE cell is a bare dash - the LOCK column's dash makes a
+        // whole-line search useless, so match the column itself.
+        expect(row("off").split(/\s{2,}/)[3]).toBe("-");
     });
 
     // The table answers everything except the question a person opens `status`
