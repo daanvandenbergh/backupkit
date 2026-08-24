@@ -270,9 +270,11 @@ const PAGES: Record<string, HelpPage> = {
     },
     unlock: {
         usage: "backupkit unlock [options] [TARGET...]",
-        summary: "Clear a destination lock left behind by a killed run",
+        summary: "Clear a destination lock backupkit cannot retake by itself",
         description:
-            "Clear the destination lock of a target whose run was killed before it could release it.",
+            "Clear the destination lock of a target whose run was killed before it could release it. " +
+            "A backupkit retakes a lock its OWN run left behind, so this is for the ones it cannot prove are its: " +
+            "a lock left by a run on another machine, or one whose state dir is gone.",
         args: [targetsArg("Targets to unlock (default: all of them)")],
         options: [
             { term: "--force", text: "Clear the lock even while a LIVE backupkit holds it" },

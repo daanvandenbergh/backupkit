@@ -397,8 +397,17 @@ the sink, not the file.
     destination and `--delete --force` wiped the link target, with the hardlink guard next to it
     FOLLOWING the symlink and answering "no multiply-linked entry". `local-store`'s own docstring
     states the rule ("unknown is not the same as safe"); both sites violated it.
+    The same rule now also governs `LockInspection.token`, which is a TRI-state precisely so this
+    cannot be re-inverted: `string` = the lock was read and carries this token, `null` = the lock
+    was read and carries NO token, `undefined` = the lock could not be read. Only the first two are
+    ever reclaimable, and a refactor collapsing `null | undefined` into one falsy check re-opens the
+    original bug silently.
+    ✗ `if (!inspection.token) { /* treat as ours */ }`     // "unreadable" reads as "no marker"
+    ✓ `if (observed === undefined) { return false; }`      // unknown refuses before anything else
     *graduated: `src/snapshots/tests/remote-store.test.ts` (an unlistable lock is HELD, never
-    stolen), `src/snapshots/tests/local-store.test.ts` (a symlinked partial is discarded).*
+    stolen), `src/snapshots/tests/local-store.test.ts` (a symlinked partial is discarded),
+    `src/snapshots/tests/lock.test.ts` ("never reclaims a lock it could not READ, even with a
+    matching journal entry").*
 36. The config-trust gate precedes every spawn of a config-named binary and every privileged write
     to a config-chosen path. `check` spawned `config.rsyncBin --version` and `sshBin -V` as root
     BEFORE `preflight()` - so a group/other-writable config (the exact state preflight refuses) gave
@@ -547,3 +556,33 @@ the sink, not the file.
     ```
     *graduated: `npm run typecheck` itself is the guard - `REASON_TEXT` cannot compile with a
     member missing. Verify by deleting one key from the map and confirming typecheck fails.*
+45. The lock RELEASE never carries the shutdown signal, and a lock is never reclaimed on identity
+    the reclaiming process cannot verify. Two halves of one failure mode - a destination lock left
+    on an archive host, where the ONLY thing that clears it is a 24 h TTL while `status` reads
+    green (invariant 22's sibling: it fails silently, in the direction nobody watches).
+    The first half: `openStore`'s runner handed `ssh.signal` to every remote command, including the
+    `rm -rf` whose entire job is to run DURING a shutdown. `exec` SIGTERMs a child spawned under an
+    already-aborted signal and `withTransientRetry` refuses to retry an aborted call, so the release
+    got ZERO attempts and EVERY `systemctl restart` mid-run leaked the lock. A release must be
+    bounded by its own `timeoutMs`, never by the signal - and the unit's `TimeoutStopSec` and
+    launchd's `ExitTimeOut` must both exceed (rsync SIGTERM->SIGKILL) + that budget, or the daemon
+    is killed still holding it.
+    The second half: the reclaim exists because of the first, and it is the dangerous direction. A
+    lock may be retaken ONLY on evidence this process can verify itself - the acquisition token it
+    wrote, plus, for a persisted record, `hostname() === record.hostname` AND a dead-or-recycled
+    pid. A pid probe proves nothing about another machine's process table (a shared state dir, two
+    containers with separate pid namespaces), and identity written where a push client could forge
+    it is an attacker-controlled input to a decision whose wrong answer is two pipelines over one
+    archive root.
+    ✗ `signal: ssh.signal` on the release   /  ✗ reclaim on `record.pid` alone, or on hostname alone
+    ✓ `signal: detach ? undefined : ssh.signal`  /  ✓ same host AND (!isPidAlive || start mismatch)
+    ```hunt
+    rg -n "detach|DETACHED_RELEASE|ssh.signal|isPidAlive|hostname\(\)|ownerToken" src/snapshots src/engine/backupkit.ts
+    expect: >= 12
+    witness: src/snapshots/internal/lock.ts
+    ```
+    *graduated: `src/snapshots/tests/remote-store.test.ts` ("runs the lock release detached from the
+    shutdown signal, and nothing else"), `src/snapshots/tests/lock.test.ts` (the
+    "persisted across a restart" suite: never retakes a live pid, another host, an unparseable
+    record, or a markerless lock across a restart), `src/cli/tests/units.test.ts`
+    (`TimeoutStopSec=45`, `ExitTimeOut` 45).*

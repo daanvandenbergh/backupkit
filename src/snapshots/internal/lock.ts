@@ -521,7 +521,7 @@ export async function withLockScope<T>(
             journal.orphaned(where);
             log.error(`could not release the lock ${where} - this backupkit will retake it on its next run`, {
                 error: describeError(releaseError),
-                fix: "nothing, unless this process is about to exit - then `backupkit unlock` clears it",
+                fix: "nothing - the next run retakes it, and the record survives a restart. `backupkit unlock` is only for a lock left behind by another machine",
             });
         }
     }

@@ -276,7 +276,14 @@ Apply retention now. `--dry-run` prints the plan - what is kept and why, then wh
 
 Clear a destination lock a killed run left behind. A mirror target always reports nothing to clear - it takes no lock, because the lock directory would sit inside the mirrored tree where the transfer's own `--delete` would remove it.
 
-Each target's archive root is locked for the length of a run, and the release is structural - it happens in a `finally`, so an ordinary failure or Ctrl-C always frees it. A `kill -9`, a lost ssh connection, or a power cut has no `finally`. What is left then depends on where the archive is: a **local** lock records its holder's pid, so the next run sees the process is gone and takes it over by itself. A **remote** lock cannot - there is no pid on this side to probe - so it blocks the target until its 24-hour TTL expires, and one interrupted inside the acquire window (between the lock and its timestamp marker) never expires at all.
+Each target's archive root is locked for the length of a run, and the release is structural - it happens in a `finally`, so an ordinary failure or Ctrl-C always frees it.
+
+Two things defeat that, and backupkit recovers from both by itself:
+
+- **The release could not run.** Releasing a remote lock is itself an ssh command, so a link that dies mid-run takes the release with it. backupkit remembers the lock it took, so its next run on that target retakes it - no wait, no command from you. The memory outlives a restart too: it is kept under the state dir, and a daemon that was killed while holding a lock retakes it when it comes back, once it can see that the process that held it is really gone.
+- **The holder died.** A **local** lock records its holder's pid, so the next run sees the process is gone and takes it over.
+
+What is left for this verb is a lock backupkit cannot prove is its own: one left by a run on **another machine**, one whose state dir was wiped, or a remote lock interrupted inside the acquire window (between the lock and its timestamp marker) - which carries no timestamp and so never expires at all. A remote lock that does carry one is cleared by its 24-hour TTL regardless.
 
 That is what this verb is for:
 

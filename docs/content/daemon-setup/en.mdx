@@ -35,13 +35,17 @@ sudo backupkit service start
 backupkit service status # no root needed
 ```
 
-`service install` writes the OS unit, enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it. Everything the daemon uses lives in root-owned locations:
+`service install` writes the OS unit, enables it on systemd, writes a newsyslog rotation rule on macOS, and ends by naming the command that starts it.
+
+Run it again after upgrading backupkit. The unit is written once and never touched afterwards, so a machine that installed the service before 2.4.0 still carries the old stop timeout - too short for a stop to both end the transfer and give the destination lock back, which is one of the ways a lock gets left on an archive. Re-running `service install` rewrites it; nothing else about the service changes.
+
+Everything the daemon uses lives in root-owned locations:
 
 | Thing | Where it lives for the service |
 | --- | --- |
 | Config | `/etc/backupkit/config.jsonc` - or `config.json`, but never both in one directory - the only directory a root service finds by itself |
 | Host keys | `/etc/backupkit/known_hosts` (`<configDir>/known_hosts`) |
-| Run reports (`stateDir`) | `/var/lib/backupkit`, or `/var/db/backupkit` on macOS |
+| Run reports and lock records (`stateDir`) | `/var/lib/backupkit`, or `/var/db/backupkit` on macOS |
 | ssh-agent socket | `/run/backupkit/agent.sock`, or `/var/db/backupkit/agent/agent.sock` on macOS |
 | Unit definition | `/etc/systemd/system/backupkit.service`, or `/Library/LaunchDaemons/com.daanvandenbergh.backupkit.plist` |
 | Logs | journald, or `/var/log/backupkit/` on macOS - read either with `backupkit logs` |
@@ -166,12 +170,15 @@ On **systemd**: `Restart=on-failure`, `RestartSec=15`, `StartLimitIntervalSec=0`
 
 On **launchd**: `KeepAlive` set to `SuccessfulExit: false` with `ThrottleInterval: 15` for the same behaviour, plus `RunAtLoad` so the daemon starts at boot.
 
-After a crash or a reboot the daemon rebuilds its picture of the world from the run reports on disk - there is no separate state file. Recovery does four things:
+After a crash or a reboot the daemon rebuilds its picture of the world from the run reports on disk. Recovery does five things:
 
 - resumes any in-progress `.partial` snapshot instead of starting over;
 - re-derives each target's failure counters from the run reports;
+- retakes any destination lock it can prove the killed run was holding;
 - re-adds every key to its agent;
 - runs **one** catch-up run no matter how many windows were missed.
+
+The lock records are the one thing not derived from the run reports: they sit in `<stateDir>/locks`, one small file per lock currently held, written when a run takes a lock and deleted when it gives it back. A file still there after a crash is how the daemon knows a lock is its own. It retakes it only once it can also see that the process that held it is gone - same machine, and a pid that is no longer running - so a lock held by a backupkit that is still alive is never touched.
 
 So a host that was down overnight comes back and takes one snapshot per target, not one per missed hour.
 

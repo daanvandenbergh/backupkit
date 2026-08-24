@@ -120,7 +120,7 @@ backupkit status         # last run, next due, lock state (pull targets), per ta
 backupkit list           # the snapshots on disk
 ```
 
-Ctrl-C stops the scheduler cleanly: it aborts the transfer in flight - that run is recorded as `aborted` - releases the destination lock, and exits 0 with `Scheduler stopped cleanly.` A second Ctrl-C exits 1 immediately, skipping the release, which leaves the destination lock behind; clear it with `backupkit unlock <target>` (a stale lock, dead holder or past its 24-hour TTL, needs no `--force`).
+Ctrl-C stops the scheduler cleanly: it aborts the transfer in flight - that run is recorded as `aborted` - releases the destination lock, and exits 0 with `Scheduler stopped cleanly.` A second Ctrl-C exits 1 immediately, skipping the release, which leaves the destination lock behind. You do not normally have to do anything about that: the next `backupkit start` or `backupkit run` on the same machine recognises the lock as its own and retakes it. `backupkit unlock <target>` is there for when it cannot - a lock left by a run on another machine, or one whose state dir has been wiped.
 
 ## Surviving a logout
 
@@ -134,7 +134,7 @@ For anything that must survive a reboot on a server, install [the service](/daem
 
 ## Two people, one machine
 
-Per-user configs stay separate all the way down: each user's `stateDir`, `known_hosts`, and agent socket live under their own home, so two users can each run `backupkit start` against their own config without colliding. The destination lock is the exception - it lives in the archive itself, at `<destination>/.backupkit.lock`, so two users must not point at the same destination: the second one is refused with a lock-held error and exits 3, which is exactly what that lock is for. What they cannot both have is a service - there is one system unit per machine.
+Per-user configs stay separate all the way down: each user's `stateDir`, `known_hosts`, and agent socket live under their own home, so two users can each run `backupkit start` against their own config without colliding. The destination lock is the exception - it lives in the archive itself, at `<destination>/.backupkit.lock`, so two users must not point at the same destination: the second one is refused with a lock-held error and exits 3, which is exactly what that lock is for. A backupkit only ever retakes a lock it can prove its own run left behind, so one user's run never takes over another's. What they cannot both have is a service - there is one system unit per machine.
 
 Mind the lookup order again: the moment a shared `/etc/backupkit/config.jsonc` exists it shadows every user's own file, so each of them needs `--config` or `BACKUPKIT_CONFIG`.
 

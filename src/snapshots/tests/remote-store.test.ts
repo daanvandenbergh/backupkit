@@ -518,6 +518,10 @@ describe("RemoteSnapshotStore", () => {
             expect(error).toBeInstanceOf(LockHeldError);
             expect(ran).toBe(false);
             expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
+            // ...and the message must not read as benign. A markerless lock has
+            // no TTL: it does NOT clear itself, and "assuming freshly acquired"
+            // told an operator to wait for something that was never coming.
+            expect((error as Error).message).toContain("NOT expire");
         });
 
         it("stale takeover: a marker past the 24h TTL is removed and the lock re-acquired", async () => {

@@ -7,7 +7,14 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../../exec/exec.js";
 import { LockHeldError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
-import { LockJournal, pidStartTime, withLockScope, type LockBackend, type LockMeta } from "../internal/lock.js";
+import {
+    forceUnlock,
+    LockJournal,
+    pidStartTime,
+    withLockScope,
+    type LockBackend,
+    type LockMeta,
+} from "../internal/lock.js";
 import { LocalSnapshotStore } from "../internal/local-store.js";
 
 /** Silent logger for the suites. */
@@ -650,6 +657,37 @@ describe("lock journal: reclaiming a lock this process could not release", () =>
 // disk - and a record read by a DIFFERENT process proves nothing until its
 // holder has been shown to be gone. Every refusal below is one live holder's
 // lock left alone.
+// `forceUnlock` answers "is anything holding this?" by ACQUIRING, because on a
+// find-only remote surface that is the only primitive that can answer honestly.
+// The consequence nobody had looked at: when nothing was holding it, the probe
+// has CREATED a lock - and if the removal then fails on the same flaky link
+// that made the operator reach for `unlock` in the first place, the escape
+// hatch has left a fresh lock behind and reported a bare remote failure the
+// operator would read as "nothing happened".
+describe("unlock: the probe must not silently leave the lock it created", () => {
+    it("says plainly that its probe left a NEW lock when the removal fails", async () => {
+        const { world, backend } = makeTokenWorld();
+        world.failRemove = true;
+        await expect(forceUnlock(backend(), false, new LockJournal())).rejects.toThrow(
+            /probing it left a NEW lock/,
+        );
+        expect(world.lock).not.toBeNull();
+    });
+
+    it("names the command that clears what it left behind", async () => {
+        const { world, backend } = makeTokenWorld();
+        world.failRemove = true;
+        await expect(forceUnlock(backend(), false, new LockJournal())).rejects.toThrow(/backupkit unlock --force/);
+        expect(world.removes).toBe(1);
+    });
+
+    it("still reports nothing held when the probe cleans up after itself", async () => {
+        const { world, backend } = makeTokenWorld();
+        await expect(forceUnlock(backend(), false, new LockJournal())).resolves.toEqual({ status: "none" });
+        expect(world.lock).toBeNull();
+    });
+});
+
 describe("lock journal: persisted across a restart", () => {
     let dir = "";
     let world: ReturnType<typeof makeTokenWorld>["world"];

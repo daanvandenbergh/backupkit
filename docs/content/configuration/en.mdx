@@ -54,7 +54,7 @@ That order is the same for *every* identity, though, so a `/etc/backupkit/config
 | `targets` | object | required | What to back up, keyed by target name (they run in the order you write them) |
 | `name` | string | `"backupkit"` | Instance label the schema accepts; nothing surfaces it yet |
 | `retention` | object | keep everything | Default retention for targets that define none |
-| `stateDir` | string | `/var/lib/backupkit` as root (`/var/db/backupkit` on macOS), else `$XDG_STATE_HOME/backupkit` falling back to `~/.local/state/backupkit` | Where run reports are stored |
+| `stateDir` | string | `/var/lib/backupkit` as root (`/var/db/backupkit` on macOS), else `$XDG_STATE_HOME/backupkit` falling back to `~/.local/state/backupkit` | Where run reports and lock records are stored |
 | `logging` | object | `{ level: "info" }` | `level` (`error`/`warn`/`info`/`debug`) and an optional `file` |
 | `rsyncBin` | string | tries `/opt/homebrew/bin/rsync`, `/usr/local/bin/rsync`, then PATH | Override the local rsync |
 | `sshBin` | string | from PATH | Override the local ssh |
