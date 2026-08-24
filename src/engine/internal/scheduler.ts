@@ -20,6 +20,14 @@ import type { RunReason, RunStatus, TargetRunReport } from "../types.js";
 /** Milliseconds between scheduler ticks. */
 export const TICK_MS = 30_000;
 
+/**
+ * Consecutive lock-held ticks before the warn escalates to an error naming
+ * `backupkit unlock`. At TICK_MS this is ten minutes - long enough that an
+ * ordinary concurrent run never trips it, short enough that a target which has
+ * silently stopped backing up says so on the same day.
+ */
+const LOCK_HELD_ESCALATE_TICKS = 20;
+
 /** Backoff base delay: 15 minutes. */
 const BACKOFF_BASE_MS = 15 * 60_000;
 
@@ -204,6 +212,14 @@ export class Scheduler {
     /** Per-target unreachable detail currently logged, so an outage is reported on its EDGES and not every 30 s. */
     private readonly unreachable = new Map<string, string>();
 
+    /**
+     * Per-target lock-held detail currently logged, and how many ticks it has
+     * held for. Same edge-triggering as `unreachable`, for the same reason: a
+     * target blocked behind a lock is re-tried every tick, and the field report
+     * that prompted this was hundreds of identical warn lines.
+     */
+    private readonly lockHeld = new Map<string, { detail: string; ticks: number }>();
+
     /** Construct the loop over its dependencies. */
     constructor(deps: SchedulerDeps) {
         this.deps = deps;
@@ -297,6 +313,7 @@ export class Scheduler {
             }
             try {
                 const report = await this.deps.runTarget(target);
+                this.clearLockHeld(target.name);
                 if (report.status === "success" || report.status === "warning") {
                     // The run's own start time, not its snapshot name: a snapshot
                     // is named for exactly that instant, and a mirror run has no
@@ -319,10 +336,7 @@ export class Scheduler {
                 }
             } catch (error) {
                 if (isBackupkitError(error) && error.code === "lock-held") {
-                    this.deps.log.warn("skipped, another backupkit run has this target", {
-                        target: target.name,
-                        error: error.message,
-                    });
+                    this.noteLockHeld(target.name, error.message);
                     continue;
                 }
                 // Same silent failure as the due-check catch above, on its
@@ -395,5 +409,40 @@ export class Scheduler {
             });
         }
         return true;
+    }
+
+    /**
+     * Report a target skipped behind somebody else's lock, on the EDGES of the
+     * episode rather than once per tick.
+     *
+     * The escalation matters as much as the damping. A lock held by a real
+     * concurrent run clears in minutes and is nobody's problem; one still there
+     * after LOCK_HELD_ESCALATE_TICKS is a target that has silently stopped
+     * backing up, and the operator has to be told which command clears it. That
+     * is exactly the field case this whole change came from: 24 h of identical
+     * warn lines with nothing in them to act on.
+     */
+    private noteLockHeld(target: string, detail: string): void {
+        const seen = this.lockHeld.get(target);
+        const ticks = (seen?.ticks ?? 0) + 1;
+        this.lockHeld.set(target, { detail, ticks });
+        if (seen === undefined || seen.detail !== detail) {
+            this.deps.log.warn("skipped, another backupkit run has this target", { target, error: detail });
+            return;
+        }
+        if (ticks === LOCK_HELD_ESCALATE_TICKS) {
+            this.deps.log.error("still blocked by a destination lock nobody is releasing - NOT backing up", {
+                target,
+                error: detail,
+                fix: `if no other backupkit is running, clear it with \`backupkit unlock ${target}\``,
+            });
+        }
+    }
+
+    /** The target got through to a run: end any lock-held episode, logging its edge. */
+    private clearLockHeld(target: string): void {
+        if (this.lockHeld.delete(target)) {
+            this.deps.log.info("the destination lock cleared - backing up again", { target });
+        }
     }
 }

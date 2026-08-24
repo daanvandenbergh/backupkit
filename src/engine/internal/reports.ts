@@ -260,16 +260,20 @@ export interface DerivedBackoff {
      */
     lastSuccessAt: Date | null;
     /**
-     * The `error` of the newest FAILED report, or null when there is none.
+     * Why this target is not backing up: the `error` of the newest FAILED
+     * report, or of a newer BLOCKING skip (`lock-held`, `disk-low`); null when
+     * there is neither.
      *
-     * The newest FAILED one specifically, not the newest of any kind: a
-     * `skipped` run recorded after a failure must not hide the failure that is
-     * still driving the backoff and still the reason nothing is being backed
-     * up. `status` shows this, which is the difference between "failed 9" and
-     * knowing what to go and fix.
+     * Not the newest report of any kind: an ordinary `window` skip recorded
+     * after a failure must not hide the failure that is still driving the
+     * backoff and still the reason nothing is being backed up. The two blocking
+     * skips are here because they are not "nothing to do" either - they read as
+     * `skipped / no error / 0 failures`, indistinguishable from a healthy tick,
+     * which is how a target blocked behind a leaked lock stayed green in
+     * `status` for the whole 24 h its lock took to expire.
      */
     lastError: string | null;
-    /** `finishedAt` of that failed report, or null. */
+    /** `finishedAt` of the report `lastError` came from, or null. */
     lastErrorAt: Date | null;
 }
 
@@ -282,6 +286,7 @@ export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBacko
     let consecutiveFailures = 0;
     let lastFailedAt: Date | null = null;
     let lastError: string | null = null;
+    let lastErrorAt: Date | null = null;
     let lastSnapshot: string | null = null;
     let lastSuccessAt: Date | null = null;
     for (const report of reports) {
@@ -294,10 +299,29 @@ export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBacko
                 // failure, so the reason code stands in - never leave the
                 // scan looking for an older, less relevant failure.
                 lastError = report.error ?? report.reason ?? "no reason recorded";
+                lastErrorAt = lastFailedAt;
             }
             continue;
         }
-        // aborted and skipped never increment the count and never stop the scan.
+        // A skip is not a failure, and must not touch the failure count or the
+        // backoff - but two of them mean the target is NOT BACKING UP, and
+        // those have to reach `status`. A target blocked behind a leaked lock,
+        // or one refused by the disk guard, read as `skipped / no error / 0
+        // failures`: byte-identical to the healthy "already backed up in this
+        // window" skip, so `backupkit status` said nothing was wrong while a
+        // target had been dead for a day. `window` is the healthy one and is
+        // deliberately not here.
+        if (
+            report.status === "skipped" &&
+            (report.reason === "lock-held" || report.reason === "disk-low") &&
+            lastError === null
+        ) {
+            const finished = new Date(report.finishedAt);
+            lastError = report.error ?? report.reason;
+            lastErrorAt = Number.isNaN(finished.getTime()) ? null : finished;
+            continue;
+        }
+        // aborted and other skips never increment the count and never stop the scan.
         if (report.status !== "success" && report.status !== "warning") {
             continue;
         }
@@ -319,6 +343,6 @@ export function deriveBackoff(reports: readonly TargetRunReport[]): DerivedBacko
         lastSnapshot,
         lastSuccessAt,
         lastError,
-        lastErrorAt: lastError === null ? null : lastFailedAt,
+        lastErrorAt,
     };
 }

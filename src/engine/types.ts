@@ -323,11 +323,15 @@ export interface TargetStatus {
      *
      * Without it the status table said `failed 9` and stopped - the one thing
      * a person checking on their backups needs is WHY, and they had to go and
-     * find the log for it. Taken from the newest failed report specifically,
-     * not the newest report: a `skipped` run after a failure must not hide the
-     * failure that is still driving the backoff.
+     * find the log for it. Taken from the newest FAILED report, or from a newer
+     * skip that means the target is not backing up at all (`lock-held`,
+     * `disk-low`) - never from an ordinary `window` skip, which must not hide
+     * the failure that is still driving the backoff. Those two skips had to be
+     * added because they read as `skipped / no error / 0 failures`, exactly
+     * like a healthy already-backed-up tick, so a target blocked behind a
+     * leaked lock looked green for the 24 h its lock took to expire.
      */
     lastError: string | null;
-    /** ISO time that failure finished, or null when there is none. */
+    /** ISO time the run behind `lastError` finished, or null when there is none. */
     lastErrorAt: string | null;
 }

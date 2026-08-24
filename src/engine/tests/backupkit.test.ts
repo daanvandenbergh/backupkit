@@ -618,6 +618,45 @@ describe("Backupkit", () => {
         expect(files).toHaveLength(1);
         const persisted = JSON.parse(await readFile(join(fixture.stateDir, "runs", "web", files[0]), "utf8"));
         expect(persisted.reason).toBe("lock-held");
+        // ...and it says WHY. `lastResult: "skipped"` alone is what a healthy
+        // already-backed-up tick reports too, so a target dead behind a leaked
+        // lock read exactly like one with nothing to do.
+        expect(row.lastError).not.toBeNull();
+        expect(row.lastError).toMatch(/lock/i);
+    });
+
+    // ...but ONE report per episode, not one per tick. A target blocked behind
+    // a lock nobody releases is re-tried every 30 s, and reports rotate at
+    // REPORTS_KEPT - so 25 minutes of being stuck erased the entire 50-report
+    // history that backoff rehydration and `status` derive from. The evidence
+    // of what went wrong was destroyed by the reporting of it.
+    it("a lock held across many runs writes ONE report, keeping the history it would otherwise erase", async () => {
+        const fixture = track(await makeKit());
+        // A real success first, so there is history worth not destroying.
+        await fixture.kit.run({ force: true });
+        const before = await readdir(join(fixture.stateDir, "runs", "web"));
+        expect(before).toHaveLength(1);
+
+        const lockDir = join(fixture.destination, ".backupkit.lock");
+        await mkdir(lockDir, { recursive: true });
+        const { pidStartTime } = await import("../../snapshots/internal/lock.js");
+        await writeFile(
+            join(lockDir, "meta"),
+            JSON.stringify({
+                pid: process.pid,
+                pidStartTime: await pidStartTime(process.pid),
+                hostname: hostname(),
+                createdAt: fixture.clock.now.toISOString(),
+            }),
+        );
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+            fixture.clock.now = new Date(fixture.clock.now.getTime() + 30_000);
+            await expect(fixture.kit.run({ force: true })).rejects.toThrow(/lock/i);
+        }
+        const after = await readdir(join(fixture.stateDir, "runs", "web"));
+        expect(after).toHaveLength(2);
+        // The successful run is still on record.
+        expect(after).toContain(before[0]);
     });
 
     // ...and a lock on ONE target must not take the rest of the pass down with

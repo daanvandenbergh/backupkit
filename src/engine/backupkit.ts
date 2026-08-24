@@ -330,6 +330,14 @@ export class Backupkit {
     /** When each disk-low target's guard last ran a full evaluation (epoch ms), for the DISK_LOW_RECHECK_MS damping. */
     private readonly diskLowCheckedAt = new Map<string, number>();
 
+    /**
+     * When each target's current lock-held episode started, or absent when it
+     * is not blocked. Damps the synthetic `lock-held` report to one per
+     * episode: a target stuck behind a leaked lock is re-tried every tick, and
+     * one report per tick rotates its own run history off disk in minutes.
+     */
+    private readonly lockHeldSince = new Map<string, number>();
+
     /** The backoff tracker (rehydrated lazily per target from run reports). */
     private readonly backoff: BackoffTracker;
 
@@ -925,13 +933,28 @@ export class Backupkit {
                     throw error;
                 }
                 const held = this.syntheticReport(target, "skipped", "lock-held", sanitize(error.message));
-                if (options.dryRun !== true) {
+                // One report per EPISODE, not one per tick - the same damping
+                // the disk-low path below already does, and for a worse reason.
+                // A target blocked behind a lock nobody releases is re-tried
+                // every 30 s, and reports rotate at REPORTS_KEPT: 25 minutes of
+                // being stuck erased the entire 50-report history that backoff
+                // rehydration and `status` derive from, so the evidence of what
+                // went wrong was destroyed by the reporting of it.
+                const repeat = this.lockHeldSince.has(target.name);
+                if (!repeat) {
+                    this.lockHeldSince.set(target.name, this.deps.now().getTime());
+                }
+                if (options.dryRun !== true && !repeat) {
                     await this.ensureBackoffState(target);
                     await writeTargetReport(this.config.stateDir, held);
                 }
                 throw error;
             }
         }
+
+        // The lock cleared: the next block behind one is a new episode, and
+        // gets its own report.
+        this.lockHeldSince.delete(target.name);
 
         // Disk-low bookkeeping for the damping above.
         if (report.status === "skipped" && report.reason === "disk-low") {

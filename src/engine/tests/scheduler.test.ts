@@ -540,6 +540,73 @@ describe("Scheduler loop (fake timers)", () => {
         await loop;
     });
 
+    // The field report this whole change came from: a leaked lock blocked one
+    // target for 24 h and the daemon logged the identical warn line on every
+    // 30 s tick - hundreds of them, none with anything in it to act on. The
+    // reachability path next door has been edge-triggered for exactly this
+    // reason since it was written; the lock path never got the same treatment.
+    it("a lock held for many ticks logs ONCE, then escalates with the command that clears it", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { log, lines } = captureLogger("info");
+        const tracker = new BackoffTracker(log);
+        const scheduler = new Scheduler({
+            targets: [target],
+            log,
+            now: () => new Date(),
+            tickMs: 30_000,
+            backoff: tracker,
+            lastFulfilledAt: async () => null,
+            runTarget: async () => {
+                throw new LockHeldError("another backupkit holds it (created 2026-08-24T09:12:23Z)");
+            },
+            recordOutcome: async () => undefined,
+        });
+        const loop = scheduler.start();
+        for (let tick = 0; tick < 25; tick += 1) {
+            await vi.advanceTimersByTimeAsync(30_000);
+        }
+        scheduler.stop();
+        await loop;
+
+        const skips = lines.filter((line) => line.includes("another backupkit run has this target"));
+        expect(skips).toHaveLength(1);
+        const escalations = lines.filter((line) => line.includes("NOT backing up"));
+        expect(escalations).toHaveLength(1);
+        expect(escalations[0]).toContain("backupkit unlock web");
+    });
+
+    it("the lock clearing is reported, and a later episode logs again", async () => {
+        const target = makeTarget({ name: "web", schedule: HOURLY });
+        const { log, lines } = captureLogger("info");
+        const tracker = new BackoffTracker(log);
+        let held = true;
+        const scheduler = new Scheduler({
+            targets: [target],
+            log,
+            now: () => new Date(),
+            tickMs: 30_000,
+            backoff: tracker,
+            lastFulfilledAt: async () => null,
+            runTarget: async () => {
+                if (held) {
+                    throw new LockHeldError("another backupkit holds it");
+                }
+                return report("web", "success", null);
+            },
+            recordOutcome: async () => undefined,
+        });
+        const loop = scheduler.start();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(30_000);
+        held = false;
+        await vi.advanceTimersByTimeAsync(30_000);
+        scheduler.stop();
+        await loop;
+
+        expect(lines.filter((line) => line.includes("another backupkit run has this target"))).toHaveLength(1);
+        expect(lines.filter((line) => line.includes("destination lock cleared"))).toHaveLength(1);
+    });
+
     it("a lock-held throw stays a warn-and-skip: no failure report, no backoff", async () => {
         const target = makeTarget({ name: "web", schedule: HOURLY });
         const { scheduler, tracker, recorded } = makeLoop({
