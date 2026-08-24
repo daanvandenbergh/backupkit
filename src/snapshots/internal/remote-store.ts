@@ -21,7 +21,15 @@ import { NO_RETRY_POLICY, type RetryPolicy } from "../../shared/retry.js";
 import { formatSnapshotName, isDeletingName, isPartialName, parseSnapshotName } from "../../shared/snapshot-name.js";
 import type { SnapshotStore } from "../store.js";
 import { newestUndeletable } from "../types.js";
-import { forceUnlock, withLockScope, type LockBackend, type LockInspection, type UnlockOutcome } from "./lock.js";
+import {
+    forceUnlock,
+    processLocks,
+    withLockScope,
+    type LockBackend,
+    type LockInspection,
+    type LockJournal,
+    type UnlockOutcome,
+} from "./lock.js";
 
 /** Name of the lock directory inside a store root. */
 const LOCK_DIR_NAME = ".backupkit.lock";
@@ -37,14 +45,44 @@ const LOCK_TTL_MS = 24 * 60 * 60 * 1000;
  * `options.retryPolicy` overrides the transport retry for ONE call. Every
  * mutating command below passes {@link NO_RETRY_POLICY} through it - see that
  * constant for why re-sending a mutation is unsafe.
+ *
+ * `options.detach` runs the command WITHOUT the store's shutdown signal, and
+ * `options.timeoutMs` bounds it instead - see {@link DETACHED_RELEASE}.
  */
 export type RemoteRunner = (
     argv: readonly string[],
-    options?: { retryPolicy?: RetryPolicy },
+    options?: { retryPolicy?: RetryPolicy; detach?: boolean; timeoutMs?: number },
 ) => Promise<ExecResult>;
 
 /** Per-call runner options that disable the transport retry (non-idempotent commands). */
 const NO_RETRY = { retryPolicy: NO_RETRY_POLICY } as const;
+
+/**
+ * Per-call options for the lock RELEASE: run it detached from the store's
+ * shutdown signal, on a hard time budget of its own.
+ *
+ * The release is the one command whose entire job is to run DURING a shutdown.
+ * Handing it the shutdown signal made every graceful stop leak the lock: `exec`
+ * SIGTERMs a child spawned under an already-aborted signal, and
+ * `withTransientRetry` refuses to retry an aborted call, so the `rm -rf` got
+ * ZERO attempts and the target was then blocked until the 24 h TTL - on a
+ * `systemctl restart` during any push snapshot run.
+ *
+ * Detaching does not weaken invariant 22 (a stop must stay bounded): the budget
+ * below is what bounds it, and it is bounded HARDER than the signal path was.
+ * 2 attempts x 7 s + one 1 s backoff = ~15 s worst case, against the unit's
+ * `TimeoutStopSec` (45 s) and the ~10 s the SIGTERMed rsync needs to reach
+ * SIGKILL. The default control policy would have allowed 3 x 60 s = 186 s here,
+ * which is its own way to be SIGKILLed while holding the lock.
+ *
+ * Retrying is legitimate for THIS command and not for the acquire: `rm -rf` is
+ * idempotent, so a re-send cannot do what invariant 17 forbids.
+ */
+const DETACHED_RELEASE = {
+    detach: true,
+    timeoutMs: 7000,
+    retryPolicy: { attempts: 2, baseDelayMs: 1000, capMs: 1000 },
+} as const;
 
 /**
  * Argv that lists one directory level on the remote.
@@ -120,6 +158,16 @@ class RemoteLockBackend implements LockBackend {
     /** Whether the remote key is jailed, which decides the listing verb (see {@link listArgv}). */
     private readonly jailed: boolean;
 
+    /**
+     * The marker name this acquisition wrote - the token `LockJournal` matches
+     * a later sighting of this same lock against. Set by `tryAcquire()` when it
+     * WINS, which is also the instant the marker is supposed to record.
+     */
+    ownerToken?: string;
+
+    /** The marker set the last `inspect()` saw, for `removeIfUnchanged`. */
+    private inspected: string | null | undefined;
+
     /** Construct the backend for one remote store root. */
     constructor(root: string, runner: RemoteRunner, now: () => Date, jailed: boolean, sshDestination: string) {
         this.lockPath = posix.join(root, LOCK_DIR_NAME);
@@ -138,12 +186,20 @@ class RemoteLockBackend implements LockBackend {
      */
     async tryAcquire(): Promise<boolean> {
         const result = await this.runner(["mkdir", "--", this.lockPath], NO_RETRY);
+        if (result.exitCode === 0) {
+            // Stamped HERE, not in writeMeta: this is the instant the lock was
+            // acquired, and the marker claims to record acquisition. It also
+            // has to be known before the marker round-trip is sent, so that a
+            // marker that lands but whose reply is lost is still a marker this
+            // process can name.
+            this.ownerToken = formatSnapshotName(this.now());
+        }
         return result.exitCode === 0;
     }
 
     /** Record the acquisition time as a snapshot-named marker directory inside the lock. */
     async writeMeta(): Promise<void> {
-        const marker = posix.join(this.lockPath, formatSnapshotName(this.now()));
+        const marker = posix.join(this.lockPath, this.ownerToken ?? formatSnapshotName(this.now()));
         const result = await this.runner(["mkdir", "-p", "--", marker]);
         if (result.exitCode !== 0) {
             throw new SnapshotStoreError(remoteFailure("lock meta write", result.exitCode, result.stderr));
@@ -173,9 +229,20 @@ class RemoteLockBackend implements LockBackend {
      * pid/hostname are unknowable through this command surface and stay null.
      */
     async inspect(): Promise<LockInspection> {
-        const stale = (detail: string): LockInspection => ({ stale: true, pid: null, hostname: null, detail });
+        const stale = (detail: string, token: string | null): LockInspection => ({
+            stale: true,
+            pid: null,
+            hostname: null,
+            detail,
+            token,
+        });
         const result = await this.runner(listArgv(this.lockPath, this.jailed));
         if (result.exitCode !== 0) {
+            // `token` stays UNDEFINED here, and that is load-bearing: it is the
+            // difference between "the lock has no marker" (null) and "we could
+            // not read the lock at all" (undefined). Only the first is ever
+            // reclaimable. See LockInspection.token and invariant 35.
+            this.inspected = undefined;
             return { stale: false, pid: null, hostname: null, detail: "lock unreadable (assuming held)" };
         }
         for (const name of parseListing(result.stdout, this.jailed)) {
@@ -190,17 +257,61 @@ class RemoteLockBackend implements LockBackend {
             // an honest holder whose clock is wrong when it is SIGKILLed. A
             // marker the client's clock could not have written is stale.
             const ageMs = this.now().getTime() - created.getTime();
+            this.inspected = name;
             if (Math.abs(ageMs) > LOCK_TTL_MS) {
-                return stale(`created ${formatUtc(created)}, past the 24h TTL`);
+                return stale(`created ${formatUtc(created)}, past the 24h TTL`, name);
             }
-            return { stale: false, pid: null, hostname: null, detail: `created ${formatUtc(created)}` };
+            return { stale: false, pid: null, hostname: null, detail: `created ${formatUtc(created)}`, token: name };
         }
-        return { stale: false, pid: null, hostname: null, detail: "no creation marker yet (assuming freshly acquired)" };
+        this.inspected = null;
+        return {
+            stale: false,
+            pid: null,
+            hostname: null,
+            // Worded so an operator learns this one does not clear itself. It
+            // reads "freshly acquired, wait a moment" and it can equally be a
+            // lock that will sit there forever, which is the opposite advice.
+            detail: "no creation marker - either just acquired, or left behind mid-acquire and it will NOT expire",
+            token: null,
+        };
     }
 
-    /** Remove the lock directory. */
+    /**
+     * Compare-and-delete: remove the lock only if it still presents the marker
+     * the last `inspect()` judged. `inspect()` now reports that marker, so this
+     * costs one extra listing on the STEAL path only - and it retires the blind
+     * delete this backend was documented as still doing (see `acquire`), which
+     * let two contenders over one stale lock both end up inside.
+     *
+     * An unreadable listing abandons the steal: with the lock's state unknown,
+     * not deleting is the only safe answer (invariant 35).
+     */
+    async removeIfUnchanged(): Promise<boolean> {
+        const result = await this.runner(listArgv(this.lockPath, this.jailed));
+        if (result.exitCode !== 0) {
+            return false;
+        }
+        let marker: string | null = null;
+        for (const name of parseListing(result.stdout, this.jailed)) {
+            if (parseSnapshotName(name) !== null) {
+                marker = name;
+                break;
+            }
+        }
+        if (marker !== this.inspected) {
+            return false;
+        }
+        await this.remove();
+        return true;
+    }
+
+    /**
+     * Remove the lock directory, detached from the shutdown signal and on its
+     * own bounded budget - see {@link DETACHED_RELEASE} for why the release is
+     * the one command that must outlive the stop that triggered it.
+     */
     async remove(): Promise<void> {
-        const result = await this.runner(["rm", "-rf", "--", this.lockPath]);
+        const result = await this.runner(["rm", "-rf", "--", this.lockPath], DETACHED_RELEASE);
         if (result.exitCode !== 0) {
             throw new SnapshotStoreError(remoteFailure("lock release", result.exitCode, result.stderr));
         }
@@ -244,6 +355,9 @@ export class RemoteSnapshotStore implements SnapshotStore {
     /** ssh destination of the archive host, prefixed onto lock paths in messages (`""` = no prefix). */
     private readonly sshDestination: string;
 
+    /** What this process did to this root's lock - see {@link LockJournal}. */
+    private readonly journal: LockJournal;
+
     /** Whether `mkdir -p -- <root>` has succeeded this process (idempotent, so a lost race just re-runs it). */
     private rootEnsured = false;
 
@@ -255,6 +369,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
         now: () => Date = () => new Date(),
         jailed = true,
         sshDestination = "",
+        journal: LockJournal = processLocks,
     ) {
         this.root = root;
         this.runner = runner;
@@ -262,6 +377,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
         this.now = now;
         this.jailed = jailed;
         this.sshDestination = sshDestination;
+        this.journal = journal;
     }
 
     /**
@@ -501,6 +617,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
             new RemoteLockBackend(this.root, this.runner, this.now, this.jailed, this.sshDestination),
             this.log,
             fn,
+            this.journal,
         );
     }
 
@@ -510,6 +627,7 @@ export class RemoteSnapshotStore implements SnapshotStore {
         return forceUnlock(
             new RemoteLockBackend(this.root, this.runner, this.now, this.jailed, this.sshDestination),
             force,
+            this.journal,
         );
     }
 }

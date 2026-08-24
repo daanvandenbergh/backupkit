@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { exec } from "../../exec/exec.js";
 import { LockHeldError } from "../../shared/errors.js";
 import { Logger } from "../../shared/logger.js";
-import { pidStartTime, withLockScope, type LockBackend, type LockMeta } from "../internal/lock.js";
+import { LockJournal, pidStartTime, withLockScope, type LockBackend, type LockMeta } from "../internal/lock.js";
 import { LocalSnapshotStore } from "../internal/local-store.js";
 
 /** Silent logger for the suites. */
@@ -419,5 +419,339 @@ describe("pidStartTime", () => {
         expect(typeof first).toBe("string");
         expect(first).not.toBe("");
         expect(second).toBe(first);
+    });
+});
+
+/**
+ * A `LockBackend` over one in-memory lock that carries an acquisition
+ * TOKEN, modelling the remote backend: `tryAcquire` wins the lock and
+ * stamps `ownerToken`; `writeMeta` records that token in the lock;
+ * `inspect` reports it back as `LockInspection.token`. The three knobs are
+ * the three things the field bug and its neighbours turn on - a release
+ * that fails, a lock that cannot be read, and a lock caught mid-acquire.
+ */
+function makeTokenWorld(options: { unreadable?: boolean } = {}) {
+    const world = { lock: null as { token: string | null } | null, next: 1, removes: 0, failRemove: false };
+    const backend = (): LockBackend & { ownerToken?: string } => {
+        const self = {
+            lockPath: "/archive/web/.backupkit.lock",
+            ownerToken: undefined as string | undefined,
+            async tryAcquire() {
+                if (world.lock !== null) {
+                    return false;
+                }
+                // Markerless until writeMeta lands - the real two-round-trip
+                // acquire, whose gap is where a forever-lock comes from.
+                world.lock = { token: null };
+                self.ownerToken = `2026-08-10T03150${world.next}Z`;
+                world.next += 1;
+                return true;
+            },
+            async writeMeta() {
+                (world.lock as { token: string | null }).token = self.ownerToken ?? null;
+            },
+            async inspect() {
+                if (options.unreadable === true) {
+                    // `token` stays UNDEFINED: we could not read the lock.
+                    return { stale: false, pid: null, hostname: null, detail: "lock unreadable (assuming held)" };
+                }
+                return world.lock === null
+                    ? { stale: true, pid: null, hostname: null, detail: "lock disappeared", token: null }
+                    : { stale: false, pid: null, hostname: null, detail: "in TTL", token: world.lock.token };
+            },
+            async remove() {
+                world.removes += 1;
+                if (world.failRemove) {
+                    throw new Error("the hostname could not be resolved");
+                }
+                world.lock = null;
+            },
+        };
+        return self;
+    };
+    return { world, backend };
+}
+
+// The bug this whole mechanism exists for, from the field: a `backupkit start`
+// daemon lost DNS mid-run on a push target. The release of a REMOTE lock is
+// itself an ssh command, so it failed too - and because the run had already
+// failed, the release error was only logged. The lock stayed on the archive
+// host, and the SAME still-running daemon was then locked out of its own target
+// for 24 h, logging "skipped, another backupkit run has this target" every
+// 30 s tick until the TTL expired.
+//
+// The fix rests on one observation: `inspect()` already reads a value that
+// uniquely identifies ONE acquisition, and used to throw it away. Only the
+// process that WON the mkdir ever writes a token, so "the token I see is the
+// token I wrote and never confirmed releasing" proves the lock is mine.
+describe("lock journal: reclaiming a lock this process could not release", () => {
+    it("retakes a lock whose release failed, instead of waiting out the 24h TTL", async () => {
+        const { world, backend } = makeTokenWorld();
+        const journal = new LockJournal();
+        world.failRemove = true;
+        await expect(withLockScope(backend(), log, async () => "first", journal)).resolves.toBe("first");
+        // The lock is still on the "archive": the release could not run.
+        expect(world.lock).not.toBeNull();
+
+        world.failRemove = false;
+        let ran = false;
+        await expect(
+            withLockScope(
+                backend(),
+                log,
+                async () => {
+                    ran = true;
+                    return "second";
+                },
+                journal,
+            ),
+        ).resolves.toBe("second");
+        expect(ran).toBe(true);
+        expect(world.lock).toBeNull();
+    });
+
+    // A release failure after a SUCCESSFUL run used to be rethrown, turning a
+    // promoted snapshot with completed retention into a `failed` report that
+    // fed the backoff - a lie about the backup, to report the truth about a lock.
+    it("a failed release does not turn a successful run into a failure", async () => {
+        const { world, backend } = makeTokenWorld();
+        world.failRemove = true;
+        await expect(withLockScope(backend(), log, async () => "done", new LockJournal())).resolves.toBe("done");
+    });
+
+    it("refuses to reclaim while this process is still inside the scope", async () => {
+        const { world, backend } = makeTokenWorld();
+        const journal = new LockJournal();
+        let inner: unknown = null;
+        await withLockScope(
+            backend(),
+            log,
+            async () => {
+                inner = await withLockScope(backend(), log, async () => "nested", journal).catch((error: unknown) => error);
+            },
+            journal,
+        );
+        expect(inner).toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(1);
+    });
+
+    it("never reclaims a lock whose token is not the one we wrote", async () => {
+        const { world, backend } = makeTokenWorld();
+        const journal = new LockJournal();
+        world.failRemove = true;
+        await withLockScope(backend(), log, async () => "first", journal);
+        // Our release actually landed and the reply was lost; somebody else
+        // then acquired. Their token is not ours, so this is a skip.
+        (world.lock as { token: string | null }).token = "2026-08-10T099999Z";
+        const before = world.removes;
+        await expect(withLockScope(backend(), log, async () => "no", journal)).rejects.toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(before);
+    });
+
+    // Invariant 35: UNKNOWN is not STALE, and UNKNOWN is not SAFE. "We could
+    // not read the lock" (token undefined) is strictly LESS information than
+    // "the lock has no token" (token null), so it must never be the more
+    // conclusive of the two. A refactor collapsing the two falsy values into
+    // one check re-opens this silently, which is what this test stands guard on.
+    it("never reclaims a lock it could not READ, even with a matching journal entry", async () => {
+        const readable = makeTokenWorld();
+        const journal = new LockJournal();
+        readable.world.failRemove = true;
+        await withLockScope(readable.backend(), log, async () => "first", journal);
+
+        // Same journal, same lock path - but now the lock cannot be listed.
+        const blind = makeTokenWorld({ unreadable: true });
+        blind.world.lock = { token: null };
+        const before = blind.world.removes;
+        await expect(withLockScope(blind.backend(), log, async () => "no", journal)).rejects.toBeInstanceOf(LockHeldError);
+        expect(blind.world.removes).toBe(before);
+    });
+
+    // The acquire is irreducibly two round-trips (win the lock, then mark it),
+    // and a holder killed in between leaves a lock with NO token - which has no
+    // TTL and so never expires at all. Ours is reclaimable because we recorded
+    // winning the mkdir; anybody else's is not.
+    it("reclaims a MARKERLESS lock only when this process recorded winning it", async () => {
+        const mine = makeTokenWorld();
+        const journal = new LockJournal();
+        mine.world.failRemove = true;
+        // Fail the meta write, so the lock exists with no token at all.
+        const first = mine.backend();
+        first.writeMeta = async () => {
+            throw new Error("marker write failed");
+        };
+        await expect(withLockScope(first, log, async () => "never", journal)).rejects.toThrow("marker write failed");
+        expect(mine.world.lock).toEqual({ token: null });
+
+        mine.world.failRemove = false;
+        await expect(withLockScope(mine.backend(), log, async () => "mine", journal)).resolves.toBe("mine");
+
+        // The same markerless lock, with nothing in the journal, is left alone.
+        const theirs = makeTokenWorld();
+        theirs.world.lock = { token: null };
+        await expect(
+            withLockScope(theirs.backend(), log, async () => "no", new LockJournal()),
+        ).rejects.toBeInstanceOf(LockHeldError);
+        expect(theirs.world.removes).toBe(0);
+    });
+
+    it("forgets the lock once it is released cleanly", async () => {
+        const { world, backend } = makeTokenWorld();
+        const journal = new LockJournal();
+        await withLockScope(backend(), log, async () => "first", journal);
+        expect(world.lock).toBeNull();
+        // A later lock that happens to present our old token is somebody
+        // else's: we confirmed our release, so we own nothing here.
+        world.lock = { token: "2026-08-10T031501Z" };
+        await expect(withLockScope(backend(), log, async () => "no", journal)).rejects.toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(1);
+    });
+
+    // The journal is per PROCESS, and this is the executable statement of it:
+    // two backupkits on one machine may overlap freely, and neither may ever
+    // take over the other's lock.
+    it("one journal never reclaims a lock recorded in another", async () => {
+        const { world, backend } = makeTokenWorld();
+        world.failRemove = true;
+        await withLockScope(backend(), log, async () => "first", new LockJournal());
+        world.failRemove = false;
+        await expect(
+            withLockScope(backend(), log, async () => "no", new LockJournal()),
+        ).rejects.toBeInstanceOf(LockHeldError);
+    });
+
+    // The local store's lock records a real holder identity (pid, start time,
+    // hostname) and decides staleness from it. A backend with no `ownerToken`
+    // is journalled not at all, so that path is untouched.
+    it("leaves a backend that carries no acquisition token entirely alone", async () => {
+        const { world, backend } = makeTokenWorld();
+        const journal = new LockJournal();
+        const tokenless = () => {
+            const b = backend();
+            b.ownerToken = undefined;
+            const won = b.tryAcquire.bind(b);
+            b.tryAcquire = async () => {
+                const ok = await won();
+                b.ownerToken = undefined;
+                return ok;
+            };
+            return b;
+        };
+        world.failRemove = true;
+        await withLockScope(tokenless(), log, async () => "first", journal);
+        world.failRemove = false;
+        await expect(withLockScope(tokenless(), log, async () => "no", journal)).rejects.toBeInstanceOf(LockHeldError);
+    });
+});
+
+// Persistence covers the one case in-process memory cannot: a daemon SIGKILLed
+// while holding a lock (a `systemctl stop` that outran its timeout) and then
+// restarted. It comes back as a NEW process, so the proof has to be a record on
+// disk - and a record read by a DIFFERENT process proves nothing until its
+// holder has been shown to be gone. Every refusal below is one live holder's
+// lock left alone.
+describe("lock journal: persisted across a restart", () => {
+    let dir = "";
+    let world: ReturnType<typeof makeTokenWorld>["world"];
+    let backend: ReturnType<typeof makeTokenWorld>["backend"];
+
+    beforeEach(async () => {
+        dir = await mkdtemp(join(tmpdir(), "backupkit-journal-"));
+        ({ world, backend } = makeTokenWorld());
+    });
+
+    afterEach(async () => {
+        await rm(dir, { recursive: true, force: true });
+    });
+
+    /** Leave a lock behind with a persisted record, the way a killed run does. */
+    async function leakWith(mutate: (record: Record<string, unknown>) => void): Promise<void> {
+        const journal = new LockJournal(dir);
+        world.failRemove = true;
+        await withLockScope(backend(), log, async () => "leaked", journal);
+        world.failRemove = false;
+        // Reach the record through the directory rather than recomputing its
+        // name, so this never restates how the journal names its files.
+        const [name] = await readdir(dir);
+        const file = join(dir, name);
+        const record = JSON.parse(await readFile(file, "utf8")) as Record<string, unknown>;
+        mutate(record);
+        await writeFile(file, JSON.stringify(record));
+    }
+
+    /** Attempt the lock as a FRESH process would: a new journal over the same dir. */
+    async function reacquire(): Promise<unknown> {
+        return withLockScope(backend(), log, async () => "retaken", new LockJournal(dir)).catch(
+            (error: unknown) => error,
+        );
+    }
+
+    it("retakes a lock whose recorded holder is dead", async () => {
+        const child = await exec(process.execPath, ["-e", "console.log(process.pid)"], { timeoutMs: 10_000 });
+        const deadPid = Number(child.stdout.trim());
+        expect(Number.isInteger(deadPid)).toBe(true);
+        await leakWith((record) => {
+            record.pid = deadPid;
+            record.pidStartTime = "gone";
+        });
+        expect(await reacquire()).toBe("retaken");
+        expect(world.lock).toBeNull();
+    });
+
+    it("retakes a lock whose recorded pid was recycled onto another process", async () => {
+        await leakWith((record) => {
+            record.pidStartTime = "a start time this pid never had";
+        });
+        expect(await reacquire()).toBe("retaken");
+    });
+
+    // The holder is still running. This is the case the whole lock exists for.
+    it("never retakes a lock whose recorded pid is still alive", async () => {
+        await leakWith(() => undefined);
+        expect(await reacquire()).toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(1);
+    });
+
+    // A pid probe proves nothing about ANOTHER machine's process table. On a
+    // shared state dir (NFS/SMB, or two containers with separate pid
+    // namespaces) this host reads the other's live pid as dead-or-recycled, and
+    // stealing that lock runs two pipelines over one archive root. Time is the
+    // only honest signal about another machine, and the TTL path still carries it.
+    it("never retakes a lock recorded by another host, even when its pid looks dead here", async () => {
+        const child = await exec(process.execPath, ["-e", "console.log(process.pid)"], { timeoutMs: 10_000 });
+        await leakWith((record) => {
+            record.pid = Number(child.stdout.trim());
+            record.pidStartTime = "gone";
+            record.hostname = `${hostname()}-other`;
+        });
+        expect(await reacquire()).toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(1);
+    });
+
+    it("fails CLOSED on a record it cannot parse", async () => {
+        await leakWith((record) => {
+            record.pid = "not a number";
+        });
+        expect(await reacquire()).toBeInstanceOf(LockHeldError);
+    });
+
+    // Within one process life a markerless lock is provably ours, because we
+    // saw the mkdir win. Across a restart the "an operator cleared it in
+    // between" window is unbounded, so the proof is gone and so is the reclaim.
+    it("never retakes a MARKERLESS lock across a restart", async () => {
+        const child = await exec(process.execPath, ["-e", "console.log(process.pid)"], { timeoutMs: 10_000 });
+        await leakWith((record) => {
+            record.pid = Number(child.stdout.trim());
+            record.pidStartTime = "gone";
+        });
+        (world.lock as { token: string | null }).token = null;
+        expect(await reacquire()).toBeInstanceOf(LockHeldError);
+        expect(world.removes).toBe(1);
+    });
+
+    it("forgets the record on a clean release, so a later lock is never mistaken for ours", async () => {
+        const journal = new LockJournal(dir);
+        await withLockScope(backend(), log, async () => "clean", journal);
+        expect(await readdir(dir)).toEqual([]);
     });
 });

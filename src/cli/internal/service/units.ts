@@ -177,7 +177,13 @@ export function systemdUnit(options: SystemdUnitOptions): string {
         "Restart=on-failure",
         "RestartSec=15",
         "KillSignal=SIGTERM",
-        "TimeoutStopSec=30",
+        // A stop has to fit the SIGTERMed rsync reaching SIGKILL (~10 s, see
+        // exec/) PLUS the destination lock's detached release (~15 s worst
+        // case, see DETACHED_RELEASE in snapshots/internal/remote-store.ts).
+        // 30 s did not, and being SIGKILLed here is exactly how a lock gets
+        // left on the archive for the full 24 h TTL. Raising this is why an
+        // existing install must re-run `backupkit service install`.
+        "TimeoutStopSec=45",
         `RuntimeDirectory=${RUNTIME_DIR_NAME}`,
         "RuntimeDirectoryMode=0700",
         "NoNewPrivileges=true",
@@ -232,6 +238,12 @@ export interface LaunchdPlistOptions {
  * Build the launchd daemon plist (spec section 6): RunAtLoad for reboot
  * recovery, KeepAlive on unsuccessful exit only (crash restarts, clean exit
  * stays down), 15 s throttle, logs to /var/log/backupkit.
+ *
+ * `ExitTimeOut` is the launchd twin of the unit's `TimeoutStopSec`: its default
+ * is 20 s, which is LESS than a stop needs (the SIGTERMed rsync reaching
+ * SIGKILL, then the lock's detached release), so the default SIGKILLed the
+ * daemon while it still held the destination lock - leaving it on the archive
+ * for the full 24 h TTL.
  */
 export function launchdPlist(options: LaunchdPlistOptions): string {
     const args = [options.nodeBin, options.cliPath, "daemon", "--config", options.configPath]
@@ -256,6 +268,8 @@ ${args}
     </dict>
     <key>ThrottleInterval</key>
     <integer>15</integer>
+    <key>ExitTimeOut</key>
+    <integer>45</integer>
     <key>StandardOutPath</key>
     <string>${MACOS_LOG_DIR}/backupkit.log</string>
     <key>StandardErrorPath</key>

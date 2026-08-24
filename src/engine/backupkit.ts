@@ -28,7 +28,7 @@ import { reachRemote, remoteEndpoint, type ReachResult, type RemoteEndpoint } fr
 import { resolveAlias, runRemote, sshArgs, type SshContext } from "../ssh/ssh.js";
 import { dryRunStats, parseStats2, probeLocalRsync, probeRemoteRsync, runTransfer } from "../rsync/rsync.js";
 import { planRetention, type RetentionPlan } from "../retention/retention.js";
-import { openStore, type SnapshotStore } from "../snapshots/store.js";
+import { LockJournal, openStore, type SnapshotStore } from "../snapshots/store.js";
 import { splitFutureSnapshots, type SnapshotInfo } from "../snapshots/types.js";
 import { isDue } from "../shared/time.js";
 import {
@@ -286,6 +286,14 @@ export class Backupkit {
     /** The root logger (config level, optional file sink). */
     private readonly log: Logger;
 
+    /**
+     * Where this process records the destination locks it holds, so a lock its
+     * own run could not release is retaken on the next attempt rather than
+     * waiting out the 24 h TTL. Persisted under the state dir, so the
+     * recognition also survives a daemon SIGKILLed while holding one.
+     */
+    private readonly lockJournal: LockJournal;
+
     /** The real `logging.file` append sink, or null when file logging is off. */
     private fileSink: ((line: string) => void) | null = null;
 
@@ -348,6 +356,7 @@ export class Backupkit {
     /** Construct from an already-resolved config (library use). The second parameter is an internal test seam. */
     constructor(config: ResolvedConfig, deps: BackupkitDeps = {}) {
         this.config = config;
+        this.lockJournal = new LockJournal(join(config.stateDir, "locks"));
         this.deps = {
             now: deps.now ?? (() => new Date()),
             env: deps.env ?? process.env,
@@ -582,6 +591,7 @@ export class Backupkit {
             {
                 log,
                 now: this.deps.now,
+                lockJournal: this.lockJournal,
                 ssh:
                     target.dst.kind === "remote"
                         ? {

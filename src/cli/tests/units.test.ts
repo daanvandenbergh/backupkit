@@ -40,7 +40,7 @@ describe("systemd unit", () => {
         ["Type=simple"],
         ["User=root"],
         ["KillSignal=SIGTERM"],
-        ["TimeoutStopSec=30"],
+        ["TimeoutStopSec=45"],
         ["After=network-online.target"],
         ["Wants=network-online.target"],
         ["NoNewPrivileges=true"],
@@ -274,6 +274,12 @@ describe("launchd plist", () => {
         ["<false/>"],
         ["<key>ThrottleInterval</key>"],
         ["<integer>15</integer>"],
+        // launchd's ExitTimeOut defaults to 20 s, which is LESS than a stop
+        // needs (the SIGTERMed rsync reaching SIGKILL, then the destination
+        // lock's detached release) - so the default SIGKILLed the daemon while
+        // it still held the lock. Twin of the unit's TimeoutStopSec=45.
+        ["<key>ExitTimeOut</key>"],
+        ["<integer>45</integer>"],
         ["<string>/var/log/backupkit/backupkit.log</string>"],
         ["<string>/var/log/backupkit/backupkit.err.log</string>"],
     ])("contains %s", (fragment) => {

@@ -596,7 +596,11 @@ describe("runTarget pipeline", () => {
         expect(seenSignals.every((signal) => signal === controller.signal)).toBe(true);
     });
 
-    it("aborted signal: report status aborted, lock released", async () => {
+    it("a signal already aborted reports aborted WITHOUT touching the destination", async () => {
+        // A stop in flight must not start a run. It used to acquire the lock
+        // and immediately fail out of it - two ssh round-trips of pure risk,
+        // and one more chance to leave the lock on the archive, for a pipeline
+        // that was never going to transfer a byte.
         const store = new FakeStore();
         const controller = new AbortController();
         controller.abort();
@@ -606,7 +610,25 @@ describe("runTarget pipeline", () => {
         const report = await runTarget(makeTarget(), deps, { signal: controller.signal });
         expect(report.status).toBe("aborted");
         expect(report.reason).toBe("aborted");
-        expect(report.attempts).toHaveLength(1);
+        expect(report.attempts).toHaveLength(0);
+        expect(store.calls).not.toContain("lock");
+        expect(store.locked).toBe(false);
+    });
+
+    it("an abort DURING the run still reports aborted and still releases the lock", async () => {
+        const store = new FakeStore();
+        const controller = new AbortController();
+        const deps = makeDeps(store, {
+            transfer: async () => {
+                controller.abort();
+                throw new TransferError("transfer aborted", { exitCode: null, retriable: false, stderrTail: "" });
+            },
+        });
+        const report = await runTarget(makeTarget(), deps, { signal: controller.signal });
+        expect(report.status).toBe("aborted");
+        expect(report.reason).toBe("aborted");
+        expect(store.calls).toContain("lock");
+        expect(store.calls).toContain("unlock");
         expect(store.locked).toBe(false);
     });
 

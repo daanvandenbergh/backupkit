@@ -490,6 +490,13 @@ export async function runTarget(
     });
 
     try {
+        // A stop already in flight must not START a run. Without this the tick
+        // acquires the destination lock and then immediately fails out of it -
+        // two ssh round-trips of pure risk, and one more chance to leave the
+        // lock behind, for a pipeline that was never going to transfer a byte.
+        if (options.signal?.aborted === true) {
+            return report("aborted", "aborted", "shutdown requested before the run started");
+        }
         const pipeline = async (): Promise<TargetRunReport> => {
             // Prepare (spec step 2): sweep .deleting artifacts and claim any surviving
             // partial under this run's name. Also guarantees the store root exists

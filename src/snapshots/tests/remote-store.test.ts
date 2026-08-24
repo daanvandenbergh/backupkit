@@ -43,13 +43,16 @@ function fakeRunner(handler: (argv: readonly string[], call: number) => Partial<
     const calls: string[][] = [];
     /** The per-call retry override each invocation carried (undefined = the runner's default policy). */
     const policies: (RetryPolicy | undefined)[] = [];
+    /** Whether each invocation asked to run detached from the store's shutdown signal. */
+    const detached: boolean[] = [];
     const runner: RemoteRunner = async (argv, options) => {
         const over = handler(argv, calls.length);
         calls.push([...argv]);
         policies.push(options?.retryPolicy);
+        detached.push(options?.detach === true);
         return result(over);
     };
-    return { runner, calls, policies };
+    return { runner, calls, policies, detached };
 }
 
 /** Handler answering `find` on the store root with the given entry names, everything else success. */
@@ -532,15 +535,50 @@ describe("RemoteSnapshotStore", () => {
             });
             const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
             await expect(store.withLock(async () => "took over")).resolves.toBe("took over");
+            // The SECOND `find` is the compare-and-delete: the steal re-reads
+            // the lock and removes it only if it still presents the marker the
+            // first `find` judged. Without it this was a blind delete, and the
+            // round-trip in between was long enough for two contenders over one
+            // stale lock to both end up inside.
             expect(calls.map((argv) => argv.slice(0, 2))).toEqual([
                 ["mkdir", "-p"],
                 ["mkdir", "--"],
+                ["find", LOCK],
                 ["find", LOCK],
                 ["rm", "-rf"],
                 ["mkdir", "--"],
                 ["mkdir", "-p"],
                 ["rm", "-rf"],
             ]);
+        });
+
+        it("the steal is abandoned when the lock changed between inspect and delete", async () => {
+            // The race the compare-and-delete exists for: contender A settles
+            // the stale lock while we still hold our one-round-trip-old
+            // observation of it. What sits there now is A's LIVE lock, so
+            // losing the steal must be a skip - never a delete.
+            const twentyFiveHoursAgo = "2026-08-09T021502Z";
+            let finds = 0;
+            const { runner, calls } = fakeRunner((argv) => {
+                if (argv[0] === "mkdir" && argv[1] === "--") {
+                    return { exitCode: 1 };
+                }
+                if (argv[0] === "find" && argv[1] === LOCK) {
+                    finds += 1;
+                    // Second look: somebody else's fresh lock is there now.
+                    return { stdout: findOutput(LOCK, [finds === 1 ? twentyFiveHoursAgo : "2026-08-10T031000Z"]) };
+                }
+                return {};
+            });
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            let ran = false;
+            await expect(
+                store.withLock(async () => {
+                    ran = true;
+                }),
+            ).rejects.toThrow(/took over the stale lock/);
+            expect(ran).toBe(false);
+            expect(calls.filter((argv) => argv[0] === "rm")).toEqual([]);
         });
 
         // Regression: the TTL was `now - created > TTL`, so a marker dated in the
@@ -639,14 +677,38 @@ describe("RemoteSnapshotStore", () => {
             // read-only: they keep the control retry. mkdir -- and mv -- do not.
             const MUTATING = ["mkdir --", "mv --"];
             const commands = calls.map((argv) => argv.slice(0, 2).join(" "));
+            const isRelease = (index: number) => calls[index].join(" ") === `rm -rf -- ${LOCK}`;
             const unretried = commands.filter((_, index) => policies[index] === NO_RETRY_POLICY);
             const retried = commands.filter((_, index) => policies[index] === undefined);
 
-            expect(policies.filter((policy) => policy !== undefined && policy !== NO_RETRY_POLICY)).toEqual([]);
+            // Exactly ONE command carries a policy that is neither the control
+            // default nor NO_RETRY: the lock release, which runs on its own
+            // short budget because it must survive the shutdown it runs during.
+            // Retrying it is legitimate where retrying the acquire is not -
+            // `rm -rf` is idempotent, so a re-send cannot do what invariant 17
+            // forbids. Pinned by argv, so this can never quietly widen.
+            const special = policies.map((policy, index) => [index, policy] as const)
+                .filter(([, policy]) => policy !== undefined && policy !== NO_RETRY_POLICY);
+            expect(special.map(([index]) => calls[index])).toEqual([["rm", "-rf", "--", LOCK]]);
+            expect(special.map(([, policy]) => policy?.attempts)).toEqual([2]);
+
             expect(unretried).toEqual(commands.filter((command) => MUTATING.includes(command)));
-            expect(retried).toEqual(commands.filter((command) => !MUTATING.includes(command)));
+            expect(retried).toEqual(
+                commands.filter((command, index) => !MUTATING.includes(command) && !isRelease(index)),
+            );
             // Vacuity guard: the run really exercised all three mutations.
             expect(unretried).toEqual(["mkdir --", "mv --", "mv --"]);
+        });
+
+        // The release is the one command whose entire job is to run DURING a
+        // shutdown. Handing it the store's abort signal meant `exec` SIGTERMed
+        // it on sight and the retry refused to re-send it, so every graceful
+        // stop mid-run left the lock on the archive for the full 24 h TTL.
+        it("runs the lock release detached from the shutdown signal, and nothing else", async () => {
+            const { runner, calls, detached } = fakeRunner();
+            const store = new RemoteSnapshotStore(ROOT, runner, log, () => NOW);
+            await store.withLock(async () => undefined);
+            expect(calls.filter((_, index) => detached[index])).toEqual([["rm", "-rf", "--", LOCK]]);
         });
 
         it("releases the lock when fn throws, and rethrows fn's error", async () => {

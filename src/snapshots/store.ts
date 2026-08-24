@@ -12,7 +12,15 @@ import type { Logger } from "../shared/logger.js";
 import type { RetryPolicy } from "../shared/retry.js";
 import type { Endpoint } from "../shared/types.js";
 import { runRemote, sshDestination, type SshContext } from "../ssh/ssh.js";
-import type { UnlockOutcome } from "./internal/lock.js";
+import type { LockJournal, UnlockOutcome } from "./internal/lock.js";
+
+/**
+ * Re-exported on the module's public surface because the ENGINE owns where a
+ * persisted journal lives (it is the only layer that knows about `stateDir`),
+ * while the lock that consumes it is this module's. Nothing outside
+ * `snapshots/` reaches into `internal/` to get it.
+ */
+export { LockJournal } from "./internal/lock.js";
 import { LocalSnapshotStore } from "./internal/local-store.js";
 import { RemoteSnapshotStore } from "./internal/remote-store.js";
 
@@ -120,6 +128,14 @@ export interface SnapshotStoreDeps {
     now?: () => Date;
     /** ssh settings; required when the target's destination endpoint is remote. */
     ssh?: StoreSshOptions;
+    /**
+     * Where this process records the locks it holds, so it can recognise one
+     * its own run leaked and retake it instead of waiting out the 24 h TTL.
+     * Defaults to the process-global memory-only journal; the engine passes a
+     * persisted one rooted at `<stateDir>/locks` so the recognition also
+     * survives a daemon that was SIGKILLed while holding a lock.
+     */
+    lockJournal?: LockJournal;
 }
 
 /**
@@ -145,6 +161,13 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
         // A per-call retryPolicy (the store's NO_RETRY on every mutating
         // command) always wins over the test-only store-wide override: it is a
         // correctness requirement, not a knob.
+        //
+        // `detach` is the same kind of correctness requirement, in the other
+        // direction: the shutdown signal reaches every command here EXCEPT the
+        // one whose job is to run during the shutdown. Handing it to the lock
+        // release meant `exec` SIGTERMed it on sight and the retry refused to
+        // re-send it, so every graceful stop mid-run leaked the destination
+        // lock. A detached call is bounded by its own `timeoutMs` instead.
         (argv, callOptions) =>
             runRemote(remote, argv, {
                 sshBin: ssh.sshBin,
@@ -152,7 +175,8 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
                 authSock: ssh.authSock,
                 env: ssh.env,
                 retryPolicy: callOptions?.retryPolicy ?? ssh.retryPolicy,
-                signal: ssh.signal,
+                timeoutMs: callOptions?.timeoutMs,
+                signal: callOptions?.detach === true ? undefined : ssh.signal,
                 log: deps.log,
             }),
         deps.log,
@@ -160,5 +184,6 @@ export function openStore(target: StoreTarget, deps: SnapshotStoreDeps): Snapsho
         target.jail,
         // Every lock message then names the machine the lock is actually on.
         sshDestination(remote),
+        deps.lockJournal,
     );
 }
