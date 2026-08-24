@@ -95,7 +95,7 @@ The one guard that stays is the one a mirror cannot recover from without: before
 | `backupkit remote [REMOTE]` | Dump one remote's settings as backupkit resolved them, and the targets using it; no name lists every remote (`--json`). |
 | `backupkit restore TARGET SNAP` | Copy a snapshot (`SNAP` may be `latest`) to a fresh `--output` path; never overwrites, never deletes. `--dry-run` previews it. |
 | `backupkit prune [TARGET...]` | Apply retention now (`--dry-run` prints the keep/prune plan; `--force` overrides the planted-snapshot guard). |
-| `backupkit unlock [TARGET...]` | Clear a destination lock a killed run left behind. A live lock is reported, not removed, unless `--force`. |
+| `backupkit unlock [TARGET...]` | Clear a destination lock backupkit cannot retake itself - one left by another machine. A live lock is reported, not removed, unless `--force`. |
 | `backupkit service <verb>` | `install`/`uninstall`/`start`/`stop`/`restart`/`status` the systemd unit or launchd job. |
 | `backupkit logs [-f] [-n N]` | Tail the daemon logs (journald on Linux, log files on macOS). |
 | `backupkit start` | Foreground scheduler loop **in your own session**: starts an ssh-agent, adds every key (prompting for each passphrase), then schedules until Ctrl-C. `--force` runs every target once first. The supported home for passphrase-protected keys. |
