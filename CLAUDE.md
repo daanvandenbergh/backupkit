@@ -57,7 +57,8 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
   - **Commit only at a GREEN CHECKPOINT** - typecheck + tests have passed on the unit you are
     committing. A commit is a recovery point; a broken one is a trap wearing one.
   - **The message names the area and what shipped**, ending with the Co-Authored-By trailer.
-  - **NEVER push** - the user pushes.
+  - **NEVER push UNASKED** - the user pushes. When the user does ask, push is permitted
+    (`.claude/settings.json` allows it); the standing rule is only that it is never your own idea.
   - **NEVER stash** - using git.
 
 ## Canary

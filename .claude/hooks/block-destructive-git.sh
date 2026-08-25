@@ -26,6 +26,13 @@
 # WHAT IS DELIBERATELY ALLOWED, because it is the recovery path and blocking it would make a bad day
 # unrecoverable: `git stash list`, `git stash show`, `git stash pop`, `git stash apply`.
 #
+# WHAT THIS HOOK HAS NOTHING TO DO WITH: `git push` and `npm publish`. Neither has ever been in the
+# blocked list above - this hook guards the LOCAL working tree, and those two touch a remote instead.
+# They are governed by `permissions` in .claude/settings.json. Recorded here because the hook's name
+# reads like it covers them, and that guess cost a debugging round once: a denied `git push` was
+# blamed on this file when the deny rule was in settings.json all along. If push or publish is
+# refused, read settings.json, not this script.
+#
 # It scans the WHOLE command string, so `cd apps/devsuite && git stash` is caught too - that compound
 # form is exactly what slipped past a prefix-matching permission rule.
 #
