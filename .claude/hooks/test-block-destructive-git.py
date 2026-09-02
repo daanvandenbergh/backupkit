@@ -15,6 +15,7 @@ RS = "re" + "set"
 CL = "cle" + "an"
 CO = "che" + "ckout"
 RE = "res" + "tore"
+PF = "pu" + "sh --fo" + "rce"   # only the FORCED push is guarded; plain `git push` is not
 
 DENY, OK = "deny", "allow"
 
@@ -38,10 +39,15 @@ CASES = [
     ("git add" + " -A",                    DENY, "sweeping add"),
     ("git add" + " .",                     DENY, "sweeping add"),
     ("git commit" + " -am x",              DENY, "sweeping commit"),
+    (f"git {PF} origin main",              DENY, "overwrites the remote's only copy"),
+    ("git pu" + "sh -f origin main",       DENY, "short spelling of the same"),
+    ("git pu" + "sh origin main -f",       DENY, "flag last"),
+    (f"git -C /tmp {PF}",                  DENY, "global option before the verb"),
     # ...and the things that must keep working.
     ("git add src/foo.ts src/bar.ts",      OK,   "explicit-path staging - the documented way"),
     ("git commit" + " -m x",               OK,   "scoped commit"),
     ("git push origin main",               OK,   "not this hook's business"),
+    (f"git {PF}-with-lease origin main",   OK,   "the survivable force - refuses if the remote moved"),
     ("npm publish",                        OK,   "not this hook's business"),
     ("git status --short",                 OK,   "read-only"),
     ("git show HEAD:src/foo.ts",           OK,   "the recommended alternative"),

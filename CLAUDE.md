@@ -59,6 +59,9 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
   - **The message names the area and what shipped**, ending with the Co-Authored-By trailer.
   - **NEVER push UNASKED** - the user pushes. When the user does ask, push is permitted
     (`.claude/settings.json` allows it); the standing rule is only that it is never your own idea.
+  - **NEVER `--force`/`-f` a push** - the hook refuses it. It overwrites the remote branch with
+    yours, and for anything already pushed the remote is the only copy. `--force-with-lease` is
+    allowed: it rejects instead of destroying when the remote moved since your last fetch.
   - **NEVER stash** - using git.
 
 ## Canary

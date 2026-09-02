@@ -22,16 +22,23 @@
 #                             that follows publishes files their owners never finished. Scoped
 #                             commits are ALLOWED (CLAUDE.md's Git section) - stage explicit paths.
 #   git commit -a/-am/--all   the same sweep, hidden inside the commit itself
+#   git push -f/--force       the one entry here that does NOT guard the local tree. It overwrites the
+#                             remote branch with yours, deleting whatever commits it had that you do
+#                             not - and for anything already pushed, the remote is the only copy.
+#                             `--force-with-lease` stays ALLOWED: the same operation, but it refuses
+#                             when the remote moved since your last fetch, which turns a silent
+#                             destruction into a rejection you can go and read.
 #
 # WHAT IS DELIBERATELY ALLOWED, because it is the recovery path and blocking it would make a bad day
 # unrecoverable: `git stash list`, `git stash show`, `git stash pop`, `git stash apply`.
 #
-# WHAT THIS HOOK HAS NOTHING TO DO WITH: `git push` and `npm publish`. Neither has ever been in the
-# blocked list above - this hook guards the LOCAL working tree, and those two touch a remote instead.
-# They are governed by `permissions` in .claude/settings.json. Recorded here because the hook's name
-# reads like it covers them, and that guess cost a debugging round once: a denied `git push` was
-# blamed on this file when the deny rule was in settings.json all along. If push or publish is
-# refused, read settings.json, not this script.
+# WHAT THIS HOOK HAS NOTHING TO DO WITH: ordinary `git push` and `npm publish`. Neither has ever been
+# in the blocked list above - this hook guards the LOCAL working tree, and those two touch a remote
+# instead. They are governed by `permissions` in .claude/settings.json. Recorded here because the
+# hook's name reads like it covers them, and that guess cost a debugging round once: a denied
+# `git push` was blamed on this file when the deny rule was in settings.json all along. If an ordinary
+# push or a publish is refused, read settings.json, not this script - only the `--force` push above
+# comes from here.
 #
 # It scans the WHOLE command string. That is NOT because permission rules miss compound commands -
 # Claude Code splits on `&&`, `||`, `;`, `|`, `&` and newlines and matches each subcommand, so a
@@ -103,6 +110,8 @@ if [ -z "$refusal" ]; then
     elif printf '%s' "$scrubbed" | grep -qE "${G}commit[[:space:]]+([^;&|]*[[:space:]])?-a(m)?([[:space:]]|\$)" \
         || printf '%s' "$scrubbed" | grep -qE "${G}commit[[:space:]]+([^;&|]*[[:space:]])?--all([[:space:]]|\$)"; then
         refusal="git commit -a/-am/--all sweeps every tracked modification in this shared tree into your commit - including other sessions' half-done work. Stage your explicit paths with git add <file>, then git commit -m (see CLAUDE.md's Git section)."
+    elif printf '%s' "$scrubbed" | grep -qE "${G}push[[:space:]]+([^;&|]*[[:space:]])?(-f|--force)([[:space:]]|\$)"; then
+        refusal="git push --force overwrites the remote branch with yours, deleting whatever commits it had that you do not - and for anything already pushed, the remote is the only copy. Use --force-with-lease, which is allowed here: it refuses when the remote moved since your last fetch, so you get a rejection to read instead of a silent loss."
     fi
 fi
 
