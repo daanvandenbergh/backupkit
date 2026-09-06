@@ -46,10 +46,38 @@ A path from `--config` or `$BACKUPKIT_CONFIG` is resolved against the current di
 
 That order is the same for *every* identity, though, so a `/etc/backupkit/config.jsonc` shadows every user's personal file. On a machine that has both, unprivileged commands need `--config ~/.backupkit/config.jsonc` (or `BACKUPKIT_CONFIG` in the shell profile) to reach their own.
 
+### Including other files
+
+A config can pull in others with a top-level `include` - one path, or an array of them:
+
+```jsonc
+{
+    "include": ["/etc/backupkit/base.jsonc", "hosts/db1.jsonc"],
+    "targets": {
+        "www": { "source": "/var/www-new" },
+    },
+}
+```
+
+**Later wins, and the file doing the including wins last.** The listed files are merged in the order you write them, then the including file's own keys go on top - so the file you are editing always overrides what it pulls in. (That is the opposite of `ssh_config`, where the first value seen wins.)
+
+**Objects merge, arrays and scalars replace.** `remotes`, `targets`, and a single target's `schedule`, `retry`, `rsync` and `retention` merge key by key, so an override file can change one field of one target and leave the rest alone - the `www` target above keeps its `mode`, `remote` and `destination` from the base. An array (`exclude`, `extraArgs`) or a plain value replaces the inherited one outright; a merge that appended would make an inherited exclude impossible to remove.
+
+The rules around it:
+
+- A relative path resolves against the **directory of the file that wrote it**, not the current directory; a leading `~` expands against the running user's home, and `~user` is refused as everywhere else.
+- **An included file must exist.** A missing one is an error, never a silent skip - a half-applied config is how a machine ends up quietly backing up the wrong tree.
+- An included file may include further files, up to **8 levels**. A cycle is an error naming the whole chain.
+- `include` is a **top-level** key only. Anywhere else it is an unknown key, and therefore an error.
+- Merging happens before validation, so every rule on this page - unknown keys, required fields, the cross-field matrix - applies to the merged whole. An error still names the file the offending line is actually in.
+- Targets run in document order, and merging preserves it: included targets first, in their own order, then any the including file adds.
+
+
 ## Top-level fields
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
+| `include` | string or array | none | Other config files to merge in first - see [Including other files](#including-other-files) |
 | `remotes` | object | required | Machines this host talks to, keyed by short name |
 | `targets` | object | required | What to back up, keyed by target name (they run in the order you write them) |
 | `name` | string | `"backupkit"` | Instance label the schema accepts; nothing surfaces it yet |

@@ -1,16 +1,16 @@
 /**
  * Config loading: `resolveConfigPath` (the 4-step resolution order, identical
- * for every command) and the synchronous `loadConfig` (read -> parseJsonc ->
+ * for every command) and the synchronous `loadConfig` (read + include-merge ->
  * validate -> resolve defaults). The only filesystem the config module ever
- * touches is the config file itself (plus existence probes of the two
- * candidate filenames).
+ * touches is the config file itself, the files its `include` names, and
+ * existence probes of the two candidate filenames.
  */
 
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-import { ConfigError, describeError } from "../shared/errors.js";
-import { parseJsonc } from "./internal/jsonc.js";
+import { ConfigError } from "../shared/errors.js";
+import { loadDocument } from "./internal/include.js";
 import { expandHome } from "./internal/home.js";
 import { validateConfig } from "./internal/validate.js";
 import { resolveConfig } from "./internal/defaults.js";
@@ -143,20 +143,14 @@ export function resolveConfigPath(cliArg?: string, options?: ResolvePathOptions)
 
 /**
  * Load, parse, validate, and resolve the config - synchronous, no I/O beyond
- * the config file. Any extension is parsed as JSONC (valid JSON is a strict
- * subset). Throws ConfigError on every failure mode.
+ * the config file and any file its `include` chain names. Any extension is
+ * parsed as JSONC (valid JSON is a strict subset). Throws ConfigError on every
+ * failure mode.
  */
 export function loadConfig(cliArg?: string, options?: LoadConfigOptions): ResolvedConfig {
     const path = resolveConfigPath(cliArg, options);
-    let text: string;
-    try {
-        text = readFileSync(path, "utf8");
-    } catch (error) {
-        throw new ConfigError(`cannot read config file ${path}: ${describeError(error)}`, { file: path });
-    }
-    const root = parseJsonc(text, path);
     const home = options?.homeDir ?? options?.env?.HOME ?? homedir();
-    const validated = validateConfig(root, path, home);
+    const validated = validateConfig(loadDocument(path, home), home);
     return resolveConfig(validated, path, {
         euid: options?.euid !== undefined ? options.euid : (process.getuid?.() ?? null),
         env: options?.env ?? process.env,

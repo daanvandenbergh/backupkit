@@ -147,19 +147,18 @@ class Validator {
     readonly warnings: string[] = [];
 
     /**
-     * Bind the validator to the reporting filename and the home directory that
-     * `~` expands against (see `expandHome`; the caller passes the running
-     * user's home, so a root service expands against root's).
+     * Bind the validator to the home directory that `~` expands against (see
+     * `expandHome`; the caller passes the running user's home, so a root
+     * service expands against root's). The reporting filename is NOT bound
+     * here - it comes from each node, since `include` lets one tree span
+     * several files.
      */
-    constructor(
-        private readonly file: string,
-        private readonly home: string,
-    ) {}
+    constructor(private readonly home: string) {}
 
     /** Throw the fail-first ConfigError: `<file>:<line>: <dotted.path>: <problem>`. */
     private fail(node: JsoncNode, path: string, problem: string): never {
-        throw new ConfigError(`${this.file}:${node.line}: ${path}: ${problem}`, {
-            file: this.file,
+        throw new ConfigError(`${node.file}:${node.line}: ${path}: ${problem}`, {
+            file: node.file,
             line: node.line,
             path,
         });
@@ -927,9 +926,11 @@ class Validator {
 
 /**
  * Validate a parsed JSONC document as a backupkit config. Fails on the first
- * violation with a `<file>:<line>: <dotted.path>: <problem>` ConfigError;
+ * violation with a `<file>:<line>: <dotted.path>: <problem>` ConfigError - the
+ * file being the one the offending NODE was parsed from, which after an
+ * `include` is not necessarily the config the command named;
  * collects non-fatal findings as warnings on the returned object.
  */
-export function validateConfig(root: JsoncNode, file: string, home: string): ValidatedConfig {
-    return new Validator(file, home).validate(root);
+export function validateConfig(root: JsoncNode, home: string): ValidatedConfig {
+    return new Validator(home).validate(root);
 }

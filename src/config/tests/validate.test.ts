@@ -12,7 +12,7 @@ const TARGET = { mode: "snapshot", direction: "pull", remote: "r1", source: "/va
 
 /** Serialize a plain object as JSON (a strict subset of JSONC) and validate it. */
 function validate(config: unknown): ValidatedConfig {
-    return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "test.jsonc", "/home/dan");
+    return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "/home/dan");
 }
 
 /** Build a config from the minimal base with deep-ish overrides applied per section. */
@@ -58,14 +58,14 @@ describe("minimal valid config", () => {
             "remotes": { "r1": ${JSON.stringify(REMOTE)} },
             "targets": { "2024": ${target("/srv/a")}, "zeta": ${target("/srv/b")}, "10": ${target("/srv/c")} }
         }`;
-        const result = validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc", "/home/dan");
+        const result = validateConfig(parseJsonc(text, "test.jsonc"), "/home/dan");
         expect(result.targets.map((entry) => entry.name)).toEqual(["2024", "zeta", "10"]);
     });
 });
 
 describe("root level", () => {
     it("rejects a non-object root", () => {
-        expect(() => validateConfig(parseJsonc("[1]", "test.jsonc"), "test.jsonc", "/home/dan")).toThrow("expected an object");
+        expect(() => validateConfig(parseJsonc("[1]", "test.jsonc"), "/home/dan")).toThrow("expected an object");
     });
 
     it("rejects an unknown root key", () => {
@@ -1082,7 +1082,7 @@ describe("error message shape", () => {
             "}",
         ].join("\n");
         try {
-            validateConfig(parseJsonc(text, "test.jsonc"), "test.jsonc", "/home/dan");
+            validateConfig(parseJsonc(text, "test.jsonc"), "/home/dan");
             expect.unreachable("must throw");
         } catch (error) {
             const configError = error as ConfigError;
@@ -1099,7 +1099,7 @@ describe("error message shape", () => {
 describe("~ expansion", () => {
     /** Validate with an explicit home, so the expansion is not the test host's. */
     function withHome(config: unknown, home: string): ValidatedConfig {
-        return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), "test.jsonc", home);
+        return validateConfig(parseJsonc(JSON.stringify(config, null, 2), "test.jsonc"), home);
     }
 
     it("expands a leading ~ in every local path field", () => {

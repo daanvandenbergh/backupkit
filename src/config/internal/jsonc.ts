@@ -4,7 +4,9 @@
  * `//` line comments, `/* *\/` block comments (non-nesting), and one optional
  * trailing comma before `}`/`]`. Two strictness upgrades over JSON.parse:
  * duplicate keys are fatal (naming both lines) and nesting depth caps at 64.
- * Objects are insertion-ordered Maps; every node carries its 1-based line.
+ * Objects are insertion-ordered Maps; every node carries its 1-based line AND
+ * the file it came from, so a tree assembled from several files by
+ * `include.ts` still reports each error against the file that wrote it.
  * Pure - no fs. Parse errors are ConfigErrors shaped
  * `<file>:<line>:<col>: <problem>`.
  */
@@ -17,6 +19,8 @@ export interface JsoncObjectNode {
     kind: "object";
     /** 1-based line of the opening brace. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
     /** Entries in document order (Map preserves insertion order for any key). */
     entries: Map<string, JsoncNode>;
 }
@@ -27,6 +31,8 @@ export interface JsoncArrayNode {
     kind: "array";
     /** 1-based line of the opening bracket. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
     /** Element nodes in document order. */
     items: JsoncNode[];
 }
@@ -37,6 +43,8 @@ export interface JsoncStringNode {
     kind: "string";
     /** 1-based line of the opening quote. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
     /** Decoded string value. */
     value: string;
 }
@@ -47,6 +55,8 @@ export interface JsoncNumberNode {
     kind: "number";
     /** 1-based line of the literal. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
     /** Numeric value. */
     value: number;
 }
@@ -57,6 +67,8 @@ export interface JsoncBooleanNode {
     kind: "boolean";
     /** 1-based line of the literal. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
     /** Boolean value. */
     value: boolean;
 }
@@ -67,6 +79,8 @@ export interface JsoncNullNode {
     kind: "null";
     /** 1-based line of the literal. */
     line: number;
+    /** Absolute path of the file this node was parsed from (an include makes one tree span several). */
+    file: string;
 }
 
 /** Any parsed JSONC node. */
@@ -216,7 +230,7 @@ class Parser {
         if (depth > MAX_DEPTH) {
             this.fail(`nesting depth exceeds ${MAX_DEPTH}`);
         }
-        const node: JsoncObjectNode = { kind: "object", line: this.line, entries: new Map() };
+        const node: JsoncObjectNode = { kind: "object", line: this.line, file: this.file, entries: new Map() };
         const keyLines = new Map<string, number>();
         this.next();
         this.skipTrivia();
@@ -278,7 +292,7 @@ class Parser {
         if (depth > MAX_DEPTH) {
             this.fail(`nesting depth exceeds ${MAX_DEPTH}`);
         }
-        const node: JsoncArrayNode = { kind: "array", line: this.line, items: [] };
+        const node: JsoncArrayNode = { kind: "array", line: this.line, file: this.file, items: [] };
         this.next();
         this.skipTrivia();
         if (this.peek() === "]") {
@@ -322,7 +336,7 @@ class Parser {
             }
             if (ch === '"') {
                 this.next();
-                return { kind: "string", line: openLine, value };
+                return { kind: "string", line: openLine, file: this.file, value };
             }
             if (ch === "\n") {
                 this.fail("multiline strings are not allowed - strings may not contain raw newlines");
@@ -434,7 +448,7 @@ class Parser {
                 literal += this.next();
             }
         }
-        return { kind: "number", line: startLine, value: Number(literal) };
+        return { kind: "number", line: startLine, file: this.file, value: Number(literal) };
     }
 
     /** Parse true/false/null; reject NaN/Infinity and any other bare word. */
@@ -446,10 +460,10 @@ class Parser {
             word += this.next();
         }
         if (word === "true" || word === "false") {
-            return { kind: "boolean", line: startLine, value: word === "true" };
+            return { kind: "boolean", line: startLine, file: this.file, value: word === "true" };
         }
         if (word === "null") {
-            return { kind: "null", line: startLine };
+            return { kind: "null", line: startLine, file: this.file };
         }
         if (word === "NaN" || word === "Infinity") {
             this.fail("NaN and Infinity are not valid JSON", startLine, startCol);

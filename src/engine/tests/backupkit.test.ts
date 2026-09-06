@@ -1018,12 +1018,22 @@ describe("Backupkit", () => {
     });
 
     it("stop aborts an in-flight transfer and its report lands as aborted", async () => {
+        // Wait for the transfer to ACTUALLY be in flight, not for a duration
+        // that is usually long enough - the same flake the one-shot case below
+        // documents: under a loaded parallel run a fixed 100 ms sleep landed
+        // stop() before the scheduler had reached the transfer, so the run
+        // finished normally and no "aborted" report was ever written.
+        let started: () => void = () => {};
+        const inFlight = new Promise<void>((resolve) => {
+            started = resolve;
+        });
         const fixture = track(
             await makeKit({
                 deps: {
                     tickMs: 20,
                     transfer: async (params) =>
                         new Promise((_resolve, reject) => {
+                            started();
                             params.signal?.addEventListener("abort", () =>
                                 reject(new TransferError("transfer aborted", { exitCode: null, retriable: false, stderrTail: "" })),
                             );
@@ -1032,8 +1042,7 @@ describe("Backupkit", () => {
             }),
         );
         const loop = fixture.kit.start();
-        // Wait until the transfer is in flight (the partial claim happened).
-        await new Promise((resolve) => setTimeout(resolve, 100));
+        await inFlight;
         await fixture.kit.stop();
         await loop;
         const files = await readdir(join(fixture.stateDir, "runs", "web"));
