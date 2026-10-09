@@ -344,7 +344,7 @@ The `authorized_keys` lines that point at the script come from `backupkit check`
 
 `run`, `prune`, `check`, `service`, and `logs` have no `--json`. The stored run reports, the printed prune plan, and journald's `-o json` already cover the machine-readable side.
 
-Everything else is plain text, aligned with padding - no table library and no ANSI color, so it all stays greppable. Errors go to stderr as `Error: message`; the machine-readable part is the exit code, not a prefix a person has to read past. Stack traces appear only when `logging.level` is `debug`.
+Everything else is plain text, aligned with padding - no table library, so it all stays greppable. The one exception is the alert label: on a terminal, `Error:`, `Warning:` and `FAILED` are printed in bold red so a problem cannot scroll past unnoticed. Only the label is colored, and only when the stream is a terminal - piped output, `logging.file` and the journal stay plain - and setting [`NO_COLOR`](https://no-color.org) turns it off. Errors go to stderr as `Error: message`; the machine-readable part is the exit code, not a prefix a person has to read past. Stack traces appear only when `logging.level` is `debug`.
 
 ## Log lines: two audiences
 

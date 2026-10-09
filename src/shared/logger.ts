@@ -32,6 +32,7 @@
  * renderings are of the same event, chosen by who is reading.
  */
 
+import { paintAlert, wantsColor } from "./format.js";
 import { sanitize } from "./sanitize.js";
 
 /** Log verbosity level, most to least severe. */
@@ -47,6 +48,8 @@ const LEVEL_LABEL: Record<LogLevel, string> = { error: "ERROR", warn: "WARN", in
 export interface LogStream {
     /** Write one chunk of text (a full line including its trailing newline). */
     write(chunk: string): unknown;
+    /** True when a terminal is on the other end (as on process.stderr); human lines then get a red alert label. */
+    isTTY?: boolean;
 }
 
 /** Extra structured key=value fields appended to a log line. */
@@ -143,7 +146,9 @@ const HINT_FIELD = "hint";
 
 /**
  * The console line for a person: `<target>: [Error: |Warning: ]<message>[ -
- * <cause>][. Fix: <hint>]`. A SENTENCE, and nothing else.
+ * <cause>][. Fix: <hint>]`. A SENTENCE, and nothing else. With `color` the
+ * `Error:`/`Warning:` label is painted bold red - the caller decides, from the
+ * stream it writes to, whether a terminal is there to see it.
  *
  * The TARGET LEADS, because it is the one thing that makes a line findable when
  * several targets are running: the eye follows a flush-left column, and
@@ -168,6 +173,7 @@ function humanLine(
     message: string,
     fields: LogFields | undefined,
     context: Readonly<Record<string, string | number | boolean>>,
+    color: boolean,
 ): string {
     const parts: string[] = [];
     // A field beats the sticky context: a logger scoped to one target can still
@@ -176,10 +182,9 @@ function humanLine(
     if (target !== undefined) {
         parts.push(`${sanitize(String(target))}:`);
     }
-    if (level === "error") {
-        parts.push("Error:");
-    } else if (level === "warn") {
-        parts.push("Warning:");
+    const label = level === "error" ? "Error:" : level === "warn" ? "Warning:" : null;
+    if (label !== null) {
+        parts.push(color ? paintAlert(label) : label);
     }
     parts.push(sanitize(message));
     for (const key of CAUSE_FIELDS) {
@@ -300,6 +305,6 @@ export class Logger {
             return;
         }
         const stream = level === "error" || level === "warn" ? this.options.stderr : this.options.stdout;
-        stream.write((this.options.human ? humanLine(level, message, fields, this.context) : line) + "\n");
+        stream.write((this.options.human ? humanLine(level, message, fields, this.context, wantsColor(stream)) : line) + "\n");
     }
 }

@@ -5,8 +5,11 @@ import {
     formatEndpoint,
     formatUtc,
     isValidBwlimit,
+    paintAlert,
+    paintAlertLine,
     parseMinFree,
     parseSize,
+    wantsColor,
 } from "../format.js";
 import { formatSnapshotName } from "../snapshot-name.js";
 import type { Endpoint, ResolvedRemote } from "../types.js";
@@ -177,5 +180,45 @@ describe("formatEndpoint", () => {
         expect(formatEndpoint(endpoint)).toBe("myserver:/var/www");
         expect(formatEndpoint(endpoint)).not.toContain("@");
         expect(formatEndpoint(endpoint)).not.toContain("[");
+    });
+});
+
+describe("wantsColor", () => {
+    it("is true only for a TTY with NO_COLOR unset or empty", () => {
+        expect(wantsColor({ isTTY: true }, {})).toBe(true);
+        expect(wantsColor({ isTTY: true }, { NO_COLOR: "" })).toBe(true);
+    });
+
+    it("is false for a pipe, a file, or a stream that does not say", () => {
+        expect(wantsColor({ isTTY: false }, {})).toBe(false);
+        expect(wantsColor({}, {})).toBe(false);
+    });
+
+    it("honours a non-empty NO_COLOR even on a TTY", () => {
+        expect(wantsColor({ isTTY: true }, { NO_COLOR: "1" })).toBe(false);
+    });
+});
+
+describe("paintAlert / paintAlertLine", () => {
+    const red = (label: string) => `\x1b[1;31m${label}\x1b[0m`;
+
+    it("wraps a label in bold red and resets after it", () => {
+        expect(paintAlert("Error:")).toBe(red("Error:"));
+    });
+
+    it("paints a leading Error: or Warning: and only the label", () => {
+        expect(paintAlertLine("Error: config not found")).toBe(`${red("Error:")} config not found`);
+        expect(paintAlertLine("Warning: jail drift")).toBe(`${red("Warning:")} jail drift`);
+    });
+
+    it("paints the FAILED of a target row and of the check summary", () => {
+        expect(paintAlertLine("web1@srv: FAILED - key refused")).toBe(`web1@srv: ${red("FAILED")} - key refused`);
+        expect(paintAlertLine("Check FAILED - 2 problems above")).toBe(`Check ${red("FAILED")} - 2 problems above`);
+    });
+
+    it("leaves every other line untouched, including a label that is not where labels go", () => {
+        for (const line of ["", "web1: backup finished in 3s", "web1: ran - Error: x", "an Error: mid-sentence", "web1: FAILEDX", "a b: FAILED"]) {
+            expect(paintAlertLine(line)).toBe(line);
+        }
     });
 });

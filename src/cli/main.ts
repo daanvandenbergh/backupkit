@@ -19,6 +19,7 @@ import { loadConfig } from "../config/config.js";
 import { Backupkit } from "../engine/backupkit.js";
 import { exec } from "../exec/exec.js";
 import { describeError, isBackupkitError } from "../shared/errors.js";
+import { paintAlert, paintAlertLine, wantsColor } from "../shared/format.js";
 import { checkCommand } from "./internal/commands/check.js";
 import { daemonCommand } from "./internal/commands/daemon.js";
 import { initCommand } from "./internal/commands/init.js";
@@ -77,8 +78,8 @@ function packageVersion(): string {
 /** Build the production dependency set (real fs, real exec, real engine). */
 export function defaultDeps(): CliDeps {
     const deps: CliDeps = {
-        stdout: (line) => process.stdout.write(line + "\n"),
-        stderr: (line) => process.stderr.write(line + "\n"),
+        stdout: (line) => process.stdout.write((wantsColor(process.stdout) ? paintAlertLine(line) : line) + "\n"),
+        stderr: (line) => process.stderr.write((wantsColor(process.stderr) ? paintAlertLine(line) : line) + "\n"),
         platform: process.platform,
         euid: process.getuid?.() ?? null,
         env: process.env,
@@ -233,7 +234,8 @@ if (isEntryPoint(import.meta.url, process.argv[1])) {
             process.exitCode = code;
         },
         (error) => {
-            process.stderr.write(`Error: ${describeError(error)}\n`);
+            const label = wantsColor(process.stderr) ? paintAlert("Error:") : "Error:";
+            process.stderr.write(`${label} ${describeError(error)}\n`);
             process.exitCode = 1;
         },
     );

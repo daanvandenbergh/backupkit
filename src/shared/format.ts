@@ -169,3 +169,34 @@ export function formatEndpoint(endpoint: Endpoint): string {
     const host = remote.host.includes(":") ? `[${remote.host}]` : remote.host;
     return `${remote.user}@${host}:${endpoint.path}`;
 }
+
+/**
+ * True when ANSI color may be written to this stream: a terminal is on the
+ * other end, and the user has not opted out with a non-empty `NO_COLOR`
+ * (https://no-color.org). A pipe, a file, the journal, launchd's log - none
+ * is a TTY - so those keep the plain bytes they are grepped for.
+ */
+export function wantsColor(stream: { isTTY?: boolean }, env: Readonly<Record<string, string | undefined>> = process.env): boolean {
+    return stream.isTTY === true && (env.NO_COLOR ?? "") === "";
+}
+
+/**
+ * The CLI's alert labels, where its lines put them: a leading `Error:` /
+ * `Warning:`, or the `FAILED` of `<target>: FAILED - ...` and `Check FAILED - ...`.
+ */
+const ALERT_LABEL = /^((?:\S+: |Check )?)(Error:|Warning:|FAILED\b)/;
+
+/**
+ * Paint an alert label bold red so it cannot be scrolled past: `Error:` and
+ * `Warning:` alike, because a warning here (a key the agent does not hold, a
+ * backoff) is exactly the line a reader keeps missing. Only the label is
+ * painted, so the sentence stays copy-pastable.
+ */
+export function paintAlert(label: string): string {
+    return `\x1b[1;31m${label}\x1b[0m`;
+}
+
+/** Paint the alert label of a CLI line (see `ALERT_LABEL`), if it has one; any other line is returned unchanged. */
+export function paintAlertLine(line: string): string {
+    return line.replace(ALERT_LABEL, (_match, lead: string, label: string) => lead + paintAlert(label));
+}

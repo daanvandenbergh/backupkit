@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { formatUtc } from "../format.js";
 import { Logger, type LoggerOptions } from "../logger.js";
 
@@ -371,5 +371,50 @@ describe("Logger consoleMute", () => {
         logger.warn("shown again");
         expect(stderr.chunks).toHaveLength(1);
         expect(stderr.chunks[0]).toContain("shown again");
+    });
+});
+
+describe("Logger human console colour", () => {
+    afterEach(() => {
+        vi.unstubAllEnvs();
+    });
+
+    /** A captured stream that reports itself as a terminal. */
+    function ttyStream() {
+        return Object.assign(captureStream(), { isTTY: true });
+    }
+
+    it("paints the Error:/Warning: label bold red on a TTY", () => {
+        vi.stubEnv("NO_COLOR", "");
+        const stderr = ttyStream();
+        const { logger } = testLogger({ human: true, stderr });
+        const target = logger.with({ target: "web1" });
+        target.error("cannot use this backup server", { error: "key refused", hint: "ssh-add k" });
+        target.warn("waiting 15m before trying this target again");
+        expect(stderr.chunks).toEqual([
+            "web1: \x1b[1;31mError:\x1b[0m cannot use this backup server - key refused. Fix: ssh-add k\n",
+            "web1: \x1b[1;31mWarning:\x1b[0m waiting 15m before trying this target again\n",
+        ]);
+    });
+
+    it("stays plain when NO_COLOR is set, off a TTY, and in machine mode", () => {
+        vi.stubEnv("NO_COLOR", "1");
+        const muted = ttyStream();
+        testLogger({ human: true, stderr: muted }).logger.error("boom");
+        vi.stubEnv("NO_COLOR", "");
+        const machine = ttyStream();
+        testLogger({ stderr: machine }).logger.error("boom");
+        const { logger, stderr } = testLogger({ human: true });
+        logger.error("boom");
+        expect(muted.chunks).toEqual(["Error: boom\n"]);
+        expect(machine.chunks).toEqual(["2026-08-10T03:15:00.123Z ERROR boom\n"]);
+        expect(stderr.chunks).toEqual(["Error: boom\n"]);
+    });
+
+    it("never colours the file sink, even when the console is a TTY", () => {
+        vi.stubEnv("NO_COLOR", "");
+        const lines: string[] = [];
+        testLogger({ human: true, stderr: ttyStream(), fileSink: (line) => lines.push(line) }).logger.warn("w");
+        expect(lines).toEqual(["2026-08-10T03:15:00.123Z WARN w"]);
     });
 });
