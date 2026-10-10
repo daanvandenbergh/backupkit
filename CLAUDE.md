@@ -70,7 +70,7 @@ In every chat text response address me by my name, Daan.
 ## Releasing
 Publishing happens on GitHub, not locally: pushing a `v*` tag runs `.github/workflows/publish.yml`,
 which publishes to npm via trusted publishing (no token, no 2FA). Never `npm publish` locally.
-- `npm run release` - bump the patch version, tag it, push `main` with the tag.
+- `npm run release` - commit all changes ("Updates"), bump the patch version, tag it, push `main` with the tag.
 - Minor/major: `npm version minor` (or `major`), then `git push -u origin main --follow-tags`.
 - A pushed tag is a published version - never push one unasked.
 
