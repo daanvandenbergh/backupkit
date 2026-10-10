@@ -3,6 +3,10 @@
     "version": "2.5.0",
     "description": "Backup toolkit for Node.js/TypeScript projects.",
     "license": "UNLICENSED",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/daanvandenbergh/backupkit.git"
+    },
     "type": "module",
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
@@ -28,9 +32,10 @@
         "test:watch": "vitest",
         "typecheck": "tsc --noEmit",
         "prepublishOnly": "npm run build",
-        "push-and-publish": "npm run build && git add -A && git commit -m 'Updates' && npm version patch && npm publish && git push -u origin main",
+        "push-and-publish": "npm run build && git add -A && git commit -m 'Updates' && npm run release",
         "docs": "npm run build && npm --prefix docs run dev",
-        "docs:build": "npm run build && npm --prefix docs run build"
+        "docs:build": "npm run build && npm --prefix docs run build",
+        "release": "npm version patch && git push -u origin main --follow-tags"
     },
     "engines": {
         "node": ">=20"

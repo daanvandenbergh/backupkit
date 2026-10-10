@@ -1,0 +1,39 @@
+# Publish to npm when a version tag (vX.Y.Z, made by `npm version`) is pushed - `npm run release`.
+#
+# Uses npm trusted publishing (OIDC): no token, no 2FA prompt. Requires a one-time setup on
+# npmjs.com -> package Settings -> Trusted Publisher -> GitHub Actions, with this repo and the
+# workflow filename `publish.yml`.
+
+name: Publish to npm
+
+on:
+    push:
+        tags: ['v*']
+
+permissions:
+    contents: read
+    id-token: write
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Set up Node
+              uses: actions/setup-node@v7
+              with:
+                  # Trusted publishing needs npm >= 11.5.1, which Node 24 ships.
+                  node-version: 24
+                  registry-url: https://registry.npmjs.org
+                  cache: npm
+
+            - name: Install dependencies
+              run: npm ci
+
+            - name: Test
+              run: npm run test --if-present
+
+            - name: Publish (prepublishOnly builds, where the package has a build)
+              run: npm publish

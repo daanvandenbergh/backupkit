@@ -68,8 +68,11 @@ so a change is not done until both are green. Vitest collects `src/**/tests/**/*
 In every chat text response address me by my name, Daan.
 
 ## Releasing
-Bump `version` in `package.json` and `npm publish` (public scope; `prepublishOnly` builds). The
-user publishes and pushes - never do either unasked.
+Publishing happens on GitHub, not locally: pushing a `v*` tag runs `.github/workflows/publish.yml`,
+which publishes to npm via trusted publishing (no token, no 2FA). Never `npm publish` locally.
+- `npm run release` - bump the patch version, tag it, push `main` with the tag.
+- Minor/major: `npm version minor` (or `major`), then `git push -u origin main --follow-tags`.
+- A pushed tag is a published version - never push one unasked.
 
 ## The public contract stays in lockstep
 `README.md` and `docs/` are this package's contract with its users - the imported `docs_parity`
